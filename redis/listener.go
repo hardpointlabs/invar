@@ -2,7 +2,9 @@ package redis
 
 import (
 	"log"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/tidwall/redcon"
@@ -46,12 +48,35 @@ func Serve(db *badger.DB) {
 				}
 				conn.WriteInt(count)
 			case "set":
-				if checkArgCount(cmd, 4) {
+				if len(cmd.Args) != 3 {
 					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
 					return
 				}
 				err := db.Update(func(txn *badger.Txn) error {
 					e := badger.NewEntry(cmd.Args[1], cmd.Args[2])
+					err := txn.SetEntry(e)
+					return err
+				})
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return
+				}
+
+				conn.WriteString("OK")
+			case "setex":
+				if len(cmd.Args) != 4 {
+					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
+					return
+				}
+				i, err := strconv.Atoi(string(cmd.Args[3]))
+				if err != nil {
+					conn.WriteError("Error")
+					return
+				}
+
+				expTime := time.Duration(i) * time.Second
+				err = db.Update(func(txn *badger.Txn) error {
+					e := badger.NewEntry(cmd.Args[1], cmd.Args[2]).WithTTL(expTime)
 					err := txn.SetEntry(e)
 					return err
 				})
@@ -172,8 +197,4 @@ func Serve(db *badger.DB) {
 	if err != nil {
 		log.Fatal(err)
 	}
-}
-
-func checkArgCount(args redcon.Command, expected int) bool {
-	return len(args.Args) == expected
 }
