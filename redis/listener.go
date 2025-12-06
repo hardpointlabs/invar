@@ -86,6 +86,29 @@ func Serve(db *badger.DB) {
 				}
 
 				conn.WriteString("OK")
+			case "strlen":
+				if len(cmd.Args) != 2 {
+					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
+					return
+				}
+				_ = db.View(func(txn *badger.Txn) error {
+					item, err := txn.Get(cmd.Args[1])
+					if err != nil {
+						conn.WriteInt(0)
+						return nil
+					}
+					var valCopy []byte
+					err = item.Value(func(val []byte) error {
+						valCopy = append([]byte{}, val...)
+						return nil
+					})
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return err
+					}
+					conn.WriteInt(len(valCopy))
+					return nil
+				})
 			case "get":
 				if len(cmd.Args) != 2 {
 					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
