@@ -276,6 +276,32 @@ func Serve(db *badger.DB) {
 				} else {
 					conn.WriteInt(1)
 				}
+			case "ttl":
+				if len(cmd.Args) != 2 {
+					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
+					return
+				}
+				_ = db.View(func(txn *badger.Txn) error {
+					item, err := txn.Get(cmd.Args[1])
+					if err != nil {
+						if err == badger.ErrKeyNotFound {
+							conn.WriteInt(-2)
+							return nil
+						}
+						conn.WriteError("ERR " + err.Error())
+						return nil
+					}
+					ttl := item.ExpiresAt()
+					// redis expects the TTL in seconds
+					now := uint64(time.Now().UnixNano() / 1e6)
+					remaining := int64(ttl) - int64(now)
+					if remaining < 0 {
+						conn.WriteInt(-2)
+						return nil
+					}
+					conn.WriteInt(int(remaining / 1000))
+					return nil
+				})
 			case "del":
 				if len(cmd.Args) != 2 {
 					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
