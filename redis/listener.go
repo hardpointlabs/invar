@@ -204,6 +204,46 @@ func Serve(db *badger.DB) {
 					conn.WriteBulk(valCopy)
 					return nil
 				})
+			case "rename":
+				if len(cmd.Args) != 3 {
+					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
+					return
+				}
+
+				_ = db.Update(func(txn *badger.Txn) error {
+					item, err := txn.Get(cmd.Args[1])
+					if err != nil {
+						conn.WriteError("ERR no such key")
+						return nil
+					}
+					var valCopy []byte
+					err = item.Value(func(val []byte) error {
+						valCopy = append([]byte{}, val...)
+						return nil
+					})
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return err
+					}
+
+					// Set the new key
+					e := badger.NewEntry(cmd.Args[2], valCopy)
+					err = txn.SetEntry(e)
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return err
+					}
+
+					// Delete the old key
+					err = txn.Delete(cmd.Args[1])
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return err
+					}
+
+					conn.WriteString("OK")
+					return nil
+				})
 			case "setnx":
 				if len(cmd.Args) != 3 {
 					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
