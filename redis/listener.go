@@ -75,6 +75,43 @@ func getKeys(conn redcon.Conn, db *badger.DB, keys ...[]byte) {
 	})
 }
 
+func moveKey(conn redcon.Conn, db *badger.DB, key []byte, targetDb int) {
+	_ = db.Update(func(txn *badger.Txn) error {
+		item, err := txn.Get(rawKeyPrefix(key, currentDb(conn)))
+		if err != nil {
+			conn.WriteInt(0)
+			return nil
+		}
+		var valCopy []byte
+		err = item.Value(func(val []byte) error {
+			valCopy = append([]byte{}, val...)
+			return nil
+		})
+		if err != nil {
+			conn.WriteError("ERR " + err.Error())
+			return err
+		}
+
+		// Set the new key
+		e := badger.NewEntry(rawKeyPrefix(key, targetDb), valCopy)
+		err = txn.SetEntry(e)
+		if err != nil {
+			conn.WriteError("ERR " + err.Error())
+			return err
+		}
+
+		// Delete the old key
+		err = txn.Delete(rawKeyPrefix(key, currentDb(conn)))
+		if err != nil {
+			conn.WriteError("ERR " + err.Error())
+			return err
+		}
+
+		conn.WriteInt(1)
+		return nil
+	})
+}
+
 func Serve(db *badger.DB) {
 	var ps redcon.PubSub
 	go log.Printf("started redis listener at %s", addr)
@@ -320,7 +357,7 @@ func Serve(db *badger.DB) {
 						return err
 					}
 
-					err = txn.Delete(cmd.Args[1])
+					err = txn.Delete(rawKeyPrefix(cmd.Args[1], currentDb(conn)))
 					if err != nil {
 						log.Println("getdel error:", err)
 						conn.WriteNull()
@@ -330,7 +367,18 @@ func Serve(db *badger.DB) {
 					return nil
 				})
 			case "move":
-				conn.WriteError("ERR MOVE not implemented")
+				if len(cmd.Args) != 3 {
+					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
+					return
+				}
+
+				targetDb, err := strconv.Atoi(string(cmd.Args[2]))
+				if err != nil || targetDb < 0 {
+					conn.WriteError("ERR invalid DB index")
+					return
+				}
+
+				moveKey(conn, db, cmd.Args[1], targetDb)
 			case "rename":
 				if len(cmd.Args) != 3 {
 					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
@@ -362,7 +410,7 @@ func Serve(db *badger.DB) {
 					}
 
 					// Delete the old key
-					err = txn.Delete(cmd.Args[1])
+					err = txn.Delete(rawKeyPrefix(cmd.Args[1], currentDb(conn)))
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return err
@@ -405,7 +453,7 @@ func Serve(db *badger.DB) {
 								return err
 							}
 							// Delete the old key
-							err = txn.Delete(cmd.Args[1])
+							err = txn.Delete(rawKeyPrefix(cmd.Args[1], currentDb(conn)))
 							if err != nil {
 								log.Println("I dunnot, tried to delete")
 								conn.WriteError("ERR " + err.Error())
@@ -556,7 +604,7 @@ func Serve(db *badger.DB) {
 				var numUpdated = 0
 				err := db.Update(func(txn *badger.Txn) error {
 					for _, key := range cmd.Args[1:] {
-						err := txn.Delete(key)
+						err := txn.Delete(rawKeyPrefix(key, currentDb(conn)))
 						if err != nil && err != badger.ErrKeyNotFound {
 							conn.WriteError("ERR " + err.Error())
 							return err
