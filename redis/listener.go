@@ -51,6 +51,30 @@ func setCurrentDb(conn redcon.Conn, dbIndex int) {
 	syncMap.Store(connectionId(conn), dbIndex)
 }
 
+func getKeys(conn redcon.Conn, db *badger.DB, keys ...[]byte) {
+	conn.WriteArray(len(keys))
+	_ = db.View(func(txn *badger.Txn) error {
+		for _, key := range keys {
+			item, err := txn.Get(rawKeyPrefix(key, currentDb(conn)))
+			if err != nil {
+				conn.WriteNull()
+				continue
+			}
+			var valCopy []byte
+			err = item.Value(func(val []byte) error {
+				valCopy = append([]byte{}, val...)
+				return nil
+			})
+			if err != nil {
+				conn.WriteError("ERR " + err.Error())
+				return err
+			}
+			conn.WriteBulk(valCopy)
+		}
+		return nil
+	})
+}
+
 func Serve(db *badger.DB) {
 	var ps redcon.PubSub
 	go log.Printf("started redis listener at %s", addr)
@@ -231,6 +255,12 @@ func Serve(db *badger.DB) {
 					conn.WriteBulk(valCopy)
 					return nil
 				})
+			case "mget":
+				if len(cmd.Args) < 2 {
+					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
+					return
+				}
+				getKeys(conn, db, cmd.Args[1:]...)
 			case "getset":
 				if len(cmd.Args) != 3 {
 					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
