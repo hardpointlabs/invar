@@ -272,6 +272,55 @@ func Serve(db *badger.DB) {
 					conn.WriteInt(len(valCopy))
 					return nil
 				})
+			case "substr":
+				if len(cmd.Args) != 4 {
+					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
+					return
+				}
+				start, err := strconv.Atoi(string(cmd.Args[2]))
+				if err != nil {
+					conn.WriteError("ERR value is not an integer or out of range")
+					return
+				}
+				end, err := strconv.Atoi(string(cmd.Args[3]))
+				if err != nil {
+					conn.WriteError("ERR value is not an integer or out of range")
+					return
+				}
+				_ = db.View(func(txn *badger.Txn) error {
+					item, err := txn.Get(rawKeyPrefix(cmd.Args[1], currentDb(conn)))
+					if err != nil {
+						conn.WriteNull()
+						return nil
+					}
+					var valCopy []byte
+					err = item.Value(func(val []byte) error {
+						valCopy = append([]byte{}, val...)
+						return nil
+					})
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return nil
+					}
+					if start < 0 {
+						start = len(valCopy) + start
+					}
+					if end < 0 {
+						end = len(valCopy) + end
+					}
+					if start < 0 {
+						start = 0
+					}
+					if end >= len(valCopy) {
+						end = len(valCopy) - 1
+					}
+					if start > end || start >= len(valCopy) {
+						conn.WriteBulk([]byte{})
+						return nil
+					}
+					conn.WriteBulk(valCopy[start : end+1])
+					return nil
+				})
 			case "get":
 				if len(cmd.Args) != 2 {
 					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
