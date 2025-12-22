@@ -14,12 +14,33 @@ import (
 
 var addr = ":6379"
 
+const internalPrefix = "-"
 const prefixSeparator = ":"
+
+// public redis types for LSM tree entries (not private/internal types)
+// string, list, set, zset, hash, stream, and vectorset
+type redisValueType byte
+
+const (
+	RedisString redisValueType = iota
+	RedisList
+	RedisSet
+	RedisSortedSet
+	RedisHash
+	RedisStream
+	RedisVectorSet
+)
 
 func currentDbPrefix(conn redcon.Conn) []byte {
 	return []byte(strconv.Itoa(currentDb(conn)) + prefixSeparator)
 }
 
+// prefixer for internal keys, including the database slot
+func currentDbInternalPrefix(conn redcon.Conn) []byte {
+	return []byte(internalPrefix + strconv.Itoa(currentDb(conn)) + prefixSeparator)
+}
+
+// prefixer for publicly accessible keys, including the database slot
 func rawKeyPrefix(keyName []byte, dbSlot int) []byte {
 	return append([]byte(strconv.Itoa(dbSlot)+prefixSeparator), keyName...)
 }
@@ -740,6 +761,11 @@ func Serve(db *badger.DB) {
 					return
 				}
 				conn.WriteInt(numUpdated)
+			case "rpush":
+				if len(cmd.Args) < 3 {
+					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
+					return
+				}
 			case "publish":
 				if len(cmd.Args) != 3 {
 					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
