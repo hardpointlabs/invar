@@ -114,7 +114,7 @@ func moveKey(conn redcon.Conn, db *badger.DB, key []byte, targetDb int) {
 		}
 
 		// Set the new key
-		e := badger.NewEntry(rawKeyPrefix(key, targetDb), valCopy)
+		e := badger.NewEntry(rawKeyPrefix(key, targetDb), valCopy).WithMeta(item.UserMeta())
 		err = txn.SetEntry(e)
 		if err != nil {
 			conn.WriteError("ERR " + err.Error())
@@ -157,7 +157,7 @@ func incrementKey(conn redcon.Conn, db *badger.DB, key []byte, amount int64) {
 			return err
 		}
 		currentValue += amount
-		entry := badger.NewEntry(rawKeyPrefix(key, currentDb(conn)), []byte(strconv.FormatInt(currentValue, 10)))
+		entry := badger.NewEntry(rawKeyPrefix(key, currentDb(conn)), []byte(strconv.FormatInt(currentValue, 10))).WithMeta(item.UserMeta())
 		err = txn.SetEntry(entry)
 		if err != nil {
 			conn.WriteError("ERR " + err.Error())
@@ -272,7 +272,7 @@ func Serve(db *badger.DB) {
 					return
 				}
 				err := db.Update(func(txn *badger.Txn) error {
-					e := badger.NewEntry(rawKeyPrefix(cmd.Args[1], currentDb(conn)), cmd.Args[2])
+					e := badger.NewEntry(rawKeyPrefix(cmd.Args[1], currentDb(conn)), cmd.Args[2]).WithMeta(byte(RedisString))
 					err := txn.SetEntry(e)
 					return err
 				})
@@ -295,7 +295,7 @@ func Serve(db *badger.DB) {
 
 				expTime := time.Duration(i) * time.Second
 				err = db.Update(func(txn *badger.Txn) error {
-					e := badger.NewEntry(rawKeyPrefix(cmd.Args[1], currentDb(conn)), cmd.Args[2]).WithTTL(expTime)
+					e := badger.NewEntry(rawKeyPrefix(cmd.Args[1], currentDb(conn)), cmd.Args[2]).WithTTL(expTime).WithMeta(byte(RedisString))
 					err := txn.SetEntry(e)
 					return err
 				})
@@ -314,6 +314,10 @@ func Serve(db *badger.DB) {
 					item, err := txn.Get(rawKeyPrefix(cmd.Args[1], currentDb(conn)))
 					if err != nil {
 						conn.WriteInt(0)
+						return nil
+					}
+					if item.UserMeta() != byte(RedisString) {
+						conn.WriteError("WRONGTYPE Operation against a key holding the wrong kind of value")
 						return nil
 					}
 					var valCopy []byte
@@ -347,6 +351,10 @@ func Serve(db *badger.DB) {
 					item, err := txn.Get(rawKeyPrefix(cmd.Args[1], currentDb(conn)))
 					if err != nil {
 						conn.WriteNull()
+						return nil
+					}
+					if item.UserMeta() != byte(RedisString) {
+						conn.WriteError("WRONGTYPE Operation against a key holding the wrong kind of value")
 						return nil
 					}
 					var valCopy []byte
@@ -388,6 +396,10 @@ func Serve(db *badger.DB) {
 						conn.WriteNull()
 						return nil
 					}
+					if item.UserMeta() != byte(RedisString) {
+						conn.WriteError("WRONGTYPE Operation against a key holding the wrong kind of value")
+						return nil
+					}
 					var valCopy []byte
 					err = item.Value(func(val []byte) error {
 						valCopy = append([]byte{}, val...)
@@ -415,7 +427,7 @@ func Serve(db *badger.DB) {
 					item, err := txn.Get(rawKeyPrefix(cmd.Args[1], currentDb(conn)))
 					if err != nil {
 						// Key does not exist, just set the new value
-						e := badger.NewEntry(rawKeyPrefix(cmd.Args[1], currentDb(conn)), cmd.Args[2])
+						e := badger.NewEntry(rawKeyPrefix(cmd.Args[1], currentDb(conn)), cmd.Args[2]).WithMeta(byte(RedisString))
 						err = txn.SetEntry(e)
 						if err != nil {
 							conn.WriteError("ERR " + err.Error())
@@ -435,7 +447,7 @@ func Serve(db *badger.DB) {
 					}
 
 					// Set the new value
-					e := badger.NewEntry(rawKeyPrefix(cmd.Args[1], currentDb(conn)), cmd.Args[2])
+					e := badger.NewEntry(rawKeyPrefix(cmd.Args[1], currentDb(conn)), cmd.Args[2]).WithMeta(byte(RedisString))
 					err = txn.SetEntry(e)
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
@@ -453,6 +465,10 @@ func Serve(db *badger.DB) {
 					item, err := txn.Get(rawKeyPrefix(cmd.Args[1], currentDb(conn)))
 					if err != nil {
 						conn.WriteNull()
+						return nil
+					}
+					if item.UserMeta() != byte(RedisString) {
+						conn.WriteError("WRONGTYPE Operation against a key holding the wrong kind of value")
 						return nil
 					}
 					var valCopy []byte
@@ -510,7 +526,7 @@ func Serve(db *badger.DB) {
 					}
 
 					// Set the new key
-					e := badger.NewEntry(rawKeyPrefix(cmd.Args[2], currentDb(conn)), valCopy)
+					e := badger.NewEntry(rawKeyPrefix(cmd.Args[2], currentDb(conn)), valCopy).WithMeta(item.UserMeta())
 					err = txn.SetEntry(e)
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
@@ -553,7 +569,7 @@ func Serve(db *badger.DB) {
 								return err
 							}
 							// Set the new key
-							e := badger.NewEntry(rawKeyPrefix(cmd.Args[2], currentDb(conn)), valCopy)
+							e := badger.NewEntry(rawKeyPrefix(cmd.Args[2], currentDb(conn)), valCopy).WithMeta(item.UserMeta())
 							err = txn.SetEntry(e)
 							if err != nil {
 								log.Println("something hello")
@@ -593,7 +609,7 @@ func Serve(db *badger.DB) {
 					if err != nil {
 						// key does not exist, set it
 						if err == badger.ErrKeyNotFound {
-							e := badger.NewEntry(rawKeyPrefix(cmd.Args[1], currentDb(conn)), cmd.Args[2])
+							e := badger.NewEntry(rawKeyPrefix(cmd.Args[1], currentDb(conn)), cmd.Args[2]).WithMeta(byte(RedisString))
 							err = txn.SetEntry(e)
 							if err != nil {
 								return err
@@ -695,7 +711,7 @@ func Serve(db *badger.DB) {
 					}
 
 					// Set the new key
-					e := badger.NewEntry(rawKeyPrefix(cmd.Args[2], currentDb(conn)), valCopy).WithTTL(time.Duration(seconds) * time.Second)
+					e := badger.NewEntry(rawKeyPrefix(cmd.Args[2], currentDb(conn)), valCopy).WithTTL(time.Duration(seconds) * time.Second).WithMeta(item.UserMeta())
 					err = txn.SetEntry(e)
 					return err
 				})
@@ -739,6 +755,45 @@ func Serve(db *badger.DB) {
 					return
 				}
 				incrementKey(conn, db, cmd.Args[1], -amount)
+			case "type":
+				if len(cmd.Args) != 2 {
+					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
+					return
+				}
+
+				_ = db.View(func(txn *badger.Txn) error {
+					item, err := txn.Get(rawKeyPrefix(cmd.Args[1], currentDb(conn)))
+					if err != nil {
+						if err == badger.ErrKeyNotFound {
+							conn.WriteString("none")
+							return nil
+						}
+						conn.WriteError("ERR " + err.Error())
+						return nil
+					}
+					meta := item.UserMeta()
+					var typeStr string
+					switch redisValueType(meta) {
+					case RedisString:
+						typeStr = "string"
+					case RedisList:
+						typeStr = "list"
+					case RedisSet:
+						typeStr = "set"
+					case RedisSortedSet:
+						typeStr = "zset"
+					case RedisHash:
+						typeStr = "hash"
+					case RedisStream:
+						typeStr = "stream"
+					case RedisVectorSet:
+						typeStr = "vectorset"
+					default:
+						typeStr = "unknown"
+					}
+					conn.WriteString(typeStr)
+					return nil
+				})
 			case "del":
 				if len(cmd.Args) != 2 {
 					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
@@ -761,11 +816,11 @@ func Serve(db *badger.DB) {
 					return
 				}
 				conn.WriteInt(numUpdated)
-			case "rpush":
-				if len(cmd.Args) < 3 {
-					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
-					return
-				}
+			// case "rpush":
+			// 	if len(cmd.Args) < 3 {
+			// 		conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
+			// 		return
+			// 	}
 			case "publish":
 				if len(cmd.Args) != 3 {
 					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
