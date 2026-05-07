@@ -371,5 +371,196 @@
     "type": "integer",
     "version": "2.0.0",
     "description": "Publish to empty channel"
+  },
+  {
+    "name": "LPUSH",
+    "command": ["LPUSH", "mylist", "world"],
+    "expected": 1,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "Push to left of list"
+  },
+  {
+    "name": "LPUSH multiple",
+    "command": ["LPUSH", "mylist2", "b", "a"],
+    "expected": 2,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "Push multiple to left of list"
+  },
+  {
+    "name": "RPUSH",
+    "command": ["RPUSH", "mylist3", "hello"],
+    "expected": 1,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "Push to right of list"
+  },
+  {
+    "name": "RPUSH multiple",
+    "command": ["RPUSH", "mylist4", "a", "b"],
+    "expected": 2,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "Push multiple to right of list"
+  },
+  {
+    "name": "LLEN",
+    "command": ["LLEN", "mylist"],
+    "expected": 1,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "Get length of list",
+    "setup": [["RPUSH", "mylist", "a"]]
+  },
+  {
+    "name": "LLEN non-existing",
+    "command": ["LLEN", "nonexistent_list"],
+    "expected": 0,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "Get length of non-existing list"
+  },
+  {
+    "name": "LRANGE",
+    "command": ["LRANGE", "mylist5", "0", "-1"],
+    "expected": ["a", "b", "c"],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "Get range from list",
+    "setup": [["RPUSH", "mylist5", "a", "b", "c"]]
+  },
+  {
+    "name": "LRANGE partial",
+    "command": ["LRANGE", "mylist5", "0", "1"],
+    "expected": ["a", "b"],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "Get partial range from list",
+    "setup": [["RPUSH", "mylist5", "a", "b", "c"]]
+  },
+  {
+    "name": "LINDEX",
+    "command": ["LINDEX", "mylist6", "1"],
+    "expected": "b",
+    "type": "bulk_string",
+    "version": "1.0.0",
+    "description": "Get element by index",
+    "setup": [["RPUSH", "mylist6", "a", "b", "c"]]
+  },
+  {
+    "name": "LINDEX out of range",
+    "command": ["LINDEX", "mylist6", "10"],
+    "expected": null,
+    "type": "null",
+    "version": "1.0.0",
+    "description": "Get element by index out of range",
+    "setup": [["RPUSH", "mylist6", "a", "b", "c"]]
+  },
+  {
+    "name": "LPOP",
+    "command": ["LPOP", "mylist7"],
+    "expected": "a",
+    "type": "bulk_string",
+    "version": "1.0.0",
+    "description": "Pop from left of list",
+    "setup": [["RPUSH", "mylist7", "a", "b", "c"]]
+  },
+  {
+    "name": "RPOP",
+    "command": ["RPOP", "mylist8"],
+    "expected": "c",
+    "type": "bulk_string",
+    "version": "1.0.0",
+    "description": "Pop from right of list",
+    "setup": [["RPUSH", "mylist8", "a", "b", "c"]]
+  },
+  {
+    "name": "LSET",
+    "command": ["LSET", "mylist9", "1", "new_b"],
+    "expected": "OK",
+    "type": "simple_string",
+    "version": "1.0.0",
+    "description": "Set element at index",
+    "setup": [["RPUSH", "mylist9", "a", "b", "c"]]
+  },
+  {
+    "name": "LREM",
+    "command": ["LREM", "mylist10", "1", "b"],
+    "expected": 1,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "Remove element from list",
+    "setup": [["RPUSH", "mylist10", "a", "b", "c", "b"]]
+  },
+  {
+    "name": "LTRIM",
+    "command": ["LTRIM", "mylist11", "0", "1"],
+    "expected": "OK",
+    "type": "simple_string",
+    "version": "1.0.0",
+    "description": "Trim list to range",
+    "setup": [["RPUSH", "mylist11", "a", "b", "c", "d"]]
+  },
+  {
+    "name": "LPUSHX existing list",
+    "command": ["LPUSHX", "mylist12", "start"],
+    "expected": 2,
+    "type": "integer",
+    "version": "2.2.0",
+    "description": "Push to left if list exists",
+    "setup": [["RPUSH", "mylist12", "a"]]
+  },
+  {
+    "name": "LPUSHX non-existing list",
+    "command": ["LPUSHX", "nonexistent_list_x", "value"],
+    "expected": 0,
+    "type": "integer",
+    "version": "2.2.0",
+    "description": "Push to left if list exists - non-existing"
+  },
+  {
+    "name": "RPUSHX existing list",
+    "command": ["RPUSHX", "mylist13", "end"],
+    "expected": 2,
+    "type": "integer",
+    "version": "2.2.0",
+    "description": "Push to right if list exists",
+    "setup": [["RPUSH", "mylist13", "a"]]
+  },
+  {
+    "name": "RPUSHX non-existing list",
+    "command": ["RPUSHX", "nonexistent_list_x2", "value"],
+    "expected": 0,
+    "type": "integer",
+    "version": "2.2.0",
+    "description": "Push to right if list exists - non-existing"
+  },
+  {
+    "name": "LINSERT before",
+    "command": ["LINSERT", "mylist14", "BEFORE", "b", "a"],
+    "expected": 3,
+    "type": "integer",
+    "version": "2.0.0",
+    "description": "Insert element before pivot",
+    "setup": [["RPUSH", "mylist14", "b", "c"]]
+  },
+  {
+    "name": "LINSERT after",
+    "command": ["LINSERT", "mylist15", "AFTER", "a", "b"],
+    "expected": 3,
+    "type": "integer",
+    "version": "2.0.0",
+    "description": "Insert element after pivot",
+    "setup": [["RPUSH", "mylist15", "a", "c"]]
+  },
+  {
+    "name": "LINSERT non-existing element",
+    "command": ["LINSERT", "mylist16", "BEFORE", "nonexistent", "x"],
+    "expected": -1,
+    "type": "integer",
+    "version": "2.0.0",
+    "description": "Insert element before non-existing pivot",
+    "setup": [["RPUSH", "mylist16", "a", "b"]]
   }
 ]

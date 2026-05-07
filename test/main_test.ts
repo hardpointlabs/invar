@@ -170,6 +170,44 @@ async function executeCommand(client: RedisClientType, cmd: string[]): Promise<u
       case "bgsave":
         await client.bgSave();
         return "OK";
+      case "lpush":
+        return await client.lPush(args[0], args.slice(1));
+      case "rpush":
+        return await client.rPush(args[0], args.slice(1));
+      case "llen":
+        return await client.lLen(args[0]);
+      case "lrange":
+        return await client.lRange(args[0], parseInt(args[1]), parseInt(args[2]));
+      case "lindex":
+        return await client.lIndex(args[0], parseInt(args[1]));
+      case "lpop":
+        return await client.lPop(args[0]);
+      case "rpop":
+        return await client.rPop(args[0]);
+      case "lset":
+        await client.lSet(args[0], parseInt(args[1]), args[2]);
+        return "OK";
+      case "lrem":
+        return await client.lRem(args[0], parseInt(args[1]), args[2]);
+      case "ltrim":
+        await client.lTrim(args[0], parseInt(args[1]), parseInt(args[2]));
+        return "OK";
+      case "lpushx":
+        try {
+          const result = await client.sendCommand(["LPUSHX", args[0], args[1]]);
+          return result;
+        } catch {
+          return 0;
+        }
+      case "rpushx":
+        try {
+          const result = await client.sendCommand(["RPUSHX", args[0], args[1]]);
+          return result;
+        } catch {
+          return 0;
+        }
+      case "linsert":
+        return await client.lInsert(args[0], args[1].toUpperCase() as "BEFORE" | "AFTER", args[2], args[3]);
       default:
         try {
           const result = await client.sendCommand([cmd[0], ...args]);

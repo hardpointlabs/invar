@@ -41,6 +41,17 @@ func currentDbInternalPrefix(conn redcon.Conn) []byte {
 	return []byte(internalPrefix + strconv.Itoa(currentDb(conn)) + prefixSeparator)
 }
 
+// rawKeyPrefix with explicit db index (for testing)
+func rawKeyPrefixWithDb(keyName []byte, dbSlot int) []byte {
+	return append([]byte(strconv.Itoa(dbSlot)+prefixSeparator), keyName...)
+}
+
+// internalNodeKey with explicit db index (for testing)
+func internalNodeKeyWithDb(listName []byte, nodeKey []byte, dbSlot int) []byte {
+	prefix := append(append([]byte(internalPrefix), []byte(strconv.Itoa(dbSlot)+prefixSeparator)...), ':')
+	return append(append(prefix, listName...), nodeKey...)
+}
+
 // prefixer for publicly accessible keys, including the database slot
 func rawKeyPrefix(keyName []byte, dbSlot int) []byte {
 	return append([]byte(strconv.Itoa(dbSlot)+prefixSeparator), keyName...)
@@ -65,6 +76,9 @@ func connectionId(conn redcon.Conn) uint64 {
 }
 
 func currentDb(conn redcon.Conn) int {
+	if conn == nil {
+		return 0 // default for testing
+	}
 	value, _ := syncMap.LoadOrStore(connectionId(conn), 0)
 	return value.(int)
 }
@@ -821,11 +835,292 @@ func Serve(db *badger.DB) {
 					return
 				}
 				conn.WriteInt(numUpdated)
-			// case "rpush":
-			// 	if len(cmd.Args) < 3 {
-			// 		conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
-			// 		return
-			// 	}
+			case "lpush":
+				if len(cmd.Args) < 3 {
+					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
+					return
+				}
+				err := db.Update(func(txn *badger.Txn) error {
+					_, err := lpush(txn, conn, cmd.Args[1], cmd.Args[2:]...)
+					return err
+				})
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return
+				}
+				db.View(func(txn *badger.Txn) error {
+					size, err := llen(txn, conn, cmd.Args[1])
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return err
+					}
+					conn.WriteInt(size)
+					return nil
+				})
+			case "rpush":
+				if len(cmd.Args) < 3 {
+					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
+					return
+				}
+				err := db.Update(func(txn *badger.Txn) error {
+					_, err := rpush(txn, conn, cmd.Args[1], cmd.Args[2:]...)
+					return err
+				})
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return
+				}
+				db.View(func(txn *badger.Txn) error {
+					size, err := llen(txn, conn, cmd.Args[1])
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return err
+					}
+					conn.WriteInt(size)
+					return nil
+				})
+			case "lpop":
+				if len(cmd.Args) != 2 {
+					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
+					return
+				}
+				var val []byte
+				var dbErr error
+				dbErr = db.Update(func(txn *badger.Txn) error {
+					var err error
+					val, err = lpop(txn, conn, cmd.Args[1])
+					return err
+				})
+				if dbErr != nil {
+					conn.WriteError("ERR " + dbErr.Error())
+					return
+				}
+				if val == nil {
+					conn.WriteNull()
+				} else {
+					conn.WriteBulk(val)
+				}
+			case "rpop":
+				if len(cmd.Args) != 2 {
+					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
+					return
+				}
+				var val []byte
+				var dbErr error
+				dbErr = db.Update(func(txn *badger.Txn) error {
+					var err error
+					val, err = rpop(txn, conn, cmd.Args[1])
+					return err
+				})
+				if dbErr != nil {
+					conn.WriteError("ERR " + dbErr.Error())
+					return
+				}
+				if val == nil {
+					conn.WriteNull()
+				} else {
+					conn.WriteBulk(val)
+				}
+			case "llen":
+				if len(cmd.Args) != 2 {
+					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
+					return
+				}
+				db.View(func(txn *badger.Txn) error {
+					size, err := llen(txn, conn, cmd.Args[1])
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return err
+					}
+					conn.WriteInt(size)
+					return nil
+				})
+			case "lrange":
+				if len(cmd.Args) != 4 {
+					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
+					return
+				}
+				start, err := strconv.Atoi(string(cmd.Args[2]))
+				if err != nil {
+					conn.WriteError("ERR value is not an integer or out of range")
+					return
+				}
+				stop, err := strconv.Atoi(string(cmd.Args[3]))
+				if err != nil {
+					conn.WriteError("ERR value is not an integer or out of range")
+					return
+				}
+				db.View(func(txn *badger.Txn) error {
+					items, err := lrange(txn, conn, cmd.Args[1], start, stop)
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return err
+					}
+					conn.WriteArray(len(items))
+					for _, item := range items {
+						conn.WriteBulk(item)
+					}
+					return nil
+				})
+			case "lindex":
+				if len(cmd.Args) != 3 {
+					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
+					return
+				}
+				index, err := strconv.Atoi(string(cmd.Args[2]))
+				if err != nil {
+					conn.WriteError("ERR value is not an integer or out of range")
+					return
+				}
+				db.View(func(txn *badger.Txn) error {
+					val, err := lindex(txn, conn, cmd.Args[1], index)
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return err
+					}
+					if val == nil {
+						conn.WriteNull()
+					} else {
+						conn.WriteBulk(val)
+					}
+					return nil
+				})
+			case "lset":
+				if len(cmd.Args) != 4 {
+					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
+					return
+				}
+				index, err := strconv.Atoi(string(cmd.Args[2]))
+				if err != nil {
+					conn.WriteError("ERR value is not an integer or out of range")
+					return
+				}
+				err = db.Update(func(txn *badger.Txn) error {
+					return lset(txn, conn, cmd.Args[1], index, cmd.Args[3])
+				})
+				if err != nil {
+					if err == badger.ErrKeyNotFound {
+						conn.WriteError("ERR no such key")
+					} else {
+						conn.WriteError("ERR " + err.Error())
+					}
+					return
+				}
+				conn.WriteString("OK")
+			case "lrem":
+				if len(cmd.Args) != 4 {
+					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
+					return
+				}
+				count, err := strconv.Atoi(string(cmd.Args[2]))
+				if err != nil {
+					conn.WriteError("ERR value is not an integer or out of range")
+					return
+				}
+				var removed int
+				err = db.Update(func(txn *badger.Txn) error {
+					removed, err = lrem(txn, conn, cmd.Args[1], count, cmd.Args[3])
+					return err
+				})
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return
+				}
+				conn.WriteInt(removed)
+			case "ltrim":
+				if len(cmd.Args) != 4 {
+					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
+					return
+				}
+				start, err := strconv.Atoi(string(cmd.Args[2]))
+				if err != nil {
+					conn.WriteError("ERR value is not an integer or out of range")
+					return
+				}
+				stop, err := strconv.Atoi(string(cmd.Args[3]))
+				if err != nil {
+					conn.WriteError("ERR value is not an integer or out of range")
+					return
+				}
+				err = db.Update(func(txn *badger.Txn) error {
+					return ltrim(txn, conn, cmd.Args[1], start, stop)
+				})
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return
+				}
+				conn.WriteString("OK")
+			case "linsert":
+				if len(cmd.Args) != 5 {
+					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
+					return
+				}
+				before := strings.ToLower(string(cmd.Args[2])) == "before"
+				var result int
+				var dbErr error
+				dbErr = db.Update(func(txn *badger.Txn) error {
+					var err error
+					result, err = linsert(txn, conn, cmd.Args[1], before, cmd.Args[3], cmd.Args[4])
+					return err
+				})
+				if dbErr != nil {
+					conn.WriteError("ERR " + dbErr.Error())
+					return
+				}
+				conn.WriteInt(result)
+			case "lpushx":
+				if len(cmd.Args) != 3 {
+					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
+					return
+				}
+				var size int
+				var dbErr error
+				dbErr = db.Update(func(txn *badger.Txn) error {
+					// Check if list exists
+					_, err := txn.Get(rawKeyPrefix(cmd.Args[1], currentDb(conn)))
+					if err == badger.ErrKeyNotFound {
+						size = 0
+						return nil
+					}
+					if err != nil {
+						return err
+					}
+					var newSize uint32
+					newSize, err = lpush(txn, conn, cmd.Args[1], cmd.Args[2])
+					size = int(newSize)
+					return err
+				})
+				if dbErr != nil {
+					conn.WriteError("ERR " + dbErr.Error())
+					return
+				}
+				conn.WriteInt(size)
+			case "rpushx":
+				if len(cmd.Args) != 3 {
+					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
+					return
+				}
+				var size int
+				var dbErr error
+				dbErr = db.Update(func(txn *badger.Txn) error {
+					_, err := txn.Get(rawKeyPrefix(cmd.Args[1], currentDb(conn)))
+					if err == badger.ErrKeyNotFound {
+						size = 0
+						return nil
+					}
+					if err != nil {
+						return err
+					}
+					var newSize uint32
+					newSize, err = rpush(txn, conn, cmd.Args[1], cmd.Args[2])
+					size = int(newSize)
+					return err
+				})
+				if dbErr != nil {
+					conn.WriteError("ERR " + dbErr.Error())
+					return
+				}
+				conn.WriteInt(size)
 			case "publish":
 				if len(cmd.Args) != 3 {
 					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
