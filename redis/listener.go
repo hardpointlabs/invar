@@ -1,13 +1,13 @@
 package redis
 
 import (
-	"log"
 	"math/rand/v2"
 	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/rs/zerolog/log"
 	"github.com/tidwall/redcon"
 )
 
@@ -185,7 +185,7 @@ func incrementKey(conn redcon.Conn, db *badger.DB, key []byte, amount int64) {
 
 func Serve(db *badger.DB) {
 	var ps redcon.PubSub
-	go log.Printf("started redis listener at %s", addr)
+	go log.Info().Msgf("started redis listener at %s", addr)
 	err := redcon.ListenAndServe(addr,
 		func(conn redcon.Conn, cmd redcon.Command) {
 			setContext(conn)
@@ -697,6 +697,6 @@ func Serve(db *badger.DB) {
 		},
 	)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal().Err(err).Msg("")
 	}
 }

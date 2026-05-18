@@ -1,10 +1,10 @@
 package redis
 
 import (
-	"log"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/rs/zerolog/log"
 	"github.com/tidwall/redcon"
 )
 
@@ -220,20 +220,20 @@ func renameNXKey(conn redcon.Conn, db *badger.DB, oldKey, newKey []byte) {
 					return nil
 				})
 				if err != nil {
-					log.Println("fdsdfdsfsd")
+					log.Debug().Msg("rename get err")
 					conn.WriteError("ERR " + err.Error())
 					return err
 				}
 				e := badger.NewEntry(rawKeyPrefix(newKey, currentDb(conn)), valCopy).WithMeta(item.UserMeta())
 				err = txn.SetEntry(e)
 				if err != nil {
-					log.Println("something hello")
+					log.Debug().Msg("rename set err")
 					conn.WriteError("ERR " + err.Error())
 					return err
 				}
 				err = txn.Delete(rawKeyPrefix(oldKey, currentDb(conn)))
 				if err != nil {
-					log.Println("I dunnot, tried to delete")
+					log.Debug().Msg("rename delete err")
 					conn.WriteError("ERR " + err.Error())
 					return err
 				}

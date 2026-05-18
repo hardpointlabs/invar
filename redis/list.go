@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"encoding/binary"
 	"iter"
-	"log"
 	"math/rand/v2"
 	"strconv"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/rs/zerolog/log"
 	"github.com/tidwall/redcon"
 )
 
@@ -164,7 +164,7 @@ func newSentinelNode(listName []byte, head []byte, tail []byte, size uint32, dbS
 // creates a list node entry
 func newListNode(listName []byte, nodeKey []byte, value []byte, next []byte, prev []byte, dbSlot int) *badger.Entry {
 	entryName := internalNodeKey(listName, nodeKey, dbSlot)
-	log.Println("new list node: ", entryName)
+	log.Info().Str("entry", string(entryName)).Msg("new list node")
 	buf := bytes.NewBuffer(nil)
 	buf.Write(value)
 	buf.Write(prev)
