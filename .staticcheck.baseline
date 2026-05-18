@@ -1,4 +1,2 @@
 mongo/listener.go:3:6: type messageHeader is unused (U1000)
 redis/list.go:796:6: func consList is unused (U1000)
-redis/listener.go:39:6: func currentDbInternalPrefix is unused (U1000)
-redis/listener.go:49:6: func internalNodeKeyWithDb is unused (U1000)

@@ -35,20 +35,9 @@ func currentDbPrefix(conn redcon.Conn) []byte {
 	return []byte(strconv.Itoa(currentDb(conn)) + prefixSeparator)
 }
 
-// prefixer for internal keys, including the database slot
-func currentDbInternalPrefix(conn redcon.Conn) []byte {
-	return []byte(internalPrefix + strconv.Itoa(currentDb(conn)) + prefixSeparator)
-}
-
 // rawKeyPrefix with explicit db index (for testing)
 func rawKeyPrefixWithDb(keyName []byte, dbSlot int) []byte {
 	return append([]byte(strconv.Itoa(dbSlot)+prefixSeparator), keyName...)
-}
-
-// internalNodeKey with explicit db index (for testing)
-func internalNodeKeyWithDb(listName []byte, nodeKey []byte, dbSlot int) []byte {
-	prefix := append(append([]byte(internalPrefix), []byte(strconv.Itoa(dbSlot)+prefixSeparator)...), ':')
-	return append(append(prefix, listName...), nodeKey...)
 }
 
 // prefixer for publicly accessible keys, including the database slot
