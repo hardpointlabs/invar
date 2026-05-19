@@ -1,6 +1,7 @@
 package redis
 
 import (
+	"fmt"
 	"math/rand/v2"
 	"strconv"
 	"strings"
@@ -18,7 +19,6 @@ const internalPrefix = "-"
 const prefixSeparator = ":"
 
 // public redis types for LSM tree entries (not private/internal types)
-// string, list, set, zset, hash, stream, and vectorset
 type redisValueType byte
 
 const (
@@ -29,6 +29,7 @@ const (
 	RedisHash
 	RedisStream
 	RedisVectorSet
+	RedisBloom
 )
 
 func currentDbPrefix(conn redcon.Conn) []byte {
@@ -934,6 +935,197 @@ func Serve(db *badger.DB) {
 					return
 				}
 				conn.WriteString("OK")
+			case "bf.reserve":
+				if !checkMinArgs(conn, cmd, 4) {
+					return
+				}
+				errRate, ok := parseFloatArg(conn, cmd.Args[2])
+				if !ok {
+					return
+				}
+				capacity, ok := parseIntArg(conn, cmd.Args[3])
+				if !ok || capacity < 1 {
+					conn.WriteError("ERR capacity must be positive")
+					return
+				}
+				expansion := 2
+				nonScaling := false
+				for i := 4; i < len(cmd.Args); i++ {
+					arg := strings.ToLower(string(cmd.Args[i]))
+					if arg == "expansion" && i+1 < len(cmd.Args) {
+						i++
+						v, ok := parseIntArg(conn, cmd.Args[i])
+						if !ok {
+							return
+						}
+						expansion = v
+					} else if arg == "nonscaling" {
+						nonScaling = true
+					}
+				}
+				err := db.Update(func(txn *badger.Txn) error {
+					return bfreserve(txn, conn, cmd.Args[1], errRate, uint64(capacity), expansion, nonScaling)
+				})
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return
+				}
+				conn.WriteString("OK")
+			case "bf.add":
+				if !checkExactArgs(conn, cmd, 3) {
+					return
+				}
+				var added int
+				err := db.Update(func(txn *badger.Txn) error {
+					var err error
+					added, err = bfadd(txn, conn, cmd.Args[1], cmd.Args[2])
+					return err
+				})
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return
+				}
+				conn.WriteInt(added)
+			case "bf.exists":
+				if !checkExactArgs(conn, cmd, 3) {
+					return
+				}
+				var exists bool
+				err := db.View(func(txn *badger.Txn) error {
+					var err error
+					exists, err = bfexists(txn, conn, cmd.Args[1], cmd.Args[2])
+					return err
+				})
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return
+				}
+				if exists {
+					conn.WriteInt(1)
+				} else {
+					conn.WriteInt(0)
+				}
+			case "bf.madd":
+				if !checkMinArgs(conn, cmd, 3) {
+					return
+				}
+				var results []int
+				err := db.Update(func(txn *badger.Txn) error {
+					var err error
+					results, err = bfmadd(txn, conn, cmd.Args[1], cmd.Args[2:])
+					return err
+				})
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return
+				}
+				conn.WriteArray(len(results))
+				for _, r := range results {
+					conn.WriteInt(r)
+				}
+			case "bf.mexists":
+				if !checkMinArgs(conn, cmd, 3) {
+					return
+				}
+				var results []int
+				err := db.View(func(txn *badger.Txn) error {
+					var err error
+					results, err = bfmexists(txn, conn, cmd.Args[1], cmd.Args[2:])
+					return err
+				})
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return
+				}
+				conn.WriteArray(len(results))
+				for _, r := range results {
+					conn.WriteInt(r)
+				}
+			case "bf.insert":
+				if !checkMinArgs(conn, cmd, 3) {
+					return
+				}
+				info := &bfInsertInfo{}
+				i := 2
+				for i < len(cmd.Args) {
+					arg := strings.ToLower(string(cmd.Args[i]))
+					if arg == "capacity" && i+1 < len(cmd.Args) {
+						i++
+						v, ok := parseIntArg(conn, cmd.Args[i])
+						if !ok {
+							return
+						}
+						info.Capacity = uint64(v)
+					} else if arg == "error" && i+1 < len(cmd.Args) {
+						i++
+						v, ok := parseFloatArg(conn, cmd.Args[i])
+						if !ok {
+							return
+						}
+						info.Error = v
+					} else if arg == "expansion" && i+1 < len(cmd.Args) {
+						i++
+						v, ok := parseIntArg(conn, cmd.Args[i])
+						if !ok {
+							return
+						}
+						info.Expansion = v
+					} else if arg == "nocreate" {
+						info.NoCreate = true
+					} else if arg == "nonscaling" {
+						info.NonScaling = true
+					} else if arg == "items" {
+						i++
+						info.Items = cmd.Args[i:]
+						break
+					} else {
+						conn.WriteError("ERR syntax error at " + string(cmd.Args[i]))
+						return
+					}
+					i++
+				}
+				if len(info.Items) == 0 {
+					conn.WriteError("ERR ITEMS argument required")
+					return
+				}
+				var results []int
+				err := db.Update(func(txn *badger.Txn) error {
+					var err error
+					results, err = bfinsert(txn, conn, cmd.Args[1], info)
+					return err
+				})
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return
+				}
+				conn.WriteArray(len(results))
+				for _, r := range results {
+					conn.WriteInt(r)
+				}
+			case "bf.info":
+				if !checkExactArgs(conn, cmd, 2) {
+					return
+				}
+				db.View(func(txn *badger.Txn) error {
+					info, err := bfinfo(txn, conn, cmd.Args[1])
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return nil
+					}
+					conn.WriteArray(len(info) * 2)
+					for k, v := range info {
+						conn.WriteBulkString(k)
+						switch val := v.(type) {
+						case int:
+							conn.WriteInt64(int64(val))
+						case uint64:
+							conn.WriteInt64(int64(val))
+						default:
+							conn.WriteString(fmt.Sprintf("%v", val))
+						}
+					}
+					return nil
+				})
 			case "publish":
 				if !checkExactArgs(conn, cmd, 3) {
 					return

@@ -55,3 +55,12 @@ func parseInt64Arg(conn redcon.Conn, arg []byte) (int64, bool) {
 	}
 	return i, true
 }
+
+func parseFloatArg(conn redcon.Conn, arg []byte) (float64, bool) {
+	f, err := strconv.ParseFloat(string(arg), 64)
+	if err != nil {
+		conn.WriteError("ERR value is not a float")
+		return 0, false
+	}
+	return f, true
+}

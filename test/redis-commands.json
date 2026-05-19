@@ -819,5 +819,86 @@
     "version": "2.8.9",
     "description": "PFCOUNT on merged HLL returns cardinality",
     "setup": [["PFMERGE", "hll_merged", "hll_merge_a", "hll_merge_b"]]
+  },
+  {
+    "name": "BF.RESERVE creates bloom filter",
+    "command": ["BF.RESERVE", "bf_test1", "0.01", "1000"],
+    "expected": "OK",
+    "type": "simple_string",
+    "version": "1.0.0",
+    "description": "BF.RESERVE creates a new bloom filter",
+    "setup": [["DEL", "bf_test1"]]
+  },
+  {
+    "name": "BF.ADD new element",
+    "command": ["BF.ADD", "bf_add_test", "hello"],
+    "expected": 1,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "BF.ADD returns 1 when element is newly added",
+    "setup": [["DEL", "bf_add_test"]]
+  },
+  {
+    "name": "BF.ADD duplicate element",
+    "command": ["BF.ADD", "bf_add_test", "hello"],
+    "expected": 0,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "BF.ADD returns 0 when element already exists",
+    "setup": [["BF.ADD", "bf_add_test", "hello"]]
+  },
+  {
+    "name": "BF.EXISTS returns 1 for existing element",
+    "command": ["BF.EXISTS", "bf_exists_test", "world"],
+    "expected": 1,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "BF.EXISTS returns 1 when element exists",
+    "setup": [["DEL", "bf_exists_test"], ["BF.ADD", "bf_exists_test", "world"]]
+  },
+  {
+    "name": "BF.EXISTS returns 0 for non-existing element",
+    "command": ["BF.EXISTS", "bf_exists_test", "missing"],
+    "expected": 0,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "BF.EXISTS returns 0 when element does not exist",
+    "setup": [["DEL", "bf_exists_test"]]
+  },
+  {
+    "name": "BF.MADD adds multiple elements",
+    "command": ["BF.MADD", "bf_madd_test", "a", "b", "c"],
+    "expected": [1, 1, 1],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "BF.MADD returns array of 1s for new elements",
+    "setup": [["DEL", "bf_madd_test"]]
+  },
+  {
+    "name": "BF.MEXISTS checks multiple elements",
+    "command": ["BF.MEXISTS", "bf_madd_test", "a", "x", "c"],
+    "expected": [1, 0, 1],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "BF.MEXISTS returns array of 1/0 for existence",
+    "setup": [["DEL", "bf_madd_test"], ["BF.MADD", "bf_madd_test", "a", "b", "c"]]
+  },
+  {
+    "name": "BF.INSERT adds elements with options",
+    "command": ["BF.INSERT", "bf_insert_test", "CAPACITY", "500", "ERROR", "0.001", "ITEMS", "x", "y"],
+    "expected": [1, 1],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "BF.INSERT creates filter and adds items",
+    "setup": [["DEL", "bf_insert_test"]]
+  },
+  {
+    "name": "BF TYPE via TYPE command",
+    "command": ["TYPE", "bf_type_test"],
+    "expected": "bloom",
+    "type": "simple_string",
+    "version": "1.0.0",
+    "description": "TYPE returns 'bloom' for bloom filter keys",
+    "setup": [["DEL", "bf_type_test"], ["BF.ADD", "bf_type_test", "val"]]
   }
 ]
