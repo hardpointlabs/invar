@@ -1,6 +1,6 @@
 # KV Project overview
 
-Hardpoint KV is a data store that runs as a standalone daemon and supports the Redis wire protocol and a small but growing subset of Redis commands (the authoritative reference of Redis commands can be found on the official website at https://redis.io/docs/latest/commands/set/index.html.md). The project is 100% written in golang.
+Hardpoint KV is a data store that runs as a standalone daemon and supports the Redis wire protocol and a small but growing subset of Redis commands (the authoritative reference of Redis commands can be found on the official website at https://redis.io/docs/latest/commands/set/index.html.md). The project is 100% written in golang. You can see the currently supported list of commands in the integration test cases in `./test/redis-commands.json`.
 
 ## Overall structure
 
