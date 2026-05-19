@@ -756,5 +756,68 @@
     "version": "1.0.0",
     "description": "EXISTS works on set keys",
     "setup": [["SADD", "set_exists_test", "val"]]
+  },
+  {
+    "name": "PFADD new element",
+    "command": ["PFADD", "hll_a", "hello", "world"],
+    "expected": 1,
+    "type": "integer",
+    "version": "2.8.9",
+    "description": "PFADD returns 1 when registers are modified",
+    "setup": [["DEL", "hll_a"]]
+  },
+  {
+    "name": "PFADD duplicate element",
+    "command": ["PFADD", "hll_a", "hello"],
+    "expected": 0,
+    "type": "integer",
+    "version": "2.8.9",
+    "description": "PFADD returns 0 when no registers change",
+    "setup": [["PFADD", "hll_a", "hello"]]
+  },
+  {
+    "name": "PFCOUNT single key",
+    "command": ["PFCOUNT", "hll_count_a"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "2.8.9",
+    "description": "PFCOUNT returns positive cardinality",
+    "setup": [["PFADD", "hll_count_a", "a", "b", "c", "d", "e"]]
+  },
+  {
+    "name": "PFCOUNT empty HLL",
+    "command": ["PFCOUNT", "hll_empty"],
+    "expected": 0,
+    "type": "integer",
+    "version": "2.8.9",
+    "description": "PFCOUNT returns 0 for empty HLL",
+    "setup": [["DEL", "hll_empty"]]
+  },
+  {
+    "name": "PFCOUNT non-existent key",
+    "command": ["PFCOUNT", "hll_nonexist"],
+    "expected": 0,
+    "type": "integer",
+    "version": "2.8.9",
+    "description": "PFCOUNT returns 0 for non-existent key",
+    "setup": [["DEL", "hll_nonexist"]]
+  },
+  {
+    "name": "PFMERGE merges HLLs",
+    "command": ["PFMERGE", "hll_merged", "hll_merge_a", "hll_merge_b"],
+    "expected": "OK",
+    "type": "simple_string",
+    "version": "2.8.9",
+    "description": "PFMERGE produces OK",
+    "setup": [["PFADD", "hll_merge_a", "a", "b"], ["PFADD", "hll_merge_b", "c", "d"]]
+  },
+  {
+    "name": "PFCOUNT after PFMERGE",
+    "command": ["PFCOUNT", "hll_merged"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "2.8.9",
+    "description": "PFCOUNT on merged HLL returns cardinality",
+    "setup": [["PFMERGE", "hll_merged", "hll_merge_a", "hll_merge_b"]]
   }
 ]

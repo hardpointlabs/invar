@@ -892,6 +892,48 @@ func Serve(db *badger.DB) {
 					return
 				}
 				conn.WriteInt(count)
+			case "pfadd":
+				if !checkMinArgs(conn, cmd, 2) {
+					return
+				}
+				var updated int
+				err := db.Update(func(txn *badger.Txn) error {
+					var err error
+					updated, err = pfadd(txn, conn, cmd.Args[1], cmd.Args[2:]...)
+					return err
+				})
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return
+				}
+				conn.WriteInt(updated)
+			case "pfcount":
+				if !checkMinArgs(conn, cmd, 2) {
+					return
+				}
+				var count uint64
+				err := db.View(func(txn *badger.Txn) error {
+					var err error
+					count, err = pfcount(txn, conn, cmd.Args[1:]...)
+					return err
+				})
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return
+				}
+				conn.WriteInt64(int64(count))
+			case "pfmerge":
+				if !checkMinArgs(conn, cmd, 2) {
+					return
+				}
+				err := db.Update(func(txn *badger.Txn) error {
+					return pfmerge(txn, conn, cmd.Args[1], cmd.Args[2:]...)
+				})
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return
+				}
+				conn.WriteString("OK")
 			case "publish":
 				if !checkExactArgs(conn, cmd, 3) {
 					return
