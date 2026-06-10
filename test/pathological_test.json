@@ -432,5 +432,70 @@
     "type": "array",
     "version": "1.0.0",
     "setup": [["JSON.SET", "path_mget1", "$", "{\"val\":\"a\"}"], ["JSON.SET", "path_mget2", "$", "{\"val\":\"b\"}"]]
+  },
+  {
+    "name": "JSON.SET FPHA FP16 homogeneous float arrays",
+    "command": ["JSON.SET", "path_fpha16", "$", "[[1,2,3,4e3],[5,6.0,7,8]]", "FPHA", "FP16"],
+    "expected": "OK",
+    "type": "simple_string",
+    "version": "8.8.0",
+    "description": "FPHA FP16 stores homogeneous float arrays with 16-bit precision"
+  },
+  {
+    "name": "JSON.GET FPHA FP16 stored arrays",
+    "command": ["JSON.GET", "path_fpha16", "$"],
+    "expected": "[[1,2,3,4000],[5,6,7,8]]",
+    "type": "bulk_string",
+    "version": "8.8.0",
+    "setup": [["JSON.SET", "path_fpha16", "$", "[[1,2,3,4e3],[5,6.0,7,8]]", "FPHA", "FP16"]]
+  },
+  {
+    "name": "JSON.SET FPHA FP32 with nested object",
+    "command": ["JSON.SET", "path_fpha32", "$", "{\"vec\":[1.5,2.5,3.5]}", "FPHA", "FP32"],
+    "expected": "OK",
+    "type": "simple_string",
+    "version": "8.8.0",
+    "description": "FPHA FP32 with nested float array in object"
+  },
+  {
+    "name": "JSON.GET FPHA FP32 nested object",
+    "command": ["JSON.GET", "path_fpha32", "$"],
+    "expected": "{\"vec\":[1.5,2.5,3.5]}",
+    "type": "bulk_string",
+    "version": "8.8.0",
+    "setup": [["JSON.SET", "path_fpha32", "$", "{\"vec\":[1.5,2.5,3.5]}", "FPHA", "FP32"]]
+  },
+  {
+    "name": "JSON.SET FPHA FP64 (no constraint)",
+    "command": ["JSON.SET", "path_fpha64", "$", "[1.7976931348623157e+308]", "FPHA", "FP64"],
+    "expected": "OK",
+    "type": "simple_string",
+    "version": "8.8.0",
+    "description": "FPHA FP64 accepts max float64"
+  },
+  {
+    "name": "JSON.GET FPHA FP64 stored value",
+    "command": ["JSON.GET", "path_fpha64", "$"],
+    "expected": "[1.7976931348623157e+308]",
+    "type": "bulk_string",
+    "version": "8.8.0",
+    "setup": [["JSON.SET", "path_fpha64", "$", "[1.7976931348623157e+308]", "FPHA", "FP64"]]
+  },
+  {
+    "name": "JSON.SET FPHA FP16 with NX on new key",
+    "command": ["JSON.SET", "path_fpha_nx", "$", "[1,2,3]", "NX", "FPHA", "FP16"],
+    "expected": "OK",
+    "type": "simple_string",
+    "version": "8.8.0",
+    "description": "FPHA FP16 with NX creates new key"
+  },
+  {
+    "name": "JSON.SET FPHA FP16 with XX on existing key",
+    "command": ["JSON.SET", "path_fpha_xx", "$", "[4,5,6]", "XX", "FPHA", "FP16"],
+    "expected": "OK",
+    "type": "simple_string",
+    "version": "8.8.0",
+    "setup": [["JSON.SET", "path_fpha_xx", "$", "[1,2,3]"]],
+    "description": "FPHA FP16 with XX updates existing key"
   }
 ]

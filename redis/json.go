@@ -3,6 +3,8 @@ package redis
 import (
 	"encoding/json"
 	"fmt"
+	"math"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -692,6 +694,7 @@ func (d *JSONDocument) objKeys(path string) ([]string, error) {
 	for k := range m {
 		keys = append(keys, k)
 	}
+	sort.Strings(keys)
 	return keys, nil
 }
 
@@ -814,6 +817,72 @@ func readJSONDocument(conn redcon.Conn, db *badger.DB, key []byte) (*JSONDocumen
 
 var errWrongType = fmt.Errorf("WRONGTYPE Operation against a key holding the wrong kind of value")
 
+type fphaType int
+
+const (
+	fphaNone fphaType = iota
+	fphaFP16
+	fphaBF16
+	fphaFP32
+	fphaFP64
+)
+
+func parseFPHA(s string) (fphaType, error) {
+	switch strings.ToUpper(s) {
+	case "FP16":
+		return fphaFP16, nil
+	case "BF16":
+		return fphaBF16, nil
+	case "FP32":
+		return fphaFP32, nil
+	case "FP64":
+		return fphaFP64, nil
+	default:
+		return fphaNone, fmt.Errorf("unsupported FP type: %s", s)
+	}
+}
+
+func validateFPHA(v any, ft fphaType) error {
+	switch val := v.(type) {
+	case float64:
+		abs := math.Abs(val)
+		switch ft {
+		case fphaFP64:
+			return nil
+		case fphaFP32, fphaBF16:
+			if val != 0 && abs < float64(math.SmallestNonzeroFloat32) {
+				return fmt.Errorf("value out of range")
+			}
+			if abs > float64(math.MaxFloat32) {
+				return fmt.Errorf("value out of range")
+			}
+		case fphaFP16:
+			const fp16Max = 65504.0
+			const fp16Min = 6.1035e-5
+			if val != 0 && abs < fp16Min {
+				return fmt.Errorf("value out of range")
+			}
+			if abs > fp16Max {
+				return fmt.Errorf("value out of range")
+			}
+		}
+		return nil
+	case map[string]any:
+		for _, vv := range val {
+			if err := validateFPHA(vv, ft); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for _, vv := range val {
+			if err := validateFPHA(vv, ft); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func handleJSONSet(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 	if len(cmd.Args) < 4 {
 		conn.WriteError("ERR wrong number of arguments for 'json.set' command")
@@ -831,6 +900,7 @@ func handleJSONSet(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 
 	nx := false
 	xx := false
+	var ft fphaType = fphaNone
 	for i := 4; i < len(cmd.Args); i++ {
 		flag := strings.ToUpper(string(cmd.Args[i]))
 		switch flag {
@@ -838,6 +908,18 @@ func handleJSONSet(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 			nx = true
 		case "XX":
 			xx = true
+		case "FPHA":
+			if i+1 >= len(cmd.Args) {
+				conn.WriteError("ERR syntax error")
+				return
+			}
+			i++
+			parsed, err := parseFPHA(string(cmd.Args[i]))
+			if err != nil {
+				conn.WriteError("ERR syntax error")
+				return
+			}
+			ft = parsed
 		default:
 			conn.WriteError("ERR syntax error")
 			return
@@ -846,6 +928,12 @@ func handleJSONSet(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 	if nx && xx {
 		conn.WriteError("ERR NX and XX are mutually exclusive")
 		return
+	}
+	if ft != fphaNone {
+		if err := validateFPHA(value, ft); err != nil {
+			conn.WriteError(err.Error())
+			return
+		}
 	}
 
 	prefix := rawKeyPrefix(key, currentDb(conn))
