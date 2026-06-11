@@ -1,6 +1,6 @@
-# KV Project overview
+# Invar
 
-Hardpoint KV is a data store that runs as a standalone daemon and supports the Redis wire protocol and a small but growing subset of Redis commands (the authoritative reference of Redis commands can be found on the official website at https://redis.io/docs/latest/commands/set/index.html.md). The project is 100% written in golang. You can see the currently supported list of commands in the integration test cases in `./test/redis-commands.json`.
+Hardpoint Invar is a data store that runs as a standalone daemon and supports the Redis wire protocol and a small but growing subset of Redis commands (the authoritative reference of Redis commands can be found on the official website at https://redis.io/docs/latest/commands/set/index.html.md). The project is 100% written in golang. You can see the currently supported list of commands in the integration test cases in `./test/redis-commands.json`.
 
 ## Overall structure
 
@@ -23,7 +23,7 @@ The modules should be periodically updated:
 
 To build, simply `go build .`. At this time there are no non-standard build flags.
 
-To run, simply invoke the resulting executable: `./kv` (which will spin up a daemon listening on `:6379`)
+To run, simply invoke the resulting executable: `./invar` (which will spin up a daemon listening on `:6379`)
 
 Before committing, first run staticcheck to catch code quality regressions:
 
@@ -46,7 +46,7 @@ Create a new branch based on latest master for new feature development. Create a
 * To run all unit tests, run `go test ./...`
 * To run the integration tests, run `./run-tests.sh` from the project root
 
-If the kv executable is hanging for some reason (e.g. resource contention, typo causing infinite loop, e.t.c) you can use the `pprof` tool that's built into go as outlined in the [`net/http/pprof`](https://pkg.go.dev/net/http/pprof) docs and the main [pprof](https://github.com/google/pprof) docs to pinpoint execution points in the program. The pprof HTTP handler listens on `localhost:6060`.
+If the invar executable is hanging for some reason (e.g. resource contention, typo causing infinite loop, e.t.c) you can use the `pprof` tool that's built into go as outlined in the [`net/http/pprof`](https://pkg.go.dev/net/http/pprof) docs and the main [pprof](https://github.com/google/pprof) docs to pinpoint execution points in the program. The pprof HTTP handler listens on `localhost:6060`.
 
 ## Redis key structure
 

@@ -2,7 +2,7 @@
 
 set -e
 
-KV_BINARY="./kv"
+KV_BINARY="./invar"
 PID_FILE="/tmp/kv-test-daemon.pid"
 LOG_FILE="/tmp/kv-test-daemon.log"
 PORT=6379
@@ -18,16 +18,16 @@ cleanup() {
         fi
         rm -f "$PID_FILE"
     fi
-    pkill -f "./kv" 2>/dev/null || true
+    pkill -f "./invar" 2>/dev/null || true
 }
 
 trap cleanup EXIT
 
-echo "Building kv daemon..."
+echo "Building invar daemon..."
 go build -o "$KV_BINARY" .
 
-echo "Starting kv daemon on port $PORT..."
-./kv > "$LOG_FILE" 2>&1 &
+echo "Starting invar daemon on port $PORT..."
+./invar > "$LOG_FILE" 2>&1 &
 echo $! > "$PID_FILE"
 
 echo "Waiting for daemon to be ready..."

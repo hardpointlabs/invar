@@ -1,4 +1,4 @@
-module github.com/hardpointlabs/kv
+module github.com/hardpointlabs/invar
 
 go 1.25.0
 

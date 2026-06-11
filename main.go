@@ -6,7 +6,7 @@ import (
 	"os"
 
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/hardpointlabs/kv/redis"
+	"github.com/hardpointlabs/invar/redis"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )

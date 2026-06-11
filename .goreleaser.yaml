@@ -1,0 +1,89 @@
+version: 2
+
+project_name: invar
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: default
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - formats: ["tar.gz"]
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+
+nfpms:
+  - id: default
+    package_name: invar
+    vendor: Hardpoint
+    homepage: https://hardpoint.dev
+    maintainer: Support <support@hardpoint.dev>
+    description: Invar data store
+    license: Apache 2.0
+    formats:
+      - deb
+    section: admin
+    priority: optional
+    bindir: /usr/bin
+
+signs:
+  - cmd: gpg
+    args:
+      - "--batch"
+      - "--pinentry-mode"
+      - "loopback"
+      - "--passphrase"
+      - "{{ .Env.GPG_PASSPHRASE }}"
+      - "--local-user"
+      - "{{ .Env.GPG_KEY_ID }}"
+      - "--output"
+      - "${signature}"
+      - "--detach-sign"
+      - "${artifact}"
+    signature: "${artifact}.sig"
+    artifacts: package
+    ids:
+      - default
+
+kos:
+  - id: default
+    repositories:
+      - ghcr.io/hardpointlabs/invar
+    bare: true
+    annotations:
+      org.opencontainers.image.source: "https://github.com/hardpointlabs/invar"
+      org.opencontainers.image.licenses: "Apache-2.0"
+      org.opencontainers.image.description: "Invar data store"
+    tags:
+      - "{{.Tag}}"
+      - latest
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    sbom: spdx
+    sbom_directory: "out/sbom"
+
+sboms:
+  - id: default
+    cmd: syft
+    args: ["$artifact", "--output", "spdx-json=$document"]
+    artifacts: archive
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"

@@ -1,6 +1,6 @@
-# KV
+# Invar
 
-This is a lightweight daemon acting as a NoSQL document database, with protocol support for some well-known data stores.
+Invar is a lightweight daemon acting as a NoSQL document database, with protocol support for some well-known data stores.
 
 ## Redis compatibility
 
