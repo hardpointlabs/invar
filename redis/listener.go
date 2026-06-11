@@ -737,6 +737,324 @@ func Serve(db *badger.DB) {
 					return
 				}
 				conn.WriteInt(size)
+			case "hset":
+				if len(cmd.Args) < 4 || (len(cmd.Args)-2)%2 != 0 {
+					conn.WriteError("ERR wrong number of arguments for 'hset' command")
+					return
+				}
+				var added int
+				err := db.Update(func(txn *badger.Txn) error {
+					var err error
+					added, err = hset(txn, conn, cmd.Args[1], cmd.Args[2:]...)
+					return err
+				})
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return
+				}
+				conn.WriteInt(added)
+			case "hsetnx":
+				if !checkExactArgs(conn, cmd, 4) {
+					return
+				}
+				var set int
+				var nxErr error
+				nxErr = db.Update(func(txn *badger.Txn) error {
+					_, err := txn.Get(internalHashKey(cmd.Args[1], cmd.Args[2], currentDb(conn)))
+					if err == nil {
+						set = 0
+						return nil
+					}
+					if err != badger.ErrKeyNotFound {
+						return err
+					}
+					added, err := hset(txn, conn, cmd.Args[1], cmd.Args[2], cmd.Args[3])
+					if err != nil {
+						return err
+					}
+					_ = added
+					set = 1
+					return nil
+				})
+				if nxErr != nil {
+					conn.WriteError("ERR " + nxErr.Error())
+					return
+				}
+				conn.WriteInt(set)
+			case "hget":
+				if !checkExactArgs(conn, cmd, 3) {
+					return
+				}
+				db.View(func(txn *badger.Txn) error {
+					val, err := hget(txn, conn, cmd.Args[1], cmd.Args[2])
+					if err != nil {
+						conn.WriteNull()
+						return nil
+					}
+					conn.WriteBulk(val)
+					return nil
+				})
+			case "hdel":
+				if !checkMinArgs(conn, cmd, 3) {
+					return
+				}
+				var hdelRemoved int
+				var hdelErr error
+				hdelErr = db.Update(func(txn *badger.Txn) error {
+					var err error
+					hdelRemoved, err = hdel(txn, conn, cmd.Args[1], cmd.Args[2:]...)
+					return err
+				})
+				if hdelErr != nil {
+					conn.WriteError("ERR " + hdelErr.Error())
+					return
+				}
+				conn.WriteInt(hdelRemoved)
+			case "hexists":
+				if !checkExactArgs(conn, cmd, 3) {
+					return
+				}
+				db.View(func(txn *badger.Txn) error {
+					ok, err := hexists(txn, conn, cmd.Args[1], cmd.Args[2])
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return nil
+					}
+					if ok {
+						conn.WriteInt(1)
+					} else {
+						conn.WriteInt(0)
+					}
+					return nil
+				})
+			case "hlen":
+				if !checkExactArgs(conn, cmd, 2) {
+					return
+				}
+				db.View(func(txn *badger.Txn) error {
+					count, err := hlen(txn, conn, cmd.Args[1])
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return nil
+					}
+					conn.WriteInt(count)
+					return nil
+				})
+			case "hmget":
+				if !checkMinArgs(conn, cmd, 3) {
+					return
+				}
+				db.View(func(txn *badger.Txn) error {
+					results, err := hmget(txn, conn, cmd.Args[1], cmd.Args[2:]...)
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return nil
+					}
+					conn.WriteArray(len(results))
+					for _, r := range results {
+						if r == nil {
+							conn.WriteNull()
+						} else {
+							conn.WriteBulk(r)
+						}
+					}
+					return nil
+				})
+			case "hmset":
+				if len(cmd.Args) < 4 || (len(cmd.Args)-2)%2 != 0 {
+					conn.WriteError("ERR wrong number of arguments for 'hmset' command")
+					return
+				}
+				var hmsetErr error
+				hmsetErr = db.Update(func(txn *badger.Txn) error {
+					_, err := hset(txn, conn, cmd.Args[1], cmd.Args[2:]...)
+					return err
+				})
+				if hmsetErr != nil {
+					conn.WriteError("ERR " + hmsetErr.Error())
+					return
+				}
+				conn.WriteString("OK")
+			case "hkeys":
+				if !checkExactArgs(conn, cmd, 2) {
+					return
+				}
+				db.View(func(txn *badger.Txn) error {
+					keys, err := hkeys(txn, conn, cmd.Args[1])
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return nil
+					}
+					conn.WriteArray(len(keys))
+					for _, k := range keys {
+						conn.WriteBulk(k)
+					}
+					return nil
+				})
+			case "hvals":
+				if !checkExactArgs(conn, cmd, 2) {
+					return
+				}
+				db.View(func(txn *badger.Txn) error {
+					vals, err := hvals(txn, conn, cmd.Args[1])
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return nil
+					}
+					conn.WriteArray(len(vals))
+					for _, v := range vals {
+						conn.WriteBulk(v)
+					}
+					return nil
+				})
+			case "hgetall":
+				if !checkExactArgs(conn, cmd, 2) {
+					return
+				}
+				db.View(func(txn *badger.Txn) error {
+					pairs, err := hgetall(txn, conn, cmd.Args[1])
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return nil
+					}
+					conn.WriteArray(len(pairs))
+					for _, p := range pairs {
+						conn.WriteBulk(p)
+					}
+					return nil
+				})
+			case "hincrby":
+				if !checkExactArgs(conn, cmd, 4) {
+					return
+				}
+				incrAmount, incrOk := parseInt64Arg(conn, cmd.Args[3])
+				if !incrOk {
+					return
+				}
+				var newVal int64
+				var incrbyErr error
+				incrbyErr = db.Update(func(txn *badger.Txn) error {
+					var err error
+					newVal, err = hincrby(txn, conn, cmd.Args[1], cmd.Args[2], incrAmount)
+					return err
+				})
+				if incrbyErr != nil {
+					conn.WriteError("ERR " + incrbyErr.Error())
+					return
+				}
+				conn.WriteInt64(newVal)
+			case "hincrbyfloat":
+				if !checkExactArgs(conn, cmd, 4) {
+					return
+				}
+				floatAmount, floatOk := parseFloatArg(conn, cmd.Args[3])
+				if !floatOk {
+					return
+				}
+				var floatResult string
+				var incrFloatErr error
+				incrFloatErr = db.Update(func(txn *badger.Txn) error {
+					var err error
+					floatResult, err = hincrbyfloat(txn, conn, cmd.Args[1], cmd.Args[2], floatAmount)
+					return err
+				})
+				if incrFloatErr != nil {
+					conn.WriteError("ERR " + incrFloatErr.Error())
+					return
+				}
+				conn.WriteBulkString(floatResult)
+			case "hrandfield":
+				if !checkMinArgs(conn, cmd, 2) {
+					return
+				}
+				var count int = 1
+				var withValues bool
+				if len(cmd.Args) >= 3 {
+					var ok bool
+					count, ok = parseIntArg(conn, cmd.Args[2])
+					if !ok {
+						return
+					}
+				}
+				if len(cmd.Args) >= 4 {
+					if strings.ToLower(string(cmd.Args[3])) == "withvalues" {
+						withValues = true
+					}
+				}
+				db.View(func(txn *badger.Txn) error {
+					result, err := hrandfield(txn, conn, cmd.Args[1], count, withValues)
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return nil
+					}
+					if len(cmd.Args) < 3 || count == 1 {
+						if len(result) == 0 {
+							conn.WriteNull()
+						} else {
+							conn.WriteBulk(result[0])
+						}
+					} else {
+						conn.WriteArray(len(result))
+						for _, r := range result {
+							conn.WriteBulk(r)
+						}
+					}
+					return nil
+				})
+			case "hstrlen":
+				if !checkExactArgs(conn, cmd, 3) {
+					return
+				}
+				db.View(func(txn *badger.Txn) error {
+					length, err := hstrlen(txn, conn, cmd.Args[1], cmd.Args[2])
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return nil
+					}
+					conn.WriteInt(length)
+					return nil
+				})
+			case "hscan":
+				if !checkMinArgs(conn, cmd, 3) {
+					return
+				}
+				_, ok := parseIntArg(conn, cmd.Args[2])
+				if !ok {
+					return
+				}
+				var pattern string
+				var count int
+				for i := 3; i < len(cmd.Args); i++ {
+					switch strings.ToLower(string(cmd.Args[i])) {
+					case "match":
+						i++
+						if i < len(cmd.Args) {
+							pattern = string(cmd.Args[i])
+						}
+					case "count":
+						i++
+						if i < len(cmd.Args) {
+							c, err := strconv.Atoi(string(cmd.Args[i]))
+							if err == nil {
+								count = c
+							}
+						}
+					}
+				}
+				db.View(func(txn *badger.Txn) error {
+					pairs, err := hscan(txn, conn, cmd.Args[1], pattern, count)
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return nil
+					}
+					conn.WriteArray(2)
+					conn.WriteBulkString("0")
+					conn.WriteArray(len(pairs))
+					for _, p := range pairs {
+						conn.WriteBulk(p)
+					}
+					return nil
+				})
 			case "sadd":
 				if !checkMinArgs(conn, cmd, 3) {
 					return

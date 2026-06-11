@@ -1676,5 +1676,338 @@
     "version": "1.0.0",
     "description": "INCRBYFLOAT returns -inf on negative overflow",
     "setup": [["DEL", "st_incrfloat_neginf"], ["SET", "st_incrfloat_neginf", "-1e308"]]
+  },
+  {
+    "name": "HSET creates new hash field",
+    "command": ["HSET", "h_basic", "field1", "value1"],
+    "expected": 1,
+    "type": "integer",
+    "version": "2.0.0",
+    "description": "HSET returns 1 when a new field is added",
+    "setup": [["DEL", "h_basic"]]
+  },
+  {
+    "name": "HSET updates existing field",
+    "command": ["HSET", "h_basic", "field1", "newvalue"],
+    "expected": 0,
+    "type": "integer",
+    "version": "2.0.0",
+    "description": "HSET returns 0 when updating an existing field",
+    "setup": [["DEL", "h_basic"], ["HSET", "h_basic", "field1", "value1"]]
+  },
+  {
+    "name": "HSET multiple fields",
+    "command": ["HSET", "h_multi", "a", "1", "b", "2", "c", "3"],
+    "expected": 3,
+    "type": "integer",
+    "version": "2.0.0",
+    "description": "HSET with multiple field-value pairs",
+    "setup": [["DEL", "h_multi"]]
+  },
+  {
+    "name": "HGET returns field value",
+    "command": ["HGET", "h_basic", "field1"],
+    "expected": "newvalue",
+    "type": "bulk_string",
+    "version": "2.0.0",
+    "description": "HGET returns the value of an existing field",
+    "setup": [["DEL", "h_basic"], ["HSET", "h_basic", "field1", "newvalue"]]
+  },
+  {
+    "name": "HGET non-existing field",
+    "command": ["HGET", "h_basic", "nonexistent"],
+    "expected": null,
+    "type": "null",
+    "version": "2.0.0",
+    "description": "HGET returns null for a non-existing field",
+    "setup": [["DEL", "h_basic"], ["HSET", "h_basic", "field1", "value1"]]
+  },
+  {
+    "name": "HGET non-existing key",
+    "command": ["HGET", "h_nonexistent_key", "field1"],
+    "expected": null,
+    "type": "null",
+    "version": "2.0.0",
+    "description": "HGET returns null for a non-existing key",
+    "setup": [["DEL", "h_nonexistent_key"]]
+  },
+  {
+    "name": "HDEL removes a field",
+    "command": ["HDEL", "h_del", "field1"],
+    "expected": 1,
+    "type": "integer",
+    "version": "2.0.0",
+    "description": "HDEL returns 1 when removing an existing field",
+    "setup": [["DEL", "h_del"], ["HSET", "h_del", "field1", "value1", "field2", "value2"]]
+  },
+  {
+    "name": "HDEL non-existing field",
+    "command": ["HDEL", "h_del", "nonexistent"],
+    "expected": 0,
+    "type": "integer",
+    "version": "2.0.0",
+    "description": "HDEL returns 0 for a non-existing field",
+    "setup": [["DEL", "h_del"], ["HSET", "h_del", "field1", "value1"]]
+  },
+  {
+    "name": "HDEL last field deletes key",
+    "command": ["HDEL", "h_del_last", "field1"],
+    "expected": 1,
+    "type": "integer",
+    "version": "2.0.0",
+    "description": "HDEL on the last field should remove the key entirely",
+    "setup": [["DEL", "h_del_last"], ["HSET", "h_del_last", "field1", "value1"]]
+  },
+  {
+    "name": "HLEN after HDEL last field returns 0",
+    "command": ["HLEN", "h_del_last"],
+    "expected": 0,
+    "type": "integer",
+    "version": "2.0.0",
+    "description": "HLEN returns 0 after the last field is deleted",
+    "setup": [["DEL", "h_del_last"], ["HSET", "h_del_last", "field1", "value1"], ["HDEL", "h_del_last", "field1"]]
+  },
+  {
+    "name": "HEXISTS existing field",
+    "command": ["HEXISTS", "h_exists", "field1"],
+    "expected": 1,
+    "type": "integer",
+    "version": "2.0.0",
+    "description": "HEXISTS returns 1 for an existing field",
+    "setup": [["DEL", "h_exists"], ["HSET", "h_exists", "field1", "value1"]]
+  },
+  {
+    "name": "HEXISTS non-existing field",
+    "command": ["HEXISTS", "h_exists", "nonexistent"],
+    "expected": 0,
+    "type": "integer",
+    "version": "2.0.0",
+    "description": "HEXISTS returns 0 for a non-existing field",
+    "setup": [["DEL", "h_exists"], ["HSET", "h_exists", "field1", "value1"]]
+  },
+  {
+    "name": "HEXISTS non-existing key",
+    "command": ["HEXISTS", "h_noexists", "field1"],
+    "expected": 0,
+    "type": "integer",
+    "version": "2.0.0",
+    "description": "HEXISTS returns 0 for a non-existing key",
+    "setup": [["DEL", "h_noexists"]]
+  },
+  {
+    "name": "HLEN returns field count",
+    "command": ["HLEN", "h_len"],
+    "expected": 3,
+    "type": "integer",
+    "version": "2.0.0",
+    "description": "HLEN returns the number of fields in the hash",
+    "setup": [["DEL", "h_len"], ["HSET", "h_len", "a", "1", "b", "2", "c", "3"]]
+  },
+  {
+    "name": "HLEN non-existing key",
+    "command": ["HLEN", "h_nolen"],
+    "expected": 0,
+    "type": "integer",
+    "version": "2.0.0",
+    "description": "HLEN returns 0 for a non-existing key",
+    "setup": [["DEL", "h_nolen"]]
+  },
+  {
+    "name": "HMGET returns multiple fields",
+    "command": ["HMGET", "h_mget", "a", "b", "c"],
+    "expected": ["1", "2", "3"],
+    "type": "array",
+    "version": "2.0.0",
+    "description": "HMGET returns values for multiple fields",
+    "setup": [["DEL", "h_mget"], ["HSET", "h_mget", "a", "1", "b", "2", "c", "3"]]
+  },
+  {
+    "name": "HMGET with missing fields",
+    "command": ["HMGET", "h_mget", "a", "nonexistent", "c"],
+    "expected": ["1", null, "3"],
+    "type": "array",
+    "version": "2.0.0",
+    "description": "HMGET returns null for missing fields",
+    "setup": [["DEL", "h_mget"], ["HSET", "h_mget", "a", "1", "b", "2", "c", "3"]]
+  },
+  {
+    "name": "HMSET returns OK",
+    "command": ["HMSET", "h_mset", "x", "10", "y", "20"],
+    "expected": "OK",
+    "type": "simple_string",
+    "version": "2.0.0",
+    "description": "HMSET returns OK when setting multiple fields",
+    "setup": [["DEL", "h_mset"]]
+  },
+  {
+    "name": "HGET after HMSET confirms values",
+    "command": ["HGET", "h_mset", "x"],
+    "expected": "10",
+    "type": "bulk_string",
+    "version": "2.0.0",
+    "description": "HGET confirms value set by HMSET",
+    "setup": [["DEL", "h_mset"], ["HMSET", "h_mset", "x", "10", "y", "20"]]
+  },
+  {
+    "name": "HKEYS returns all field names",
+    "command": ["HKEYS", "h_keys"],
+    "expected": ["a", "b", "c"],
+    "type": "array",
+    "version": "2.0.0",
+    "description": "HKEYS returns all field names in the hash",
+    "setup": [["DEL", "h_keys"], ["HSET", "h_keys", "a", "1", "b", "2", "c", "3"]]
+  },
+  {
+    "name": "HKEYS non-existing key",
+    "command": ["HKEYS", "h_nokeys"],
+    "expected": [],
+    "type": "array",
+    "version": "2.0.0",
+    "description": "HKEYS returns empty array for a non-existing key",
+    "setup": [["DEL", "h_nokeys"]]
+  },
+  {
+    "name": "HVALS returns all field values",
+    "command": ["HVALS", "h_vals"],
+    "expected": ["1", "2", "3"],
+    "type": "array",
+    "version": "2.0.0",
+    "description": "HVALS returns all field values in the hash",
+    "setup": [["DEL", "h_vals"], ["HSET", "h_vals", "a", "1", "b", "2", "c", "3"]]
+  },
+  {
+    "name": "HVALS non-existing key",
+    "command": ["HVALS", "h_novals"],
+    "expected": [],
+    "type": "array",
+    "version": "2.0.0",
+    "description": "HVALS returns empty array for a non-existing key",
+    "setup": [["DEL", "h_novals"]]
+  },
+  {
+    "name": "HGETALL returns all fields and values",
+    "command": ["HGETALL", "h_all"],
+    "expected": ["a", "1", "b", "2", "c", "3"],
+    "type": "array",
+    "version": "2.0.0",
+    "description": "HGETALL returns all field-value pairs as a flat array",
+    "setup": [["DEL", "h_all"], ["HSET", "h_all", "a", "1", "b", "2", "c", "3"]]
+  },
+  {
+    "name": "HGETALL non-existing key",
+    "command": ["HGETALL", "h_noall"],
+    "expected": [],
+    "type": "array",
+    "version": "2.0.0",
+    "description": "HGETALL returns empty array for a non-existing key",
+    "setup": [["DEL", "h_noall"]]
+  },
+  {
+    "name": "HINCRBY creates and increments field",
+    "command": ["HINCRBY", "h_incrby", "counter", "5"],
+    "expected": 5,
+    "type": "integer",
+    "version": "2.0.0",
+    "description": "HINCRBY on a non-existing field sets value to the increment",
+    "setup": [["DEL", "h_incrby"]]
+  },
+  {
+    "name": "HINCRBY increments existing field",
+    "command": ["HINCRBY", "h_incrby", "counter", "3"],
+    "expected": 8,
+    "type": "integer",
+    "version": "2.0.0",
+    "description": "HINCRBY increments an existing integer field",
+    "setup": [["DEL", "h_incrby"], ["HSET", "h_incrby", "counter", "5"]]
+  },
+  {
+    "name": "HINCRBY negative increment",
+    "command": ["HINCRBY", "h_incrby_neg", "counter", "-2"],
+    "expected": 3,
+    "type": "integer",
+    "version": "2.0.0",
+    "description": "HINCRBY with a negative increment",
+    "setup": [["DEL", "h_incrby_neg"], ["HSET", "h_incrby_neg", "counter", "5"]]
+  },
+  {
+    "name": "HINCRBYFLOAT creates and increments field",
+    "command": ["HINCRBYFLOAT", "h_incrfloat", "score", "1.5"],
+    "expected": "1.5",
+    "type": "bulk_string",
+    "version": "2.0.0",
+    "description": "HINCRBYFLOAT on a non-existing field sets value to the increment",
+    "setup": [["DEL", "h_incrfloat"]]
+  },
+  {
+    "name": "HINCRBYFLOAT increments existing field",
+    "command": ["HINCRBYFLOAT", "h_incrfloat", "score", "2.5"],
+    "expected": "4",
+    "type": "bulk_string",
+    "version": "2.0.0",
+    "description": "HINCRBYFLOAT increments an existing float field",
+    "setup": [["DEL", "h_incrfloat"], ["HSET", "h_incrfloat", "score", "1.5"]]
+  },
+  {
+    "name": "HINCRBYFLOAT negative increment",
+    "command": ["HINCRBYFLOAT", "h_incrfloat_neg", "score", "-0.5"],
+    "expected": "1.5",
+    "type": "bulk_string",
+    "version": "2.0.0",
+    "description": "HINCRBYFLOAT with a negative increment",
+    "setup": [["DEL", "h_incrfloat_neg"], ["HSET", "h_incrfloat_neg", "score", "2"]]
+  },
+  {
+    "name": "HRANDFIELD non-existing key",
+    "command": ["HRANDFIELD", "h_norand"],
+    "expected": null,
+    "type": "null",
+    "version": "2.0.0",
+    "description": "HRANDFIELD returns null for a non-existing key",
+    "setup": [["DEL", "h_norand"]]
+  },
+  {
+    "name": "HSETNX sets a new field",
+    "command": ["HSETNX", "h_setnx", "field1", "value1"],
+    "expected": 1,
+    "type": "integer",
+    "version": "2.0.0",
+    "description": "HSETNX returns 1 when setting a new field",
+    "setup": [["DEL", "h_setnx"]]
+  },
+  {
+    "name": "HSETNX fails on existing field",
+    "command": ["HSETNX", "h_setnx_existing", "field1", "newvalue"],
+    "expected": 0,
+    "type": "integer",
+    "version": "2.0.0",
+    "description": "HSETNX returns 0 when the field already exists",
+    "setup": [["DEL", "h_setnx_existing"], ["HSET", "h_setnx_existing", "field1", "value1"]]
+  },
+  {
+    "name": "HSTRLEN returns field value length",
+    "command": ["HSTRLEN", "h_strlen", "field1"],
+    "expected": 6,
+    "type": "integer",
+    "version": "2.0.0",
+    "description": "HSTRLEN returns the length of the field's value",
+    "setup": [["DEL", "h_strlen"], ["HSET", "h_strlen", "field1", "hello!"]]
+  },
+  {
+    "name": "HSTRLEN non-existing field",
+    "command": ["HSTRLEN", "h_strlen", "nonexistent"],
+    "expected": 0,
+    "type": "integer",
+    "version": "2.0.0",
+    "description": "HSTRLEN returns 0 for a non-existing field",
+    "setup": [["DEL", "h_strlen"], ["HSET", "h_strlen", "field1", "hello!"]]
+  },
+  {
+    "name": "HGET after HDEL first field confirms remaining fields",
+    "command": ["HGET", "h_del_multi", "b"],
+    "expected": "2",
+    "type": "bulk_string",
+    "version": "2.0.0",
+    "description": "After HDEL removes one field, remaining fields are still accessible",
+    "setup": [["DEL", "h_del_multi"], ["HSET", "h_del_multi", "a", "1", "b", "2", "c", "3"], ["HDEL", "h_del_multi", "a"]]
   }
 ]
