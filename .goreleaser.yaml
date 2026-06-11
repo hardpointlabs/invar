@@ -24,39 +24,6 @@ archives:
       {{- else if eq .Arch "386" }}i386
       {{- else }}{{ .Arch }}{{ end }}
 
-nfpms:
-  - id: default
-    package_name: invar
-    vendor: Hardpoint
-    homepage: https://hardpoint.dev
-    maintainer: Support <support@hardpoint.dev>
-    description: Invar data store
-    license: Apache 2.0
-    formats:
-      - deb
-    section: admin
-    priority: optional
-    bindir: /usr/bin
-
-signs:
-  - cmd: gpg
-    args:
-      - "--batch"
-      - "--pinentry-mode"
-      - "loopback"
-      - "--passphrase"
-      - "{{ .Env.GPG_PASSPHRASE }}"
-      - "--local-user"
-      - "{{ .Env.GPG_KEY_ID }}"
-      - "--output"
-      - "${signature}"
-      - "--detach-sign"
-      - "${artifact}"
-    signature: "${artifact}.sig"
-    artifacts: package
-    ids:
-      - default
-
 kos:
   - id: default
     repositories:
@@ -65,7 +32,7 @@ kos:
     annotations:
       org.opencontainers.image.source: "https://github.com/hardpointlabs/invar"
       org.opencontainers.image.licenses: "Apache-2.0"
-      org.opencontainers.image.description: "Invar data store"
+      org.opencontainers.image.description: "Invar DB"
     tags:
       - "{{.Tag}}"
       - latest
@@ -74,12 +41,6 @@ kos:
       - linux/arm64
     sbom: spdx
     sbom_directory: "out/sbom"
-
-sboms:
-  - id: default
-    cmd: syft
-    args: ["$artifact", "--output", "spdx-json=$document"]
-    artifacts: archive
 
 changelog:
   sort: asc

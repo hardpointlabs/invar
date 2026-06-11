@@ -43,15 +43,6 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GHCR_TOKEN }}
-      - name: Install Syft
-        if: steps.semantic.outputs.new_release == 'true'
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
-      - name: Import GPG key
-        if: steps.semantic.outputs.new_release == 'true'
-        run: |
-          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --yes --pinentry-mode loopback --passphrase "${{ secrets.GPG_PASSPHRASE }}" --import
-          gpg --list-secret-keys --keyid-format=long
       - name: Run GoReleaser
         if: steps.semantic.outputs.new_release == 'true'
         uses: goreleaser/goreleaser-action@v7
@@ -60,64 +51,3 @@ jobs:
         env:
           KO_DOCKER_REPO: ghcr.io/hardpointlabs/invar
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
-          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-      - name: Upload .deb artifacts
-        if: steps.semantic.outputs.new_release == 'true'
-        uses: actions/upload-artifact@v7
-        with:
-          name: deb-packages
-          path: dist/*.deb
-
-  publish-deb:
-    needs: main
-    runs-on: ubuntu-latest
-    if: needs.main.outputs.should_publish == 'true'
-    steps:
-      - name: Download .deb artifacts
-        uses: actions/download-artifact@v8
-        with:
-          name: deb-packages
-          path: ./debs
-      - name: Import GPG key
-        run: |
-          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --yes --pinentry-mode loopback --passphrase "${{ secrets.GPG_PASSPHRASE }}" --import
-          gpg --list-secret-keys --keyid-format=long
-      - name: Install aptly
-        run: |
-          sudo apt update && sudo apt install -y aptly
-      - name: Configure aptly
-        run: |
-          mkdir -p ~/.aptly
-          cat <<EOF > ~/.aptly.conf
-          {
-            "S3PublishEndpoints": {
-              "r2": {
-                "region": "auto",
-                "bucket": "${{ secrets.R2_BUCKET }}",
-                "endpoint": "https://${{ vars.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com",
-                "awsAccessKeyID": "${{ secrets.R2_ACCESS_KEY_ID }}",
-                "awsSecretAccessKey": "${{ secrets.R2_SECRET_ACCESS_KEY }}",
-                "prefix": "apt",
-                "acl": "public-read",
-                "storageClass": ""
-              }
-            }
-          }
-          EOF
-      - name: Create APT repository with aptly
-        env:
-          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-        run: |
-          aptly repo create -distribution=stable -component=main invar
-          aptly repo add invar ./debs/*.deb
-
-          aptly snapshot create invar-${GITHUB_SHA::8} from repo invar
-
-          aptly publish snapshot \
-            -batch \
-            -passphrase="${GPG_PASSPHRASE}" \
-            -architectures=amd64,arm64 \
-            -gpg-key="${{ secrets.GPG_KEY_ID }}" \
-            invar-${GITHUB_SHA::8} \
-            s3:r2:
