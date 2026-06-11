@@ -1,3 +1,10 @@
+## [1.0.3](https://github.com/hardpointlabs/invar/compare/v1.0.2...v1.0.3) (2026-06-11)
+
+
+### Bug Fixes
+
+* explicitly specify GITHUB_TOKEN for goreleaser ([55a0ffa](https://github.com/hardpointlabs/invar/commit/55a0ffa1824ef94cdeb12f1be2e982656ca58743))
+
 ## [1.0.2](https://github.com/hardpointlabs/invar/compare/v1.0.1...v1.0.2) (2026-06-11)
 
 
