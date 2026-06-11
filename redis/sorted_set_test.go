@@ -1214,7 +1214,7 @@ func TestEncodeScoreSortOrder(t *testing.T) {
 }
 
 func TestEncodeScoreRoundTrip(t *testing.T) {
-	scores := []float64{-100.5, -1.0, -0.0, 0.0, 1.5, 3.14, 100.0, math.Inf(-1), math.Inf(1)}
+	scores := []float64{-100.5, -1.0, math.Copysign(0, -1), 0.0, 1.5, 3.14, 100.0, math.Inf(-1), math.Inf(1)}
 	for _, s := range scores {
 		enc := encodeScore(s)
 		dec := decodeScore(enc)

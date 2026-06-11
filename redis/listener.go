@@ -966,16 +966,21 @@ func Serve(db *badger.DB) {
 				if !checkMinArgs(conn, cmd, 4) {
 					return
 				}
-				numKeys, ok := parseIntArg(conn, cmd.Args[2])
+				isStore := strings.ToLower(string(cmd.Args[0])) == "zinterstore"
+				argStart := 1
+				if isStore {
+					argStart = 2
+				}
+				numKeys, ok := parseIntArg(conn, cmd.Args[argStart])
 				if !ok {
 					return
 				}
-				if len(cmd.Args) < 3+numKeys {
+				if len(cmd.Args) < argStart+1+numKeys {
 					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
 					return
 				}
-				keys := cmd.Args[3 : 3+numKeys]
-				i := 3 + numKeys
+				keys := cmd.Args[argStart+1 : argStart+1+numKeys]
+				i := argStart + 1 + numKeys
 				var weights []float64
 				aggregate := "SUM"
 				for i < len(cmd.Args) {
@@ -1013,21 +1018,18 @@ func Serve(db *badger.DB) {
 						return
 					}
 				}
-				isStore := strings.ToLower(string(cmd.Args[0])) == "zinterstore"
-				db.View(func(txn *badger.Txn) error {
-					m, err := zinter(txn, conn, aggregate, keys...)
-					if err != nil {
-						conn.WriteError("ERR " + err.Error())
-						return nil
-					}
-					// Apply weights
-					if len(weights) > 0 {
-						for member, score := range m {
-							// Find which source key this member came from and apply weight
-							m[member] = score * weights[0]
+				if isStore {
+					db.Update(func(txn *badger.Txn) error {
+						m, err := zinter(txn, conn, aggregate, keys...)
+						if err != nil {
+							conn.WriteError("ERR " + err.Error())
+							return nil
 						}
-					}
-					if isStore {
+						if len(weights) > 0 {
+							for member, score := range m {
+								m[member] = score * weights[0]
+							}
+						}
 						members := zsetToSlice(m)
 						count, err := storeZSetResult(txn, conn, cmd.Args[1], members)
 						if err != nil {
@@ -1035,8 +1037,20 @@ func Serve(db *badger.DB) {
 							return nil
 						}
 						conn.WriteInt(count)
-					} else {
-						// ZINTER - check WITHSCORES
+						return nil
+					})
+				} else {
+					db.View(func(txn *badger.Txn) error {
+						m, err := zinter(txn, conn, aggregate, keys...)
+						if err != nil {
+							conn.WriteError("ERR " + err.Error())
+							return nil
+						}
+						if len(weights) > 0 {
+							for member, score := range m {
+								m[member] = score * weights[0]
+							}
+						}
 						hasWithScores := false
 						for _, arg := range cmd.Args {
 							if strings.EqualFold(string(arg), "withscores") {
@@ -1057,9 +1071,9 @@ func Serve(db *badger.DB) {
 								conn.WriteBulk(e.member)
 							}
 						}
-					}
-					return nil
-				})
+						return nil
+					})
+				}
 			case "zlexcount":
 				if !checkExactArgs(conn, cmd, 4) {
 					return
@@ -1577,16 +1591,21 @@ func Serve(db *badger.DB) {
 				if !checkMinArgs(conn, cmd, 4) {
 					return
 				}
-				numKeys, ok := parseIntArg(conn, cmd.Args[2])
+				isStore := strings.ToLower(string(cmd.Args[0])) == "zunionstore"
+				argStart := 1
+				if isStore {
+					argStart = 2
+				}
+				numKeys, ok := parseIntArg(conn, cmd.Args[argStart])
 				if !ok {
 					return
 				}
-				if len(cmd.Args) < 3+numKeys {
+				if len(cmd.Args) < argStart+1+numKeys {
 					conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
 					return
 				}
-				keys := cmd.Args[3 : 3+numKeys]
-				i := 3 + numKeys
+				keys := cmd.Args[argStart+1 : argStart+1+numKeys]
+				i := argStart + 1 + numKeys
 				var weights []float64
 				aggregate := "SUM"
 				for i < len(cmd.Args) {
@@ -1624,20 +1643,18 @@ func Serve(db *badger.DB) {
 						return
 					}
 				}
-				isStore := strings.ToLower(string(cmd.Args[0])) == "zunionstore"
-				db.View(func(txn *badger.Txn) error {
-					m, err := zunion(txn, conn, aggregate, keys...)
-					if err != nil {
-						conn.WriteError("ERR " + err.Error())
-						return nil
-					}
-					// Apply weights
-					if len(weights) > 0 {
-						for member, score := range m {
-							m[member] = score * weights[0]
+				if isStore {
+					db.Update(func(txn *badger.Txn) error {
+						m, err := zunion(txn, conn, aggregate, keys...)
+						if err != nil {
+							conn.WriteError("ERR " + err.Error())
+							return nil
 						}
-					}
-					if isStore {
+						if len(weights) > 0 {
+							for member, score := range m {
+								m[member] = score * weights[0]
+							}
+						}
 						members := zsetToSlice(m)
 						count, err := storeZSetResult(txn, conn, cmd.Args[1], members)
 						if err != nil {
@@ -1645,7 +1662,20 @@ func Serve(db *badger.DB) {
 							return nil
 						}
 						conn.WriteInt(count)
-					} else {
+						return nil
+					})
+				} else {
+					db.View(func(txn *badger.Txn) error {
+						m, err := zunion(txn, conn, aggregate, keys...)
+						if err != nil {
+							conn.WriteError("ERR " + err.Error())
+							return nil
+						}
+						if len(weights) > 0 {
+							for member, score := range m {
+								m[member] = score * weights[0]
+							}
+						}
 						hasWithScores := false
 						for _, arg := range cmd.Args {
 							if strings.EqualFold(string(arg), "withscores") {
@@ -1666,9 +1696,9 @@ func Serve(db *badger.DB) {
 								conn.WriteBulk(e.member)
 							}
 						}
-					}
-					return nil
-				})
+						return nil
+					})
+				}
 			case "zrangestore":
 				if !checkExactArgs(conn, cmd, 5) {
 					return

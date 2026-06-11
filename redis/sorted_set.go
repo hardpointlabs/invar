@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -131,18 +132,6 @@ func loadAllSortedMembers(txn *badger.Txn, setName []byte, dbSlot int) ([]member
 }
 
 // loadAllMembersOnly returns all member byte slices without scores.
-func loadAllMembersOnly(txn *badger.Txn, setName []byte, dbSlot int) ([][]byte, error) {
-	entries, err := loadAllSortedMembers(txn, setName, dbSlot)
-	if err != nil {
-		return nil, err
-	}
-	result := make([][]byte, len(entries))
-	for i, e := range entries {
-		result[i] = e.member
-	}
-	return result, nil
-}
-
 func deleteAllInternalKeys(txn *badger.Txn, setName []byte, dbSlot int) error {
 	scorePrefix := scorePrefixBytes(setName, dbSlot)
 	scoreOpts := badger.DefaultIteratorOptions
@@ -1241,6 +1230,12 @@ func zsetToSlice(m map[string]float64) []memberScore {
 	for member, score := range m {
 		result = append(result, memberScore{member: []byte(member), score: score})
 	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].score != result[j].score {
+			return result[i].score < result[j].score
+		}
+		return string(result[i].member) < string(result[j].member)
+	})
 	return result
 }
 

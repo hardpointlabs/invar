@@ -1039,5 +1039,381 @@
     "type": "bulk_string",
     "version": "1.0.0",
     "description": "ECHO with special characters"
+  },
+  {
+    "name": "ZADD adds new members",
+    "command": ["ZADD", "zint_zadd", "1", "a", "2", "b", "3", "c"],
+    "expected": 3,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "ZADD returns count of newly added members",
+    "setup": [["DEL", "zint_zadd"]]
+  },
+  {
+    "name": "ZADD NX skips existing members",
+    "command": ["ZADD", "zint_zadd_nx", "NX", "2", "a", "3", "c"],
+    "expected": 1,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "ZADD with NX only adds members not already present",
+    "setup": [["DEL", "zint_zadd_nx"], ["ZADD", "zint_zadd_nx", "1", "a", "2", "b"]]
+  },
+  {
+    "name": "ZADD CH returns changed+added count",
+    "command": ["ZADD", "zint_zadd_ch", "CH", "10", "a", "11", "d"],
+    "expected": 2,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "ZADD CH returns count of changed plus added members",
+    "setup": [["DEL", "zint_zadd_ch"], ["ZADD", "zint_zadd_ch", "1", "a", "2", "b"]]
+  },
+  {
+    "name": "ZADD XX only updates existing",
+    "command": ["ZADD", "zint_zadd_xx", "XX", "10", "a", "11", "x"],
+    "expected": 0,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "ZADD XX does not add new members",
+    "setup": [["DEL", "zint_zadd_xx"], ["ZADD", "zint_zadd_xx", "1", "a", "2", "b"]]
+  },
+  {
+    "name": "ZCARD returns cardinality",
+    "command": ["ZCARD", "zint_zcard"],
+    "expected": 3,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "ZCARD returns number of members in sorted set",
+    "setup": [["DEL", "zint_zcard"], ["ZADD", "zint_zcard", "1", "a", "2", "b", "3", "c"]]
+  },
+  {
+    "name": "ZCARD non-existing key",
+    "command": ["ZCARD", "zint_zcard_none"],
+    "expected": 0,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "ZCARD returns 0 for non-existing key"
+  },
+  {
+    "name": "ZSCORE returns score",
+    "command": ["ZSCORE", "zint_zscore", "b"],
+    "expected": "2",
+    "type": "bulk_string",
+    "version": "1.0.0",
+    "description": "ZSCORE returns the score of a member",
+    "setup": [["DEL", "zint_zscore"], ["ZADD", "zint_zscore", "1", "a", "2", "b", "3", "c"]]
+  },
+  {
+    "name": "ZSCORE non-existing member",
+    "command": ["ZSCORE", "zint_zscore_none", "x"],
+    "expected": null,
+    "type": "null",
+    "version": "1.0.0",
+    "description": "ZSCORE returns null for non-existing member",
+    "setup": [["DEL", "zint_zscore_none"], ["ZADD", "zint_zscore_none", "1", "a"]]
+  },
+  {
+    "name": "ZSCORE non-existing key",
+    "command": ["ZSCORE", "zint_zscore_nokey", "a"],
+    "expected": null,
+    "type": "null",
+    "version": "1.0.0",
+    "description": "ZSCORE returns null for non-existing key"
+  },
+  {
+    "name": "ZREM removes members",
+    "command": ["ZREM", "zint_zrem", "a", "c"],
+    "expected": 2,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "ZREM removes specified members",
+    "setup": [["DEL", "zint_zrem"], ["ZADD", "zint_zrem", "1", "a", "2", "b", "3", "c"]]
+  },
+  {
+    "name": "ZREM last member deletes key",
+    "command": ["ZREM", "zint_zrem_last", "a"],
+    "expected": 1,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "ZREM returns 1 when removing the only member",
+    "setup": [["DEL", "zint_zrem_last"], ["ZADD", "zint_zrem_last", "1", "a"]]
+  },
+  {
+    "name": "ZCARD after ZREM last member",
+    "command": ["ZCARD", "zint_zrem_last"],
+    "expected": 0,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "ZCARD returns 0 after last member removed",
+    "setup": [["DEL", "zint_zrem_last"], ["ZADD", "zint_zrem_last", "1", "a"], ["ZREM", "zint_zrem_last", "a"]]
+  },
+  {
+    "name": "ZRANGE returns members by score",
+    "command": ["ZRANGE", "zint_zrange", "0", "-1"],
+    "expected": ["a", "b", "c"],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "ZRANGE returns members in ascending score order",
+    "setup": [["DEL", "zint_zrange"], ["ZADD", "zint_zrange", "1", "a", "2", "b", "3", "c"]]
+  },
+  {
+    "name": "ZRANGE WITHSCORES",
+    "command": ["ZRANGE", "zint_zrange", "0", "-1", "WITHSCORES"],
+    "expected": ["a", "1", "b", "2", "c", "3"],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "ZRANGE WITHSCORES returns alternating member and score",
+    "setup": [["DEL", "zint_zrange"], ["ZADD", "zint_zrange", "1", "a", "2", "b", "3", "c"]]
+  },
+  {
+    "name": "ZRANGE partial range",
+    "command": ["ZRANGE", "zint_zrange", "0", "1"],
+    "expected": ["a", "b"],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "ZRANGE with start and stop indices",
+    "setup": [["DEL", "zint_zrange"], ["ZADD", "zint_zrange", "1", "a", "2", "b", "3", "c"]]
+  },
+  {
+    "name": "ZREVRANGE returns members reversed",
+    "command": ["ZREVRANGE", "zint_zrevrange", "0", "-1"],
+    "expected": ["c", "b", "a"],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "ZREVRANGE returns members in descending score order",
+    "setup": [["DEL", "zint_zrevrange"], ["ZADD", "zint_zrevrange", "1", "a", "2", "b", "3", "c"]]
+  },
+  {
+    "name": "ZRANK returns rank of lowest score",
+    "command": ["ZRANK", "zint_zrank", "a"],
+    "expected": 0,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "ZRANK returns 0 for lowest scored member",
+    "setup": [["DEL", "zint_zrank"], ["ZADD", "zint_zrank", "1", "a", "2", "b", "3", "c"]]
+  },
+  {
+    "name": "ZREVRANK returns reverse rank",
+    "command": ["ZREVRANK", "zint_zrank", "a"],
+    "expected": 2,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "ZREVRANK returns rank from highest score",
+    "setup": [["DEL", "zint_zrank"], ["ZADD", "zint_zrank", "1", "a", "2", "b", "3", "c"]]
+  },
+  {
+    "name": "ZRANK non-existing member",
+    "command": ["ZRANK", "zint_zrank", "x"],
+    "expected": null,
+    "type": "null",
+    "version": "1.0.0",
+    "description": "ZRANK returns null for non-existing member",
+    "setup": [["DEL", "zint_zrank"], ["ZADD", "zint_zrank", "1", "a", "2", "b", "3", "c"]]
+  },
+  {
+    "name": "ZINCRBY increases score",
+    "command": ["ZINCRBY", "zint_zincrby", "2.5", "a"],
+    "expected": "3.5",
+    "type": "bulk_string",
+    "version": "1.0.0",
+    "description": "ZINCRBY adds increment to existing score",
+    "setup": [["DEL", "zint_zincrby"], ["ZADD", "zint_zincrby", "1", "a"]]
+  },
+  {
+    "name": "ZCOUNT inclusive range",
+    "command": ["ZCOUNT", "zint_zcount", "1", "2"],
+    "expected": 2,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "ZCOUNT includes both bounds",
+    "setup": [["DEL", "zint_zcount"], ["ZADD", "zint_zcount", "1", "a", "2", "b", "3", "c"]]
+  },
+  {
+    "name": "ZCOUNT exclusive bounds",
+    "command": ["ZCOUNT", "zint_zcount", "(1", "(3"],
+    "expected": 1,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "ZCOUNT with exclusive bounds excludes endpoints",
+    "setup": [["DEL", "zint_zcount"], ["ZADD", "zint_zcount", "1", "a", "2", "b", "3", "c"]]
+  },
+  {
+    "name": "ZCOUNT -inf +inf",
+    "command": ["ZCOUNT", "zint_zcount", "-inf", "+inf"],
+    "expected": 3,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "ZCOUNT with infinite bounds covers all members",
+    "setup": [["DEL", "zint_zcount"], ["ZADD", "zint_zcount", "1", "a", "2", "b", "3", "c"]]
+  },
+  {
+    "name": "ZPOPMIN pops lowest scored member",
+    "command": ["ZPOPMIN", "zint_zpopmin"],
+    "expected": ["a", "1"],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "ZPOPMIN removes and returns the lowest scored member",
+    "setup": [["DEL", "zint_zpopmin"], ["ZADD", "zint_zpopmin", "1", "a", "2", "b"]]
+  },
+  {
+    "name": "ZPOPMAX pops highest scored member",
+    "command": ["ZPOPMAX", "zint_zpopmax"],
+    "expected": ["b", "2"],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "ZPOPMAX removes and returns the highest scored member",
+    "setup": [["DEL", "zint_zpopmax"], ["ZADD", "zint_zpopmax", "1", "a", "2", "b"]]
+  },
+  {
+    "name": "ZRANGEBYSCORE filters by score",
+    "command": ["ZRANGEBYSCORE", "zint_zrbs", "2", "3"],
+    "expected": ["b", "c"],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "ZRANGEBYSCORE returns members within score range",
+    "setup": [["DEL", "zint_zrbs"], ["ZADD", "zint_zrbs", "1", "a", "2", "b", "3", "c"]]
+  },
+  {
+    "name": "ZRANGEBYSCORE WITHSCORES LIMIT",
+    "command": ["ZRANGEBYSCORE", "zint_zrbs", "-inf", "+inf", "WITHSCORES", "LIMIT", "1", "2"],
+    "expected": ["b", "2", "c", "3"],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "ZRANGEBYSCORE with WITHSCORES and LIMIT offset",
+    "setup": [["DEL", "zint_zrbs"], ["ZADD", "zint_zrbs", "1", "a", "2", "b", "3", "c"]]
+  },
+  {
+    "name": "ZREVRANGEBYSCORE returns reversed",
+    "command": ["ZREVRANGEBYSCORE", "zint_zrbs_rev", "3", "1"],
+    "expected": ["c", "b", "a"],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "ZREVRANGEBYSCORE returns in descending score order",
+    "setup": [["DEL", "zint_zrbs_rev"], ["ZADD", "zint_zrbs_rev", "1", "a", "2", "b", "3", "c"]]
+  },
+  {
+    "name": "ZREMRANGEBYRANK removes by rank",
+    "command": ["ZREMRANGEBYRANK", "zint_zrrr", "0", "0"],
+    "expected": 1,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "ZREMRANGEBYRANK removes members at given rank range",
+    "setup": [["DEL", "zint_zrrr"], ["ZADD", "zint_zrrr", "1", "a", "2", "b", "3", "c"]]
+  },
+  {
+    "name": "ZREMRANGEBYSCORE removes by score",
+    "command": ["ZREMRANGEBYSCORE", "zint_zrrs", "2", "3"],
+    "expected": 2,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "ZREMRANGEBYSCORE removes members within score range",
+    "setup": [["DEL", "zint_zrrs"], ["ZADD", "zint_zrrs", "1", "a", "2", "b", "3", "c"]]
+  },
+  {
+    "name": "ZMSCORE returns multiple scores",
+    "command": ["ZMSCORE", "zint_zmscore", "a", "x", "c"],
+    "expected": ["1", null, "3"],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "ZMSCORE returns scores with null for missing members",
+    "setup": [["DEL", "zint_zmscore"], ["ZADD", "zint_zmscore", "1", "a", "2", "b", "3", "c"]]
+  },
+  {
+    "name": "ZRANDMEMBER with count",
+    "command": ["ZRANDMEMBER", "zint_zrand", "1"],
+    "expected": ["a"],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "ZRANDMEMBER with count returns array of members",
+    "setup": [["DEL", "zint_zrand"], ["ZADD", "zint_zrand", "1", "a"]]
+  },
+  {
+    "name": "ZDIFF returns difference",
+    "command": ["ZDIFF", "2", "zint_zdiff_a", "zint_zdiff_b"],
+    "expected": ["a", "c"],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "ZDIFF returns members in first set not in others",
+    "setup": [["DEL", "zint_zdiff_a"], ["DEL", "zint_zdiff_b"], ["ZADD", "zint_zdiff_a", "1", "a", "2", "b", "3", "c"], ["ZADD", "zint_zdiff_b", "2", "b", "4", "d"]]
+  },
+  {
+    "name": "ZDIFF WITHSCORES",
+    "command": ["ZDIFF", "2", "zint_zdiff_a", "zint_zdiff_b", "WITHSCORES"],
+    "expected": ["a", "1", "c", "3"],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "ZDIFF WITHSCORES returns members with their scores",
+    "setup": [["DEL", "zint_zdiff_a"], ["DEL", "zint_zdiff_b"], ["ZADD", "zint_zdiff_a", "1", "a", "2", "b", "3", "c"], ["ZADD", "zint_zdiff_b", "2", "b", "4", "d"]]
+  },
+  {
+    "name": "ZDIFFSTORE stores difference",
+    "command": ["ZDIFFSTORE", "zint_zdiffstore_dest", "2", "zint_zdiff_a", "zint_zdiff_b"],
+    "expected": 2,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "ZDIFFSTORE stores the difference in a destination key",
+    "setup": [["DEL", "zint_zdiffstore_dest"], ["DEL", "zint_zdiff_a"], ["DEL", "zint_zdiff_b"], ["ZADD", "zint_zdiff_a", "1", "a", "2", "b", "3", "c"], ["ZADD", "zint_zdiff_b", "2", "b", "4", "d"]]
+  },
+  {
+    "name": "ZINTER returns intersection",
+    "command": ["ZINTER", "2", "zint_zinter_a", "zint_zinter_b"],
+    "expected": ["b"],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "ZINTER returns members common to all sets",
+    "setup": [["DEL", "zint_zinter_a"], ["DEL", "zint_zinter_b"], ["ZADD", "zint_zinter_a", "1", "a", "2", "b"], ["ZADD", "zint_zinter_b", "2", "b", "3", "c"]]
+  },
+  {
+    "name": "ZINTERSTORE stores intersection",
+    "command": ["ZINTERSTORE", "zint_zinterstore_dest", "2", "zint_zinter_a", "zint_zinter_b"],
+    "expected": 1,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "ZINTERSTORE stores the intersection in a destination key",
+    "setup": [["DEL", "zint_zinterstore_dest"], ["DEL", "zint_zinter_a"], ["DEL", "zint_zinter_b"], ["ZADD", "zint_zinter_a", "1", "a", "2", "b"], ["ZADD", "zint_zinter_b", "2", "b", "3", "c"]]
+  },
+  {
+    "name": "ZUNION returns union",
+    "command": ["ZUNION", "2", "zint_zunion_a", "zint_zunion_b"],
+    "expected": ["a", "b", "c"],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "ZUNION returns all unique members with aggregated scores",
+    "setup": [["DEL", "zint_zunion_a"], ["DEL", "zint_zunion_b"], ["ZADD", "zint_zunion_a", "1", "a", "2", "b"], ["ZADD", "zint_zunion_b", "3", "b", "6", "c"]]
+  },
+  {
+    "name": "ZUNIONSTORE stores union",
+    "command": ["ZUNIONSTORE", "zint_zunionstore_dest", "2", "zint_zunion_a", "zint_zunion_b"],
+    "expected": 3,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "ZUNIONSTORE stores the union in a destination key",
+    "setup": [["DEL", "zint_zunionstore_dest"], ["DEL", "zint_zunion_a"], ["DEL", "zint_zunion_b"], ["ZADD", "zint_zunion_a", "1", "a", "2", "b"], ["ZADD", "zint_zunion_b", "3", "b", "6", "c"]]
+  },
+  {
+    "name": "ZLEXCOUNT counts lex range",
+    "command": ["ZLEXCOUNT", "zint_lex", "[a", "[b"],
+    "expected": 1,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "ZLEXCOUNT counts members in lexical range",
+    "setup": [["DEL", "zint_lex"], ["ZADD", "zint_lex", "0", "banana", "0", "apple", "0", "cherry"]]
+  },
+  {
+    "name": "ZRANGEBYLEX returns lexicographic order",
+    "command": ["ZRANGEBYLEX", "zint_lex", "-", "+"],
+    "expected": ["apple", "banana", "cherry"],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "ZRANGEBYLEX returns members in lexicographic order",
+    "setup": [["DEL", "zint_lex"], ["ZADD", "zint_lex", "0", "banana", "0", "apple", "0", "cherry"]]
+  },
+  {
+    "name": "ZRANGESTORE stores range in new key",
+    "command": ["ZRANGESTORE", "zint_zrs_dest", "zint_zrs_src", "0", "1"],
+    "expected": 2,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "ZRANGESTORE stores a range of members in a new key",
+    "setup": [["DEL", "zint_zrs_dest"], ["DEL", "zint_zrs_src"], ["ZADD", "zint_zrs_src", "1", "a", "2", "b", "3", "c"]]
   }
 ]
