@@ -10,12 +10,6 @@ import (
 // Helpers
 // ---------------------------------------------------------------------------
 
-// validPath returns true when parsePath accepts the string without error.
-func validPath(s string) bool {
-	_, err := parsePath(s)
-	return err == nil
-}
-
 // docFromObject returns a JSONDocument whose root is a map with the given
 // key set to value.  It is a convenience wrapper used across several tests.
 func docFromObject(key string, value any) *JSONDocument {
