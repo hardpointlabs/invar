@@ -101,7 +101,7 @@ func TestHashSentinelIsNotFieldPrefix(t *testing.T) {
 	defer db.Close()
 
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := hset(txn, nil, []byte("myhash"), []byte("a"), []byte("1"), []byte("b"), []byte("2"))
+		_, err := hset(txn, 0, []byte("myhash"), []byte("a"), []byte("1"), []byte("b"), []byte("2"))
 		return err
 	})
 	if err != nil {
@@ -109,7 +109,7 @@ func TestHashSentinelIsNotFieldPrefix(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		sentinelKey := rawKeyPrefixWithDb([]byte("myhash"), 0)
+		sentinelKey := rawKeyPrefix([]byte("myhash"), 0)
 		fieldPrefix := hashFieldsPrefix([]byte("myhash"), 0)
 
 		_, err := txn.Get(sentinelKey)
@@ -144,7 +144,7 @@ func TestHashSentinelRoundTrip(t *testing.T) {
 	f := func(count uint32) bool {
 		hash := []byte("testhash")
 		db := 0
-		key := rawKeyPrefixWithDb(hash, db)
+		key := rawKeyPrefix(hash, db)
 		val := make([]byte, 4)
 		binary.BigEndian.PutUint32(val, count)
 
@@ -188,7 +188,7 @@ func TestHashClearAndReAdd(t *testing.T) {
 	defer db.Close()
 
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := hset(txn, nil, []byte("h"), []byte("a"), []byte("1"), []byte("b"), []byte("2"))
+		_, err := hset(txn, 0, []byte("h"), []byte("a"), []byte("1"), []byte("b"), []byte("2"))
 		return err
 	})
 	if err != nil {
@@ -203,7 +203,7 @@ func TestHashClearAndReAdd(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		count, err := hlen(txn, nil, []byte("h"))
+		count, err := hlen(txn, 0, []byte("h"))
 		if err != nil {
 			return err
 		}
@@ -217,7 +217,7 @@ func TestHashClearAndReAdd(t *testing.T) {
 	}
 
 	err = db.Update(func(txn *badger.Txn) error {
-		added, err := hset(txn, nil, []byte("h"), []byte("x"), []byte("10"))
+		added, err := hset(txn, 0, []byte("h"), []byte("x"), []byte("10"))
 		if err != nil {
 			return err
 		}
@@ -231,7 +231,7 @@ func TestHashClearAndReAdd(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		count, err := hlen(txn, nil, []byte("h"))
+		count, err := hlen(txn, 0, []byte("h"))
 		if err != nil {
 			return err
 		}

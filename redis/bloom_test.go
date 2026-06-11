@@ -22,7 +22,7 @@ func TestBloomReserve(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		return bfreserve(txn, nil, []byte("mybloom"), 0.01, 1000, 2, false)
+		return bfreserve(txn, 0, []byte("mybloom"), 0.01, 1000, 2, false)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -57,11 +57,11 @@ func TestBloomReserveKeyExists(t *testing.T) {
 	defer db.Close()
 
 	db.Update(func(txn *badger.Txn) error {
-		return bfreserve(txn, nil, []byte("dupbloom"), 0.01, 100, 2, false)
+		return bfreserve(txn, 0, []byte("dupbloom"), 0.01, 100, 2, false)
 	})
 
 	err := db.Update(func(txn *badger.Txn) error {
-		return bfreserve(txn, nil, []byte("dupbloom"), 0.01, 100, 2, false)
+		return bfreserve(txn, 0, []byte("dupbloom"), 0.01, 100, 2, false)
 	})
 	if err == nil {
 		t.Fatal("expected error for duplicate reserve")
@@ -76,14 +76,14 @@ func TestBloomAddExists(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		return bfreserve(txn, nil, []byte("bf"), 0.01, 1000, 2, false)
+		return bfreserve(txn, 0, []byte("bf"), 0.01, 1000, 2, false)
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	err = db.Update(func(txn *badger.Txn) error {
-		r, err := bfadd(txn, nil, []byte("bf"), []byte("hello"))
+		r, err := bfadd(txn, 0, []byte("bf"), []byte("hello"))
 		if err != nil {
 			return err
 		}
@@ -97,7 +97,7 @@ func TestBloomAddExists(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		exists, err := bfexists(txn, nil, []byte("bf"), []byte("hello"))
+		exists, err := bfexists(txn, 0, []byte("bf"), []byte("hello"))
 		if err != nil {
 			return err
 		}
@@ -116,11 +116,11 @@ func TestBloomAddDuplicate(t *testing.T) {
 	defer db.Close()
 
 	db.Update(func(txn *badger.Txn) error {
-		return bfreserve(txn, nil, []byte("bf"), 0.01, 1000, 2, false)
+		return bfreserve(txn, 0, []byte("bf"), 0.01, 1000, 2, false)
 	})
 
 	db.Update(func(txn *badger.Txn) error {
-		r, err := bfadd(txn, nil, []byte("bf"), []byte("hello"))
+		r, err := bfadd(txn, 0, []byte("bf"), []byte("hello"))
 		if r != 1 || err != nil {
 			t.Fatal("first add should succeed")
 		}
@@ -128,7 +128,7 @@ func TestBloomAddDuplicate(t *testing.T) {
 	})
 
 	db.Update(func(txn *badger.Txn) error {
-		r, err := bfadd(txn, nil, []byte("bf"), []byte("hello"))
+		r, err := bfadd(txn, 0, []byte("bf"), []byte("hello"))
 		if err != nil {
 			return err
 		}
@@ -144,11 +144,11 @@ func TestBloomExistsNonexistent(t *testing.T) {
 	defer db.Close()
 
 	db.Update(func(txn *badger.Txn) error {
-		return bfreserve(txn, nil, []byte("bf"), 0.01, 1000, 2, false)
+		return bfreserve(txn, 0, []byte("bf"), 0.01, 1000, 2, false)
 	})
 
 	db.View(func(txn *badger.Txn) error {
-		exists, err := bfexists(txn, nil, []byte("bf"), []byte("nope"))
+		exists, err := bfexists(txn, 0, []byte("bf"), []byte("nope"))
 		if err != nil {
 			return err
 		}
@@ -164,7 +164,7 @@ func TestBloomExistsNonExistentKey(t *testing.T) {
 	defer db.Close()
 
 	db.View(func(txn *badger.Txn) error {
-		exists, err := bfexists(txn, nil, []byte("nokey"), []byte("x"))
+		exists, err := bfexists(txn, 0, []byte("nokey"), []byte("x"))
 		if err != nil {
 			return err
 		}
@@ -180,7 +180,7 @@ func TestBloomAddCreatesDefault(t *testing.T) {
 	defer db.Close()
 
 	db.Update(func(txn *badger.Txn) error {
-		r, err := bfadd(txn, nil, []byte("auto"), []byte("item"))
+		r, err := bfadd(txn, 0, []byte("auto"), []byte("item"))
 		if err != nil {
 			return err
 		}
@@ -211,11 +211,11 @@ func TestBloomMAdd(t *testing.T) {
 	defer db.Close()
 
 	db.Update(func(txn *badger.Txn) error {
-		return bfreserve(txn, nil, []byte("bf"), 0.01, 1000, 2, false)
+		return bfreserve(txn, 0, []byte("bf"), 0.01, 1000, 2, false)
 	})
 
 	db.Update(func(txn *badger.Txn) error {
-		results, err := bfmadd(txn, nil, []byte("bf"), [][]byte{[]byte("a"), []byte("b"), []byte("c")})
+		results, err := bfmadd(txn, 0, []byte("bf"), [][]byte{[]byte("a"), []byte("b"), []byte("c")})
 		if err != nil {
 			return err
 		}
@@ -236,16 +236,16 @@ func TestBloomMExists(t *testing.T) {
 	defer db.Close()
 
 	db.Update(func(txn *badger.Txn) error {
-		return bfreserve(txn, nil, []byte("bf"), 0.01, 1000, 2, false)
+		return bfreserve(txn, 0, []byte("bf"), 0.01, 1000, 2, false)
 	})
 	db.Update(func(txn *badger.Txn) error {
-		bfadd(txn, nil, []byte("bf"), []byte("a"))
-		bfadd(txn, nil, []byte("bf"), []byte("b"))
+		bfadd(txn, 0, []byte("bf"), []byte("a"))
+		bfadd(txn, 0, []byte("bf"), []byte("b"))
 		return nil
 	})
 
 	db.View(func(txn *badger.Txn) error {
-		results, err := bfmexists(txn, nil, []byte("bf"), [][]byte{[]byte("a"), []byte("x"), []byte("b")})
+		results, err := bfmexists(txn, 0, []byte("bf"), [][]byte{[]byte("a"), []byte("x"), []byte("b")})
 		if err != nil {
 			return err
 		}
@@ -264,17 +264,17 @@ func TestBloomInfo(t *testing.T) {
 	defer db.Close()
 
 	db.Update(func(txn *badger.Txn) error {
-		return bfreserve(txn, nil, []byte("bf"), 0.01, 1000, 2, false)
+		return bfreserve(txn, 0, []byte("bf"), 0.01, 1000, 2, false)
 	})
 	db.Update(func(txn *badger.Txn) error {
-		bfadd(txn, nil, []byte("bf"), []byte("a"))
-		bfadd(txn, nil, []byte("bf"), []byte("b"))
-		bfadd(txn, nil, []byte("bf"), []byte("c"))
+		bfadd(txn, 0, []byte("bf"), []byte("a"))
+		bfadd(txn, 0, []byte("bf"), []byte("b"))
+		bfadd(txn, 0, []byte("bf"), []byte("c"))
 		return nil
 	})
 
 	db.View(func(txn *badger.Txn) error {
-		info, err := bfinfo(txn, nil, []byte("bf"))
+		info, err := bfinfo(txn, 0, []byte("bf"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -299,7 +299,7 @@ func TestBloomInfoNonExistent(t *testing.T) {
 	defer db.Close()
 
 	db.View(func(txn *badger.Txn) error {
-		_, err := bfinfo(txn, nil, []byte("nokey"))
+		_, err := bfinfo(txn, 0, []byte("nokey"))
 		if err != badger.ErrKeyNotFound {
 			t.Fatalf("expected ErrKeyNotFound, got %v", err)
 		}
@@ -318,7 +318,7 @@ func TestBloomInsert(t *testing.T) {
 			Expansion: 2,
 			Items:     [][]byte{[]byte("x"), []byte("y")},
 		}
-		results, err := bfinsert(txn, nil, []byte("bf"), info)
+		results, err := bfinsert(txn, 0, []byte("bf"), info)
 		if err != nil {
 			return err
 		}
@@ -354,7 +354,7 @@ func TestBloomInsertNoCreate(t *testing.T) {
 			NoCreate: true,
 			Items:    [][]byte{[]byte("x")},
 		}
-		_, err := bfinsert(txn, nil, []byte("bf"), info)
+		_, err := bfinsert(txn, 0, []byte("bf"), info)
 		return err
 	})
 	if err != badger.ErrKeyNotFound {
@@ -368,14 +368,14 @@ func TestBloomScaling(t *testing.T) {
 
 	// Tiny capacity to force scaling quickly
 	db.Update(func(txn *badger.Txn) error {
-		return bfreserve(txn, nil, []byte("bf"), 0.01, 5, 2, false)
+		return bfreserve(txn, 0, []byte("bf"), 0.01, 5, 2, false)
 	})
 
 	// Insert enough items to trigger scaling
 	db.Update(func(txn *badger.Txn) error {
 		for i := 0; i < 20; i++ {
 			item := []byte{byte(i)}
-			if _, err := bfadd(txn, nil, []byte("bf"), item); err != nil {
+			if _, err := bfadd(txn, 0, []byte("bf"), item); err != nil {
 				return err
 			}
 		}
@@ -393,7 +393,7 @@ func TestBloomScaling(t *testing.T) {
 		// Check that all items are still found
 		items := [][]byte{{0}, {5}, {10}, {15}}
 		for _, item := range items {
-			exists, err := bfexists(txn, nil, []byte("bf"), item)
+			exists, err := bfexists(txn, 0, []byte("bf"), item)
 			if err != nil {
 				return err
 			}
@@ -411,14 +411,14 @@ func TestBloomNonScaling(t *testing.T) {
 
 	// NONSCALING with small capacity
 	db.Update(func(txn *badger.Txn) error {
-		return bfreserve(txn, nil, []byte("bf"), 0.01, 5, 2, true)
+		return bfreserve(txn, 0, []byte("bf"), 0.01, 5, 2, true)
 	})
 
 	// Insert many items - should NOT create new filter
 	db.Update(func(txn *badger.Txn) error {
 		for i := 0; i < 100; i++ {
 			item := []byte{byte(i)}
-			if _, err := bfadd(txn, nil, []byte("bf"), item); err != nil {
+			if _, err := bfadd(txn, 0, []byte("bf"), item); err != nil {
 				return err
 			}
 		}
@@ -577,14 +577,14 @@ func TestBloomManyItems(t *testing.T) {
 	defer db.Close()
 
 	db.Update(func(txn *badger.Txn) error {
-		return bfreserve(txn, nil, []byte("bf"), 0.001, 5000, 2, false)
+		return bfreserve(txn, 0, []byte("bf"), 0.001, 5000, 2, false)
 	})
 
 	n := 1000
 	for i := 0; i < n; i++ {
 		item := []byte{byte(i >> 8), byte(i), byte(i & 0xFF)}
 		db.Update(func(txn *badger.Txn) error {
-			_, err := bfadd(txn, nil, []byte("bf"), item)
+			_, err := bfadd(txn, 0, []byte("bf"), item)
 			return err
 		})
 	}
@@ -593,7 +593,7 @@ func TestBloomManyItems(t *testing.T) {
 	db.View(func(txn *badger.Txn) error {
 		for i := n; i < n*2; i++ {
 			item := []byte{byte(i >> 8), byte(i), byte(i & 0xFF)}
-			exists, err := bfexists(txn, nil, []byte("bf"), item)
+			exists, err := bfexists(txn, 0, []byte("bf"), item)
 			if err != nil {
 				return err
 			}
@@ -612,7 +612,7 @@ func TestBloomManyItems(t *testing.T) {
 	db.View(func(txn *badger.Txn) error {
 		for i := 0; i < n; i++ {
 			item := []byte{byte(i >> 8), byte(i), byte(i & 0xFF)}
-			exists, err := bfexists(txn, nil, []byte("bf"), item)
+			exists, err := bfexists(txn, 0, []byte("bf"), item)
 			if err != nil {
 				return err
 			}

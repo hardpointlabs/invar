@@ -16,7 +16,7 @@ func TestSAdd(t *testing.T) {
 	defer db.Close()
 
 	err = db.Update(func(txn *badger.Txn) error {
-		added, err := sadd(txn, nil, []byte("myset"), []byte("a"), []byte("b"), []byte("c"))
+		added, err := sadd(txn, 0, []byte("myset"), []byte("a"), []byte("b"), []byte("c"))
 		if err != nil {
 			return err
 		}
@@ -30,7 +30,7 @@ func TestSAdd(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		count, err := scard(txn, nil, []byte("myset"))
+		count, err := scard(txn, 0, []byte("myset"))
 		if err != nil {
 			return err
 		}
@@ -53,7 +53,7 @@ func TestSAddDuplicates(t *testing.T) {
 	defer db.Close()
 
 	err = db.Update(func(txn *badger.Txn) error {
-		added, err := sadd(txn, nil, []byte("set"), []byte("a"), []byte("a"), []byte("b"))
+		added, err := sadd(txn, 0, []byte("set"), []byte("a"), []byte("a"), []byte("b"))
 		if err != nil {
 			return err
 		}
@@ -67,7 +67,7 @@ func TestSAddDuplicates(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		count, err := scard(txn, nil, []byte("set"))
+		count, err := scard(txn, 0, []byte("set"))
 		if err != nil {
 			return err
 		}
@@ -90,7 +90,7 @@ func TestSRem(t *testing.T) {
 	defer db.Close()
 
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := sadd(txn, nil, []byte("set"), []byte("a"), []byte("b"), []byte("c"))
+		_, err := sadd(txn, 0, []byte("set"), []byte("a"), []byte("b"), []byte("c"))
 		return err
 	})
 	if err != nil {
@@ -98,7 +98,7 @@ func TestSRem(t *testing.T) {
 	}
 
 	err = db.Update(func(txn *badger.Txn) error {
-		removed, err := srem(txn, nil, []byte("set"), []byte("a"), []byte("c"), []byte("nonexistent"))
+		removed, err := srem(txn, 0, []byte("set"), []byte("a"), []byte("c"), []byte("nonexistent"))
 		if err != nil {
 			return err
 		}
@@ -112,7 +112,7 @@ func TestSRem(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		count, err := scard(txn, nil, []byte("set"))
+		count, err := scard(txn, 0, []byte("set"))
 		if err != nil {
 			return err
 		}
@@ -135,7 +135,7 @@ func TestSRemLastMember(t *testing.T) {
 	defer db.Close()
 
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := sadd(txn, nil, []byte("set"), []byte("only"))
+		_, err := sadd(txn, 0, []byte("set"), []byte("only"))
 		return err
 	})
 	if err != nil {
@@ -143,7 +143,7 @@ func TestSRemLastMember(t *testing.T) {
 	}
 
 	err = db.Update(func(txn *badger.Txn) error {
-		removed, err := srem(txn, nil, []byte("set"), []byte("only"))
+		removed, err := srem(txn, 0, []byte("set"), []byte("only"))
 		if err != nil {
 			return err
 		}
@@ -157,7 +157,7 @@ func TestSRemLastMember(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		count, err := scard(txn, nil, []byte("set"))
+		count, err := scard(txn, 0, []byte("set"))
 		if err != nil {
 			return err
 		}
@@ -180,7 +180,7 @@ func TestSCardNonExistent(t *testing.T) {
 	defer db.Close()
 
 	err = db.View(func(txn *badger.Txn) error {
-		count, err := scard(txn, nil, []byte("nonexistent"))
+		count, err := scard(txn, 0, []byte("nonexistent"))
 		if err != nil {
 			return err
 		}
@@ -203,7 +203,7 @@ func TestSMembers(t *testing.T) {
 	defer db.Close()
 
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := sadd(txn, nil, []byte("set"), []byte("b"), []byte("a"), []byte("c"))
+		_, err := sadd(txn, 0, []byte("set"), []byte("b"), []byte("a"), []byte("c"))
 		return err
 	})
 	if err != nil {
@@ -211,7 +211,7 @@ func TestSMembers(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		members, err := smembers(txn, nil, []byte("set"))
+		members, err := smembers(txn, 0, []byte("set"))
 		if err != nil {
 			return err
 		}
@@ -240,7 +240,7 @@ func TestSMembersNonExistent(t *testing.T) {
 	defer db.Close()
 
 	err = db.View(func(txn *badger.Txn) error {
-		members, err := smembers(txn, nil, []byte("nonexistent"))
+		members, err := smembers(txn, 0, []byte("nonexistent"))
 		if err != nil {
 			return err
 		}
@@ -263,7 +263,7 @@ func TestSIsMember(t *testing.T) {
 	defer db.Close()
 
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := sadd(txn, nil, []byte("set"), []byte("member1"), []byte("member2"))
+		_, err := sadd(txn, 0, []byte("set"), []byte("member1"), []byte("member2"))
 		return err
 	})
 	if err != nil {
@@ -271,7 +271,7 @@ func TestSIsMember(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		ok, err := sismember(txn, nil, []byte("set"), []byte("member1"))
+		ok, err := sismember(txn, 0, []byte("set"), []byte("member1"))
 		if err != nil {
 			return err
 		}
@@ -285,7 +285,7 @@ func TestSIsMember(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		ok, err := sismember(txn, nil, []byte("set"), []byte("nonexistent"))
+		ok, err := sismember(txn, 0, []byte("set"), []byte("nonexistent"))
 		if err != nil {
 			return err
 		}
@@ -308,7 +308,7 @@ func TestSPop(t *testing.T) {
 	defer db.Close()
 
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := sadd(txn, nil, []byte("set"), []byte("a"), []byte("b"), []byte("c"))
+		_, err := sadd(txn, 0, []byte("set"), []byte("a"), []byte("b"), []byte("c"))
 		return err
 	})
 	if err != nil {
@@ -318,7 +318,7 @@ func TestSPop(t *testing.T) {
 	var popped []byte
 	err = db.Update(func(txn *badger.Txn) error {
 		var err error
-		popped, err = spop(txn, nil, []byte("set"))
+		popped, err = spop(txn, 0, []byte("set"))
 		return err
 	})
 	if err != nil {
@@ -329,7 +329,7 @@ func TestSPop(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		count, err := scard(txn, nil, []byte("set"))
+		count, err := scard(txn, 0, []byte("set"))
 		if err != nil {
 			return err
 		}
@@ -352,7 +352,7 @@ func TestSPopNonExistent(t *testing.T) {
 	defer db.Close()
 
 	err = db.Update(func(txn *badger.Txn) error {
-		val, err := spop(txn, nil, []byte("nonexistent"))
+		val, err := spop(txn, 0, []byte("nonexistent"))
 		if err != nil {
 			return err
 		}
@@ -375,7 +375,7 @@ func TestSRandMember(t *testing.T) {
 	defer db.Close()
 
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := sadd(txn, nil, []byte("set"), []byte("a"), []byte("b"), []byte("c"))
+		_, err := sadd(txn, 0, []byte("set"), []byte("a"), []byte("b"), []byte("c"))
 		return err
 	})
 	if err != nil {
@@ -383,7 +383,7 @@ func TestSRandMember(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		members, err := srandmember(txn, nil, []byte("set"), 1)
+		members, err := srandmember(txn, 0, []byte("set"), 1)
 		if err != nil {
 			return err
 		}
@@ -398,7 +398,7 @@ func TestSRandMember(t *testing.T) {
 
 	err = db.View(func(txn *badger.Txn) error {
 		// Verify set still has 3 members (no removal)
-		count, err := scard(txn, nil, []byte("set"))
+		count, err := scard(txn, 0, []byte("set"))
 		if err != nil {
 			return err
 		}
@@ -421,7 +421,7 @@ func TestSMove(t *testing.T) {
 	defer db.Close()
 
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := sadd(txn, nil, []byte("src"), []byte("a"), []byte("b"))
+		_, err := sadd(txn, 0, []byte("src"), []byte("a"), []byte("b"))
 		return err
 	})
 	if err != nil {
@@ -429,7 +429,7 @@ func TestSMove(t *testing.T) {
 	}
 
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := sadd(txn, nil, []byte("dst"), []byte("c"))
+		_, err := sadd(txn, 0, []byte("dst"), []byte("c"))
 		return err
 	})
 	if err != nil {
@@ -439,7 +439,7 @@ func TestSMove(t *testing.T) {
 	var moved bool
 	err = db.Update(func(txn *badger.Txn) error {
 		var err error
-		moved, err = smove(txn, nil, []byte("src"), []byte("dst"), []byte("a"))
+		moved, err = smove(txn, 0, []byte("src"), []byte("dst"), []byte("a"))
 		return err
 	})
 	if err != nil {
@@ -450,7 +450,7 @@ func TestSMove(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		count, err := scard(txn, nil, []byte("src"))
+		count, err := scard(txn, 0, []byte("src"))
 		if err != nil {
 			return err
 		}
@@ -464,7 +464,7 @@ func TestSMove(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		ok, err := sismember(txn, nil, []byte("dst"), []byte("a"))
+		ok, err := sismember(txn, 0, []byte("dst"), []byte("a"))
 		if err != nil {
 			return err
 		}
@@ -489,7 +489,7 @@ func TestSMoveNonExistentSource(t *testing.T) {
 	var moved bool
 	err = db.Update(func(txn *badger.Txn) error {
 		var err error
-		moved, err = smove(txn, nil, []byte("nonexistent"), []byte("dst"), []byte("x"))
+		moved, err = smove(txn, 0, []byte("nonexistent"), []byte("dst"), []byte("x"))
 		return err
 	})
 	if err != nil {
@@ -509,7 +509,7 @@ func TestSDiff(t *testing.T) {
 	defer db.Close()
 
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := sadd(txn, nil, []byte("set1"), []byte("a"), []byte("b"), []byte("c"), []byte("d"))
+		_, err := sadd(txn, 0, []byte("set1"), []byte("a"), []byte("b"), []byte("c"), []byte("d"))
 		return err
 	})
 	if err != nil {
@@ -517,7 +517,7 @@ func TestSDiff(t *testing.T) {
 	}
 
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := sadd(txn, nil, []byte("set2"), []byte("c"), []byte("d"), []byte("e"))
+		_, err := sadd(txn, 0, []byte("set2"), []byte("c"), []byte("d"), []byte("e"))
 		return err
 	})
 	if err != nil {
@@ -525,7 +525,7 @@ func TestSDiff(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		result, err := sdiff(txn, nil, []byte("set1"), []byte("set2"))
+		result, err := sdiff(txn, 0, []byte("set1"), []byte("set2"))
 		if err != nil {
 			return err
 		}
@@ -554,7 +554,7 @@ func TestSInter(t *testing.T) {
 	defer db.Close()
 
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := sadd(txn, nil, []byte("set1"), []byte("a"), []byte("b"), []byte("c"))
+		_, err := sadd(txn, 0, []byte("set1"), []byte("a"), []byte("b"), []byte("c"))
 		return err
 	})
 	if err != nil {
@@ -562,7 +562,7 @@ func TestSInter(t *testing.T) {
 	}
 
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := sadd(txn, nil, []byte("set2"), []byte("b"), []byte("c"), []byte("d"))
+		_, err := sadd(txn, 0, []byte("set2"), []byte("b"), []byte("c"), []byte("d"))
 		return err
 	})
 	if err != nil {
@@ -570,7 +570,7 @@ func TestSInter(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		result, err := sinter(txn, nil, []byte("set1"), []byte("set2"))
+		result, err := sinter(txn, 0, []byte("set1"), []byte("set2"))
 		if err != nil {
 			return err
 		}
@@ -599,7 +599,7 @@ func TestSUnion(t *testing.T) {
 	defer db.Close()
 
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := sadd(txn, nil, []byte("set1"), []byte("a"), []byte("b"))
+		_, err := sadd(txn, 0, []byte("set1"), []byte("a"), []byte("b"))
 		return err
 	})
 	if err != nil {
@@ -607,7 +607,7 @@ func TestSUnion(t *testing.T) {
 	}
 
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := sadd(txn, nil, []byte("set2"), []byte("b"), []byte("c"))
+		_, err := sadd(txn, 0, []byte("set2"), []byte("b"), []byte("c"))
 		return err
 	})
 	if err != nil {
@@ -615,7 +615,7 @@ func TestSUnion(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		result, err := sunion(txn, nil, []byte("set1"), []byte("set2"))
+		result, err := sunion(txn, 0, []byte("set1"), []byte("set2"))
 		if err != nil {
 			return err
 		}
@@ -644,7 +644,7 @@ func TestSDiffStore(t *testing.T) {
 	defer db.Close()
 
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := sadd(txn, nil, []byte("set1"), []byte("a"), []byte("b"), []byte("c"))
+		_, err := sadd(txn, 0, []byte("set1"), []byte("a"), []byte("b"), []byte("c"))
 		return err
 	})
 	if err != nil {
@@ -652,7 +652,7 @@ func TestSDiffStore(t *testing.T) {
 	}
 
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := sadd(txn, nil, []byte("set2"), []byte("b"))
+		_, err := sadd(txn, 0, []byte("set2"), []byte("b"))
 		return err
 	})
 	if err != nil {
@@ -662,7 +662,7 @@ func TestSDiffStore(t *testing.T) {
 	var count int
 	err = db.Update(func(txn *badger.Txn) error {
 		var err error
-		count, err = sdiffstore(txn, nil, []byte("dest"), []byte("set1"), []byte("set2"))
+		count, err = sdiffstore(txn, 0, []byte("dest"), []byte("set1"), []byte("set2"))
 		return err
 	})
 	if err != nil {
@@ -673,7 +673,7 @@ func TestSDiffStore(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		members, err := smembers(txn, nil, []byte("dest"))
+		members, err := smembers(txn, 0, []byte("dest"))
 		if err != nil {
 			return err
 		}
@@ -696,7 +696,7 @@ func TestSInterStore(t *testing.T) {
 	defer db.Close()
 
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := sadd(txn, nil, []byte("set1"), []byte("a"), []byte("b"), []byte("c"))
+		_, err := sadd(txn, 0, []byte("set1"), []byte("a"), []byte("b"), []byte("c"))
 		return err
 	})
 	if err != nil {
@@ -704,7 +704,7 @@ func TestSInterStore(t *testing.T) {
 	}
 
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := sadd(txn, nil, []byte("set2"), []byte("b"), []byte("c"), []byte("d"))
+		_, err := sadd(txn, 0, []byte("set2"), []byte("b"), []byte("c"), []byte("d"))
 		return err
 	})
 	if err != nil {
@@ -714,7 +714,7 @@ func TestSInterStore(t *testing.T) {
 	var count int
 	err = db.Update(func(txn *badger.Txn) error {
 		var err error
-		count, err = sinterstore(txn, nil, []byte("dest"), []byte("set1"), []byte("set2"))
+		count, err = sinterstore(txn, 0, []byte("dest"), []byte("set1"), []byte("set2"))
 		return err
 	})
 	if err != nil {
@@ -725,7 +725,7 @@ func TestSInterStore(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		members, err := smembers(txn, nil, []byte("dest"))
+		members, err := smembers(txn, 0, []byte("dest"))
 		if err != nil {
 			return err
 		}
@@ -748,7 +748,7 @@ func TestSUnionStore(t *testing.T) {
 	defer db.Close()
 
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := sadd(txn, nil, []byte("set1"), []byte("a"), []byte("b"))
+		_, err := sadd(txn, 0, []byte("set1"), []byte("a"), []byte("b"))
 		return err
 	})
 	if err != nil {
@@ -756,7 +756,7 @@ func TestSUnionStore(t *testing.T) {
 	}
 
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := sadd(txn, nil, []byte("set2"), []byte("c"))
+		_, err := sadd(txn, 0, []byte("set2"), []byte("c"))
 		return err
 	})
 	if err != nil {
@@ -766,7 +766,7 @@ func TestSUnionStore(t *testing.T) {
 	var count int
 	err = db.Update(func(txn *badger.Txn) error {
 		var err error
-		count, err = sunionstore(txn, nil, []byte("dest"), []byte("set1"), []byte("set2"))
+		count, err = sunionstore(txn, 0, []byte("dest"), []byte("set1"), []byte("set2"))
 		return err
 	})
 	if err != nil {
@@ -777,7 +777,7 @@ func TestSUnionStore(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		members, err := smembers(txn, nil, []byte("dest"))
+		members, err := smembers(txn, 0, []byte("dest"))
 		if err != nil {
 			return err
 		}
@@ -800,7 +800,7 @@ func TestSAddAfterDelete(t *testing.T) {
 	defer db.Close()
 
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := sadd(txn, nil, []byte("set"), []byte("a"), []byte("b"))
+		_, err := sadd(txn, 0, []byte("set"), []byte("a"), []byte("b"))
 		return err
 	})
 	if err != nil {
@@ -808,7 +808,7 @@ func TestSAddAfterDelete(t *testing.T) {
 	}
 
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := srem(txn, nil, []byte("set"), []byte("a"), []byte("b"))
+		_, err := srem(txn, 0, []byte("set"), []byte("a"), []byte("b"))
 		return err
 	})
 	if err != nil {
@@ -816,7 +816,7 @@ func TestSAddAfterDelete(t *testing.T) {
 	}
 
 	err = db.Update(func(txn *badger.Txn) error {
-		added, err := sadd(txn, nil, []byte("set"), []byte("x"), []byte("y"))
+		added, err := sadd(txn, 0, []byte("set"), []byte("x"), []byte("y"))
 		if err != nil {
 			return err
 		}
@@ -830,7 +830,7 @@ func TestSAddAfterDelete(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		count, err := scard(txn, nil, []byte("set"))
+		count, err := scard(txn, 0, []byte("set"))
 		if err != nil {
 			return err
 		}

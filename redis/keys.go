@@ -37,10 +37,7 @@ func expireKey(conn redcon.Conn, db *badger.DB, key []byte, seconds int) {
 			return nil
 		}
 		var valCopy []byte
-		err = item.Value(func(val []byte) error {
-			valCopy = append([]byte{}, val...)
-			return nil
-		})
+		valCopy, err = copyItemValue(item)
 		if err != nil {
 			return err
 		}
@@ -180,10 +177,7 @@ func renameKey(conn redcon.Conn, db *badger.DB, oldKey, newKey []byte) {
 			return nil
 		}
 		var valCopy []byte
-		err = item.Value(func(val []byte) error {
-			valCopy = append([]byte{}, val...)
-			return nil
-		})
+		valCopy, err = copyItemValue(item)
 		if err != nil {
 			conn.WriteError("ERR " + err.Error())
 			return err
@@ -219,10 +213,7 @@ func renameNXKey(conn redcon.Conn, db *badger.DB, oldKey, newKey []byte) {
 					return nil
 				}
 				var valCopy []byte
-				err = item.Value(func(val []byte) error {
-					valCopy = append([]byte{}, val...)
-					return nil
-				})
+				valCopy, err = copyItemValue(item)
 				if err != nil {
 					log.Debug().Msg("rename get err")
 					conn.WriteError("ERR " + err.Error())

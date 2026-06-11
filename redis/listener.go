@@ -1,6 +1,7 @@
 package redis
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math/rand/v2"
 	"strconv"
@@ -37,14 +38,64 @@ func currentDbPrefix(conn redcon.Conn) []byte {
 	return []byte(strconv.Itoa(currentDb(conn)) + prefixSeparator)
 }
 
-// rawKeyPrefix with explicit db index (for testing)
-func rawKeyPrefixWithDb(keyName []byte, dbSlot int) []byte {
+// rawKeyPrefix builds the public key prefix "{dbSlot}:{keyName}" for user-accessible keys.
+func rawKeyPrefix(keyName []byte, dbSlot int) []byte {
 	return append([]byte(strconv.Itoa(dbSlot)+prefixSeparator), keyName...)
 }
 
-// prefixer for publicly accessible keys, including the database slot
-func rawKeyPrefix(keyName []byte, dbSlot int) []byte {
-	return append([]byte(strconv.Itoa(dbSlot)+prefixSeparator), keyName...)
+// copyItemValue safely copies a Badger item's value into a new []byte.
+func copyItemValue(item *badger.Item) ([]byte, error) {
+	var out []byte
+	err := item.Value(func(val []byte) error {
+		out = append([]byte{}, val...)
+		return nil
+	})
+	return out, err
+}
+
+// readUint32Sentinel reads a 4-byte big-endian uint32 from a public sentinel key.
+func readUint32Sentinel(txn *badger.Txn, key []byte, dbSlot int) (uint32, error) {
+	item, err := txn.Get(rawKeyPrefix(key, dbSlot))
+	if err != nil {
+		return 0, err
+	}
+	var count uint32
+	if err := item.Value(func(val []byte) error {
+		count = binary.BigEndian.Uint32(val)
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// writeUint32Sentinel writes a 4-byte big-endian uint32 to a public sentinel key with the given type meta.
+func writeUint32Sentinel(txn *badger.Txn, key []byte, count uint32, typ redisValueType, dbSlot int) error {
+	buf := make([]byte, 4)
+	binary.BigEndian.PutUint32(buf, count)
+	return txn.SetEntry(badger.NewEntry(rawKeyPrefix(key, dbSlot), buf).WithMeta(byte(typ)))
+}
+
+// clearPrefixedKeys deletes all internal keys under prefix, then deletes the sentinel key.
+func clearPrefixedKeys(txn *badger.Txn, prefix, sentinelKey []byte) error {
+	opts := badger.DefaultIteratorOptions
+	opts.Prefix = prefix
+	it := txn.NewIterator(opts)
+	defer it.Close()
+	for it.Rewind(); it.Valid(); it.Next() {
+		if err := txn.Delete(it.Item().KeyCopy(nil)); err != nil {
+			return err
+		}
+	}
+	return txn.Delete(sentinelKey)
+}
+
+// writeBulkArray writes a RESP array of bulk strings to conn.
+func writeBulkArray(conn redcon.Conn, items [][]byte) {
+	conn.WriteArray(len(items))
+	for _, item := range items {
+		conn.WriteBulk(item)
+	}
 }
 
 type ClientInfo struct {
@@ -86,11 +137,7 @@ func getKeys(conn redcon.Conn, db *badger.DB, keys ...[]byte) {
 				conn.WriteNull()
 				continue
 			}
-			var valCopy []byte
-			err = item.Value(func(val []byte) error {
-				valCopy = append([]byte{}, val...)
-				return nil
-			})
+			valCopy, err := copyItemValue(item)
 			if err != nil {
 				conn.WriteError("ERR " + err.Error())
 				return err
@@ -101,18 +148,13 @@ func getKeys(conn redcon.Conn, db *badger.DB, keys ...[]byte) {
 	})
 }
 
-func moveKey(conn redcon.Conn, db *badger.DB, key []byte, targetDb int) {
-	_ = db.Update(func(txn *badger.Txn) error {
+func moveKey(conn redcon.Conn, db *badger.DB, key []byte, targetDb int) {	_ = db.Update(func(txn *badger.Txn) error {
 		item, err := txn.Get(rawKeyPrefix(key, currentDb(conn)))
 		if err != nil {
 			conn.WriteInt(0)
 			return nil
 		}
-		var valCopy []byte
-		err = item.Value(func(val []byte) error {
-			valCopy = append([]byte{}, val...)
-			return nil
-		})
+		valCopy, err := copyItemValue(item)
 		if err != nil {
 			conn.WriteError("ERR " + err.Error())
 			return err
@@ -134,53 +176,6 @@ func moveKey(conn redcon.Conn, db *badger.DB, key []byte, targetDb int) {
 		}
 
 		conn.WriteInt(1)
-		return nil
-	})
-}
-
-func incrementKey(conn redcon.Conn, db *badger.DB, key []byte, amount int64) {
-	_ = db.Update(func(txn *badger.Txn) error {
-		var currentValue int64 = 0
-		var meta byte = byte(RedisString)
-		item, err := txn.Get(rawKeyPrefix(key, currentDb(conn)))
-		if err != nil {
-			if err != badger.ErrKeyNotFound {
-				conn.WriteError("ERR " + err.Error())
-				return err
-			}
-			currentValue = amount
-			entry := badger.NewEntry(rawKeyPrefix(key, currentDb(conn)), []byte(strconv.FormatInt(currentValue, 10))).WithMeta(meta)
-			err = txn.SetEntry(entry)
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return err
-			}
-			conn.WriteInt64(currentValue)
-			return nil
-		}
-
-		var valCopy []byte
-		err = item.Value(func(val []byte) error {
-			valCopy = append([]byte{}, val...)
-			return nil
-		})
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return err
-		}
-		currentValue, err = strconv.ParseInt(string(valCopy), 10, 64)
-		if err != nil {
-			conn.WriteError("ERR value is not an integer or out of range")
-			return err
-		}
-		currentValue += amount
-		entry := badger.NewEntry(rawKeyPrefix(key, currentDb(conn)), []byte(strconv.FormatInt(currentValue, 10))).WithMeta(item.UserMeta())
-		err = txn.SetEntry(entry)
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return err
-		}
-		conn.WriteInt64(currentValue)
 		return nil
 	})
 }
@@ -476,7 +471,7 @@ func Serve(db *badger.DB) {
 					return
 				}
 				err := db.Update(func(txn *badger.Txn) error {
-					_, err := lpush(txn, conn, cmd.Args[1], cmd.Args[2:]...)
+					_, err := lpush(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
 					return err
 				})
 				if err != nil {
@@ -484,7 +479,7 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					size, err := llen(txn, conn, cmd.Args[1])
+					size, err := llen(txn, currentDb(conn), cmd.Args[1])
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return err
@@ -497,7 +492,7 @@ func Serve(db *badger.DB) {
 					return
 				}
 				err := db.Update(func(txn *badger.Txn) error {
-					_, err := rpush(txn, conn, cmd.Args[1], cmd.Args[2:]...)
+					_, err := rpush(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
 					return err
 				})
 				if err != nil {
@@ -505,7 +500,7 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					size, err := llen(txn, conn, cmd.Args[1])
+					size, err := llen(txn, currentDb(conn), cmd.Args[1])
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return err
@@ -521,7 +516,7 @@ func Serve(db *badger.DB) {
 				var dbErr error
 				dbErr = db.Update(func(txn *badger.Txn) error {
 					var err error
-					val, err = lpop(txn, conn, cmd.Args[1])
+					val, err = lpop(txn, currentDb(conn), cmd.Args[1])
 					return err
 				})
 				if dbErr != nil {
@@ -541,7 +536,7 @@ func Serve(db *badger.DB) {
 				var dbErr error
 				dbErr = db.Update(func(txn *badger.Txn) error {
 					var err error
-					val, err = rpop(txn, conn, cmd.Args[1])
+					val, err = rpop(txn, currentDb(conn), cmd.Args[1])
 					return err
 				})
 				if dbErr != nil {
@@ -558,7 +553,7 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					size, err := llen(txn, conn, cmd.Args[1])
+					size, err := llen(txn, currentDb(conn), cmd.Args[1])
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return err
@@ -579,15 +574,12 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					items, err := lrange(txn, conn, cmd.Args[1], start, stop)
-					if err != nil {
-						conn.WriteError("ERR " + err.Error())
-						return err
-					}
-					conn.WriteArray(len(items))
-					for _, item := range items {
-						conn.WriteBulk(item)
-					}
+				items, err := lrange(txn, currentDb(conn), cmd.Args[1], start, stop)
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return err
+				}
+				writeBulkArray(conn, items)
 					return nil
 				})
 			case "lindex":
@@ -599,7 +591,7 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					val, err := lindex(txn, conn, cmd.Args[1], index)
+					val, err := lindex(txn, currentDb(conn), cmd.Args[1], index)
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return err
@@ -620,7 +612,7 @@ func Serve(db *badger.DB) {
 					return
 				}
 				err := db.Update(func(txn *badger.Txn) error {
-					return lset(txn, conn, cmd.Args[1], index, cmd.Args[3])
+					return lset(txn, currentDb(conn), cmd.Args[1], index, cmd.Args[3])
 				})
 				if err != nil {
 					if err == badger.ErrKeyNotFound {
@@ -642,7 +634,7 @@ func Serve(db *badger.DB) {
 				var removed int
 				err := db.Update(func(txn *badger.Txn) error {
 					var err error
-					removed, err = lrem(txn, conn, cmd.Args[1], count, cmd.Args[3])
+					removed, err = lrem(txn, currentDb(conn), cmd.Args[1], count, cmd.Args[3])
 					return err
 				})
 				if err != nil {
@@ -663,7 +655,7 @@ func Serve(db *badger.DB) {
 					return
 				}
 				err := db.Update(func(txn *badger.Txn) error {
-					return ltrim(txn, conn, cmd.Args[1], start, stop)
+					return ltrim(txn, currentDb(conn), cmd.Args[1], start, stop)
 				})
 				if err != nil {
 					conn.WriteError("ERR " + err.Error())
@@ -679,7 +671,7 @@ func Serve(db *badger.DB) {
 				var dbErr error
 				dbErr = db.Update(func(txn *badger.Txn) error {
 					var err error
-					result, err = linsert(txn, conn, cmd.Args[1], before, cmd.Args[3], cmd.Args[4])
+					result, err = linsert(txn, currentDb(conn), cmd.Args[1], before, cmd.Args[3], cmd.Args[4])
 					return err
 				})
 				if dbErr != nil {
@@ -691,52 +683,32 @@ func Serve(db *badger.DB) {
 				if !checkExactArgs(conn, cmd, 3) {
 					return
 				}
-				var size int
-				var dbErr error
-				dbErr = db.Update(func(txn *badger.Txn) error {
-					_, err := txn.Get(rawKeyPrefix(cmd.Args[1], currentDb(conn)))
-					if err == badger.ErrKeyNotFound {
-						size = 0
-						return nil
-					}
-					if err != nil {
-						return err
-					}
-					var newSize uint32
-					newSize, err = lpush(txn, conn, cmd.Args[1], cmd.Args[2])
-					size = int(newSize)
+				var size uint32
+				err := db.Update(func(txn *badger.Txn) error {
+					var err error
+					size, err = lpushx(txn, currentDb(conn), cmd.Args[1], cmd.Args[2])
 					return err
 				})
-				if dbErr != nil {
-					conn.WriteError("ERR " + dbErr.Error())
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
 					return
 				}
-				conn.WriteInt(size)
+				conn.WriteInt(int(size))
 			case "rpushx":
 				if !checkExactArgs(conn, cmd, 3) {
 					return
 				}
-				var size int
-				var dbErr error
-				dbErr = db.Update(func(txn *badger.Txn) error {
-					_, err := txn.Get(rawKeyPrefix(cmd.Args[1], currentDb(conn)))
-					if err == badger.ErrKeyNotFound {
-						size = 0
-						return nil
-					}
-					if err != nil {
-						return err
-					}
-					var newSize uint32
-					newSize, err = rpush(txn, conn, cmd.Args[1], cmd.Args[2])
-					size = int(newSize)
+				var size uint32
+				err := db.Update(func(txn *badger.Txn) error {
+					var err error
+					size, err = rpushx(txn, currentDb(conn), cmd.Args[1], cmd.Args[2])
 					return err
 				})
-				if dbErr != nil {
-					conn.WriteError("ERR " + dbErr.Error())
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
 					return
 				}
-				conn.WriteInt(size)
+				conn.WriteInt(int(size))
 			case "hset":
 				if len(cmd.Args) < 4 || (len(cmd.Args)-2)%2 != 0 {
 					conn.WriteError("ERR wrong number of arguments for 'hset' command")
@@ -745,7 +717,7 @@ func Serve(db *badger.DB) {
 				var added int
 				err := db.Update(func(txn *badger.Txn) error {
 					var err error
-					added, err = hset(txn, conn, cmd.Args[1], cmd.Args[2:]...)
+					added, err = hset(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
 					return err
 				})
 				if err != nil {
@@ -758,26 +730,13 @@ func Serve(db *badger.DB) {
 					return
 				}
 				var set int
-				var nxErr error
-				nxErr = db.Update(func(txn *badger.Txn) error {
-					_, err := txn.Get(internalHashKey(cmd.Args[1], cmd.Args[2], currentDb(conn)))
-					if err == nil {
-						set = 0
-						return nil
-					}
-					if err != badger.ErrKeyNotFound {
-						return err
-					}
-					added, err := hset(txn, conn, cmd.Args[1], cmd.Args[2], cmd.Args[3])
-					if err != nil {
-						return err
-					}
-					_ = added
-					set = 1
-					return nil
+				err := db.Update(func(txn *badger.Txn) error {
+					var err error
+					set, err = hsetnx(txn, currentDb(conn), cmd.Args[1], cmd.Args[2], cmd.Args[3])
+					return err
 				})
-				if nxErr != nil {
-					conn.WriteError("ERR " + nxErr.Error())
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
 					return
 				}
 				conn.WriteInt(set)
@@ -786,7 +745,7 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					val, err := hget(txn, conn, cmd.Args[1], cmd.Args[2])
+					val, err := hget(txn, currentDb(conn), cmd.Args[1], cmd.Args[2])
 					if err != nil {
 						conn.WriteNull()
 						return nil
@@ -802,7 +761,7 @@ func Serve(db *badger.DB) {
 				var hdelErr error
 				hdelErr = db.Update(func(txn *badger.Txn) error {
 					var err error
-					hdelRemoved, err = hdel(txn, conn, cmd.Args[1], cmd.Args[2:]...)
+					hdelRemoved, err = hdel(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
 					return err
 				})
 				if hdelErr != nil {
@@ -815,7 +774,7 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					ok, err := hexists(txn, conn, cmd.Args[1], cmd.Args[2])
+					ok, err := hexists(txn, currentDb(conn), cmd.Args[1], cmd.Args[2])
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return nil
@@ -832,7 +791,7 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					count, err := hlen(txn, conn, cmd.Args[1])
+					count, err := hlen(txn, currentDb(conn), cmd.Args[1])
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return nil
@@ -845,7 +804,7 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					results, err := hmget(txn, conn, cmd.Args[1], cmd.Args[2:]...)
+					results, err := hmget(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return nil
@@ -867,7 +826,7 @@ func Serve(db *badger.DB) {
 				}
 				var hmsetErr error
 				hmsetErr = db.Update(func(txn *badger.Txn) error {
-					_, err := hset(txn, conn, cmd.Args[1], cmd.Args[2:]...)
+					_, err := hset(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
 					return err
 				})
 				if hmsetErr != nil {
@@ -880,15 +839,12 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					keys, err := hkeys(txn, conn, cmd.Args[1])
-					if err != nil {
-						conn.WriteError("ERR " + err.Error())
-						return nil
-					}
-					conn.WriteArray(len(keys))
-					for _, k := range keys {
-						conn.WriteBulk(k)
-					}
+				keys, err := hkeys(txn, currentDb(conn), cmd.Args[1])
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return nil
+				}
+				writeBulkArray(conn, keys)
 					return nil
 				})
 			case "hvals":
@@ -896,15 +852,12 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					vals, err := hvals(txn, conn, cmd.Args[1])
-					if err != nil {
-						conn.WriteError("ERR " + err.Error())
-						return nil
-					}
-					conn.WriteArray(len(vals))
-					for _, v := range vals {
-						conn.WriteBulk(v)
-					}
+				vals, err := hvals(txn, currentDb(conn), cmd.Args[1])
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return nil
+				}
+				writeBulkArray(conn, vals)
 					return nil
 				})
 			case "hgetall":
@@ -912,15 +865,12 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					pairs, err := hgetall(txn, conn, cmd.Args[1])
-					if err != nil {
-						conn.WriteError("ERR " + err.Error())
-						return nil
-					}
-					conn.WriteArray(len(pairs))
-					for _, p := range pairs {
-						conn.WriteBulk(p)
-					}
+				pairs, err := hgetall(txn, currentDb(conn), cmd.Args[1])
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return nil
+				}
+				writeBulkArray(conn, pairs)
 					return nil
 				})
 			case "hincrby":
@@ -935,7 +885,7 @@ func Serve(db *badger.DB) {
 				var incrbyErr error
 				incrbyErr = db.Update(func(txn *badger.Txn) error {
 					var err error
-					newVal, err = hincrby(txn, conn, cmd.Args[1], cmd.Args[2], incrAmount)
+					newVal, err = hincrby(txn, currentDb(conn), cmd.Args[1], cmd.Args[2], incrAmount)
 					return err
 				})
 				if incrbyErr != nil {
@@ -955,7 +905,7 @@ func Serve(db *badger.DB) {
 				var incrFloatErr error
 				incrFloatErr = db.Update(func(txn *badger.Txn) error {
 					var err error
-					floatResult, err = hincrbyfloat(txn, conn, cmd.Args[1], cmd.Args[2], floatAmount)
+					floatResult, err = hincrbyfloat(txn, currentDb(conn), cmd.Args[1], cmd.Args[2], floatAmount)
 					return err
 				})
 				if incrFloatErr != nil {
@@ -982,7 +932,7 @@ func Serve(db *badger.DB) {
 					}
 				}
 				db.View(func(txn *badger.Txn) error {
-					result, err := hrandfield(txn, conn, cmd.Args[1], count, withValues)
+					result, err := hrandfield(txn, currentDb(conn), cmd.Args[1], count, withValues)
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return nil
@@ -1006,7 +956,7 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					length, err := hstrlen(txn, conn, cmd.Args[1], cmd.Args[2])
+					length, err := hstrlen(txn, currentDb(conn), cmd.Args[1], cmd.Args[2])
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return nil
@@ -1042,7 +992,7 @@ func Serve(db *badger.DB) {
 					}
 				}
 				db.View(func(txn *badger.Txn) error {
-					pairs, err := hscan(txn, conn, cmd.Args[1], pattern, count)
+					pairs, err := hscan(txn, currentDb(conn), cmd.Args[1], pattern, count)
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return nil
@@ -1062,7 +1012,7 @@ func Serve(db *badger.DB) {
 				var added int
 				err := db.Update(func(txn *badger.Txn) error {
 					var err error
-					added, err = sadd(txn, conn, cmd.Args[1], cmd.Args[2:]...)
+					added, err = sadd(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
 					return err
 				})
 				if err != nil {
@@ -1077,7 +1027,7 @@ func Serve(db *badger.DB) {
 				var removed int
 				err := db.Update(func(txn *badger.Txn) error {
 					var err error
-					removed, err = srem(txn, conn, cmd.Args[1], cmd.Args[2:]...)
+					removed, err = srem(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
 					return err
 				})
 				if err != nil {
@@ -1090,7 +1040,7 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					count, err := scard(txn, conn, cmd.Args[1])
+					count, err := scard(txn, currentDb(conn), cmd.Args[1])
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return nil
@@ -1103,15 +1053,12 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					members, err := smembers(txn, conn, cmd.Args[1])
-					if err != nil {
-						conn.WriteError("ERR " + err.Error())
-						return nil
-					}
-					conn.WriteArray(len(members))
-					for _, m := range members {
-						conn.WriteBulk(m)
-					}
+				members, err := smembers(txn, currentDb(conn), cmd.Args[1])
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return nil
+				}
+				writeBulkArray(conn, members)
 					return nil
 				})
 			case "sismember":
@@ -1119,7 +1066,7 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					ok, err := sismember(txn, conn, cmd.Args[1], cmd.Args[2])
+					ok, err := sismember(txn, currentDb(conn), cmd.Args[1], cmd.Args[2])
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return nil
@@ -1139,7 +1086,7 @@ func Serve(db *badger.DB) {
 				var dbErr error
 				dbErr = db.Update(func(txn *badger.Txn) error {
 					var err error
-					val, err = spop(txn, conn, cmd.Args[1])
+					val, err = spop(txn, currentDb(conn), cmd.Args[1])
 					return err
 				})
 				if dbErr != nil {
@@ -1156,7 +1103,7 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					members, err := srandmember(txn, conn, cmd.Args[1], 1)
+					members, err := srandmember(txn, currentDb(conn), cmd.Args[1], 1)
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return nil
@@ -1175,7 +1122,7 @@ func Serve(db *badger.DB) {
 				var moved bool
 				err := db.Update(func(txn *badger.Txn) error {
 					var err error
-					moved, err = smove(txn, conn, cmd.Args[1], cmd.Args[2], cmd.Args[3])
+					moved, err = smove(txn, currentDb(conn), cmd.Args[1], cmd.Args[2], cmd.Args[3])
 					return err
 				})
 				if err != nil {
@@ -1192,15 +1139,12 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					result, err := sdiff(txn, conn, cmd.Args[1:]...)
-					if err != nil {
-						conn.WriteError("ERR " + err.Error())
-						return nil
-					}
-					conn.WriteArray(len(result))
-					for _, m := range result {
-						conn.WriteBulk(m)
-					}
+				result, err := sdiff(txn, currentDb(conn), cmd.Args[1:]...)
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return nil
+				}
+				writeBulkArray(conn, result)
 					return nil
 				})
 			case "sinter":
@@ -1208,15 +1152,12 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					result, err := sinter(txn, conn, cmd.Args[1:]...)
-					if err != nil {
-						conn.WriteError("ERR " + err.Error())
-						return nil
-					}
-					conn.WriteArray(len(result))
-					for _, m := range result {
-						conn.WriteBulk(m)
-					}
+				result, err := sinter(txn, currentDb(conn), cmd.Args[1:]...)
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return nil
+				}
+				writeBulkArray(conn, result)
 					return nil
 				})
 			case "sunion":
@@ -1224,15 +1165,12 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					result, err := sunion(txn, conn, cmd.Args[1:]...)
-					if err != nil {
-						conn.WriteError("ERR " + err.Error())
-						return nil
-					}
-					conn.WriteArray(len(result))
-					for _, m := range result {
-						conn.WriteBulk(m)
-					}
+				result, err := sunion(txn, currentDb(conn), cmd.Args[1:]...)
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return nil
+				}
+				writeBulkArray(conn, result)
 					return nil
 				})
 			case "sdiffstore":
@@ -1242,7 +1180,7 @@ func Serve(db *badger.DB) {
 				var count int
 				err := db.Update(func(txn *badger.Txn) error {
 					var err error
-					count, err = sdiffstore(txn, conn, cmd.Args[1], cmd.Args[2:]...)
+					count, err = sdiffstore(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
 					return err
 				})
 				if err != nil {
@@ -1257,7 +1195,7 @@ func Serve(db *badger.DB) {
 				var count int
 				err := db.Update(func(txn *badger.Txn) error {
 					var err error
-					count, err = sinterstore(txn, conn, cmd.Args[1], cmd.Args[2:]...)
+					count, err = sinterstore(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
 					return err
 				})
 				if err != nil {
@@ -1272,7 +1210,7 @@ func Serve(db *badger.DB) {
 				var count int
 				err := db.Update(func(txn *badger.Txn) error {
 					var err error
-					count, err = sunionstore(txn, conn, cmd.Args[1], cmd.Args[2:]...)
+					count, err = sunionstore(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
 					return err
 				})
 				if err != nil {
@@ -1287,7 +1225,7 @@ func Serve(db *badger.DB) {
 				var added int
 				err := db.Update(func(txn *badger.Txn) error {
 					var err error
-					added, err = zadd(txn, conn, cmd.Args[1], cmd.Args[2:]...)
+					added, err = zadd(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
 					return err
 				})
 				if err != nil {
@@ -1300,7 +1238,7 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					count, err := zcard(txn, conn, cmd.Args[1])
+					count, err := zcard(txn, currentDb(conn), cmd.Args[1])
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return nil
@@ -1313,7 +1251,7 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					count, err := zcount(txn, conn, cmd.Args[1], string(cmd.Args[2]), string(cmd.Args[3]))
+					count, err := zcount(txn, currentDb(conn), cmd.Args[1], string(cmd.Args[2]), string(cmd.Args[3]))
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return nil
@@ -1332,7 +1270,7 @@ func Serve(db *badger.DB) {
 				var newScore float64
 				err := db.Update(func(txn *badger.Txn) error {
 					var err error
-					newScore, err = zincrby(txn, conn, cmd.Args[1], incr, cmd.Args[3])
+					newScore, err = zincrby(txn, currentDb(conn), cmd.Args[1], incr, cmd.Args[3])
 					return err
 				})
 				if err != nil {
@@ -1400,7 +1338,7 @@ func Serve(db *badger.DB) {
 				}
 				if isStore {
 					db.Update(func(txn *badger.Txn) error {
-						m, err := zinter(txn, conn, aggregate, keys...)
+						m, err := zinter(txn, currentDb(conn), aggregate, keys...)
 						if err != nil {
 							conn.WriteError("ERR " + err.Error())
 							return nil
@@ -1411,7 +1349,7 @@ func Serve(db *badger.DB) {
 							}
 						}
 						members := zsetToSlice(m)
-						count, err := storeZSetResult(txn, conn, cmd.Args[1], members)
+						count, err := storeZSetResult(txn, currentDb(conn), cmd.Args[1], members)
 						if err != nil {
 							conn.WriteError("ERR " + err.Error())
 							return nil
@@ -1421,7 +1359,7 @@ func Serve(db *badger.DB) {
 					})
 				} else {
 					db.View(func(txn *badger.Txn) error {
-						m, err := zinter(txn, conn, aggregate, keys...)
+						m, err := zinter(txn, currentDb(conn), aggregate, keys...)
 						if err != nil {
 							conn.WriteError("ERR " + err.Error())
 							return nil
@@ -1459,7 +1397,7 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					count, err := zlexcount(txn, conn, cmd.Args[1], string(cmd.Args[2]), string(cmd.Args[3]))
+					count, err := zlexcount(txn, currentDb(conn), cmd.Args[1], string(cmd.Args[2]), string(cmd.Args[3]))
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return nil
@@ -1484,7 +1422,7 @@ func Serve(db *badger.DB) {
 					}
 				}
 				db.Update(func(txn *badger.Txn) error {
-					popped, err := zpopmax(txn, conn, cmd.Args[1], popCount)
+					popped, err := zpopmax(txn, currentDb(conn), cmd.Args[1], popCount)
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return nil
@@ -1513,7 +1451,7 @@ func Serve(db *badger.DB) {
 					}
 				}
 				db.Update(func(txn *badger.Txn) error {
-					popped, err := zpopmin(txn, conn, cmd.Args[1], popCount)
+					popped, err := zpopmin(txn, currentDb(conn), cmd.Args[1], popCount)
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return nil
@@ -1542,15 +1480,12 @@ func Serve(db *badger.DB) {
 					withScores = true
 				}
 				db.View(func(txn *badger.Txn) error {
-					result, err := zrange(txn, conn, cmd.Args[1], start, stop, withScores)
-					if err != nil {
-						conn.WriteError("ERR " + err.Error())
-						return nil
-					}
-					conn.WriteArray(len(result))
-					for _, r := range result {
-						conn.WriteBulk(r)
-					}
+				result, err := zrange(txn, currentDb(conn), cmd.Args[1], start, stop, withScores)
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return nil
+				}
+				writeBulkArray(conn, result)
 					return nil
 				})
 			case "zrangebylex":
@@ -1574,15 +1509,12 @@ func Serve(db *badger.DB) {
 					hasLimit = true
 				}
 				db.View(func(txn *badger.Txn) error {
-					result, err := zrangebylex(txn, conn, cmd.Args[1], minStr, maxStr, limitOffset, limitCount, hasLimit)
-					if err != nil {
-						conn.WriteError("ERR " + err.Error())
-						return nil
-					}
-					conn.WriteArray(len(result))
-					for _, r := range result {
-						conn.WriteBulk(r)
-					}
+				result, err := zrangebylex(txn, currentDb(conn), cmd.Args[1], minStr, maxStr, limitOffset, limitCount, hasLimit)
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return nil
+				}
+				writeBulkArray(conn, result)
 					return nil
 				})
 			case "zrangebyscore":
@@ -1613,15 +1545,12 @@ func Serve(db *badger.DB) {
 					}
 				}
 				db.View(func(txn *badger.Txn) error {
-					result, err := zrangebyscore(txn, conn, cmd.Args[1], minStr, maxStr, withScores, limitOffset, limitCount, hasLimit)
-					if err != nil {
-						conn.WriteError("ERR " + err.Error())
-						return nil
-					}
-					conn.WriteArray(len(result))
-					for _, r := range result {
-						conn.WriteBulk(r)
-					}
+				result, err := zrangebyscore(txn, currentDb(conn), cmd.Args[1], minStr, maxStr, withScores, limitOffset, limitCount, hasLimit)
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return nil
+				}
+				writeBulkArray(conn, result)
 					return nil
 				})
 			case "zrank":
@@ -1629,7 +1558,7 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					rank, found, err := zrank(txn, conn, cmd.Args[1], cmd.Args[2])
+					rank, found, err := zrank(txn, currentDb(conn), cmd.Args[1], cmd.Args[2])
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return nil
@@ -1648,7 +1577,7 @@ func Serve(db *badger.DB) {
 				var removed int
 				err := db.Update(func(txn *badger.Txn) error {
 					var err error
-					removed, err = zrem(txn, conn, cmd.Args[1], cmd.Args[2:]...)
+					removed, err = zrem(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
 					return err
 				})
 				if err != nil {
@@ -1663,7 +1592,7 @@ func Serve(db *badger.DB) {
 				var removed int
 				err := db.Update(func(txn *badger.Txn) error {
 					var err error
-					removed, err = zremrangebylex(txn, conn, cmd.Args[1], string(cmd.Args[2]), string(cmd.Args[3]))
+					removed, err = zremrangebylex(txn, currentDb(conn), cmd.Args[1], string(cmd.Args[2]), string(cmd.Args[3]))
 					return err
 				})
 				if err != nil {
@@ -1686,7 +1615,7 @@ func Serve(db *badger.DB) {
 				var removed int
 				err := db.Update(func(txn *badger.Txn) error {
 					var err error
-					removed, err = zremrangebyrank(txn, conn, cmd.Args[1], start, stop)
+					removed, err = zremrangebyrank(txn, currentDb(conn), cmd.Args[1], start, stop)
 					return err
 				})
 				if err != nil {
@@ -1701,7 +1630,7 @@ func Serve(db *badger.DB) {
 				var removed int
 				err := db.Update(func(txn *badger.Txn) error {
 					var err error
-					removed, err = zremrangebyscore(txn, conn, cmd.Args[1], string(cmd.Args[2]), string(cmd.Args[3]))
+					removed, err = zremrangebyscore(txn, currentDb(conn), cmd.Args[1], string(cmd.Args[2]), string(cmd.Args[3]))
 					return err
 				})
 				if err != nil {
@@ -1726,15 +1655,12 @@ func Serve(db *badger.DB) {
 					withScores = true
 				}
 				db.View(func(txn *badger.Txn) error {
-					result, err := zrevrange(txn, conn, cmd.Args[1], start, stop, withScores)
-					if err != nil {
-						conn.WriteError("ERR " + err.Error())
-						return nil
-					}
-					conn.WriteArray(len(result))
-					for _, r := range result {
-						conn.WriteBulk(r)
-					}
+				result, err := zrevrange(txn, currentDb(conn), cmd.Args[1], start, stop, withScores)
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return nil
+				}
+				writeBulkArray(conn, result)
 					return nil
 				})
 			case "zrevrangebylex":
@@ -1758,15 +1684,12 @@ func Serve(db *badger.DB) {
 					hasLimit = true
 				}
 				db.View(func(txn *badger.Txn) error {
-					result, err := zrevrangebylex(txn, conn, cmd.Args[1], maxStr, minStr, limitOffset, limitCount, hasLimit)
-					if err != nil {
-						conn.WriteError("ERR " + err.Error())
-						return nil
-					}
-					conn.WriteArray(len(result))
-					for _, r := range result {
-						conn.WriteBulk(r)
-					}
+				result, err := zrevrangebylex(txn, currentDb(conn), cmd.Args[1], maxStr, minStr, limitOffset, limitCount, hasLimit)
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return nil
+				}
+				writeBulkArray(conn, result)
 					return nil
 				})
 			case "zrevrangebyscore":
@@ -1797,15 +1720,12 @@ func Serve(db *badger.DB) {
 					}
 				}
 				db.View(func(txn *badger.Txn) error {
-					result, err := zrevrangebyscore(txn, conn, cmd.Args[1], maxStr, minStr, withScores, limitOffset, limitCount, hasLimit)
-					if err != nil {
-						conn.WriteError("ERR " + err.Error())
-						return nil
-					}
-					conn.WriteArray(len(result))
-					for _, r := range result {
-						conn.WriteBulk(r)
-					}
+				result, err := zrevrangebyscore(txn, currentDb(conn), cmd.Args[1], maxStr, minStr, withScores, limitOffset, limitCount, hasLimit)
+				if err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return nil
+				}
+				writeBulkArray(conn, result)
 					return nil
 				})
 			case "zrevrank":
@@ -1813,7 +1733,7 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					rank, found, err := zrevrank(txn, conn, cmd.Args[1], cmd.Args[2])
+					rank, found, err := zrevrank(txn, currentDb(conn), cmd.Args[1], cmd.Args[2])
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return nil
@@ -1830,7 +1750,7 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					score, found, err := zscore(txn, conn, cmd.Args[1], cmd.Args[2])
+					score, found, err := zscore(txn, currentDb(conn), cmd.Args[1], cmd.Args[2])
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return nil
@@ -1860,7 +1780,7 @@ func Serve(db *badger.DB) {
 					hasWithScores = true
 				}
 				db.View(func(txn *badger.Txn) error {
-					m, err := zdiff(txn, conn, keys...)
+					m, err := zdiff(txn, currentDb(conn), keys...)
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return nil
@@ -1894,13 +1814,13 @@ func Serve(db *badger.DB) {
 				}
 				keys := cmd.Args[3 : 3+numKeys]
 				db.Update(func(txn *badger.Txn) error {
-					m, err := zdiff(txn, conn, keys...)
+					m, err := zdiff(txn, currentDb(conn), keys...)
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return nil
 					}
 					members := zsetToSlice(m)
-					count, err := storeZSetResult(txn, conn, cmd.Args[1], members)
+					count, err := storeZSetResult(txn, currentDb(conn), cmd.Args[1], members)
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return nil
@@ -1913,7 +1833,7 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					scores, found, err := zmscore(txn, conn, cmd.Args[1], cmd.Args[2:]...)
+					scores, found, err := zmscore(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return nil
@@ -1946,7 +1866,7 @@ func Serve(db *badger.DB) {
 					count = -count
 				}
 				db.View(func(txn *badger.Txn) error {
-					members, scores, err := zrandmember(txn, conn, cmd.Args[1], count)
+					members, scores, err := zrandmember(txn, currentDb(conn), cmd.Args[1], count)
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return nil
@@ -2025,7 +1945,7 @@ func Serve(db *badger.DB) {
 				}
 				if isStore {
 					db.Update(func(txn *badger.Txn) error {
-						m, err := zunion(txn, conn, aggregate, keys...)
+						m, err := zunion(txn, currentDb(conn), aggregate, keys...)
 						if err != nil {
 							conn.WriteError("ERR " + err.Error())
 							return nil
@@ -2036,7 +1956,7 @@ func Serve(db *badger.DB) {
 							}
 						}
 						members := zsetToSlice(m)
-						count, err := storeZSetResult(txn, conn, cmd.Args[1], members)
+						count, err := storeZSetResult(txn, currentDb(conn), cmd.Args[1], members)
 						if err != nil {
 							conn.WriteError("ERR " + err.Error())
 							return nil
@@ -2046,7 +1966,7 @@ func Serve(db *badger.DB) {
 					})
 				} else {
 					db.View(func(txn *badger.Txn) error {
-						m, err := zunion(txn, conn, aggregate, keys...)
+						m, err := zunion(txn, currentDb(conn), aggregate, keys...)
 						if err != nil {
 							conn.WriteError("ERR " + err.Error())
 							return nil
@@ -2093,13 +2013,13 @@ func Serve(db *badger.DB) {
 				}
 				var storeCount int
 				err := db.Update(func(txn *badger.Txn) error {
-					result, err := zrange(txn, conn, cmd.Args[2], start, stop, false)
+					result, err := zrange(txn, currentDb(conn), cmd.Args[2], start, stop, false)
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return nil
 					}
 					// Re-fetch with scores for storage
-					resultWS, err := zrange(txn, conn, cmd.Args[2], start, stop, true)
+					resultWS, err := zrange(txn, currentDb(conn), cmd.Args[2], start, stop, true)
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return nil
@@ -2109,7 +2029,7 @@ func Serve(db *badger.DB) {
 						score, _ := strconv.ParseFloat(string(resultWS[i*2+1]), 64)
 						members[i] = memberScore{member: result[i], score: score}
 					}
-					count, err := storeZSetResult(txn, conn, cmd.Args[1], members)
+					count, err := storeZSetResult(txn, currentDb(conn), cmd.Args[1], members)
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return nil
@@ -2129,7 +2049,7 @@ func Serve(db *badger.DB) {
 				var added int
 				err := db.Update(func(txn *badger.Txn) error {
 					var err error
-					added, err = pfadd(txn, conn, cmd.Args[1], cmd.Args[2:]...)
+					added, err = pfadd(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
 					return err
 				})
 				if err != nil {
@@ -2144,7 +2064,7 @@ func Serve(db *badger.DB) {
 				var count uint64
 				err := db.View(func(txn *badger.Txn) error {
 					var err error
-					count, err = pfcount(txn, conn, cmd.Args[1:]...)
+					count, err = pfcount(txn, currentDb(conn), cmd.Args[1:]...)
 					return err
 				})
 				if err != nil {
@@ -2157,7 +2077,7 @@ func Serve(db *badger.DB) {
 					return
 				}
 				err := db.Update(func(txn *badger.Txn) error {
-					return pfmerge(txn, conn, cmd.Args[1], cmd.Args[2:]...)
+					return pfmerge(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
 				})
 				if err != nil {
 					conn.WriteError("ERR " + err.Error())
@@ -2193,7 +2113,7 @@ func Serve(db *badger.DB) {
 					}
 				}
 				err := db.Update(func(txn *badger.Txn) error {
-					return bfreserve(txn, conn, cmd.Args[1], errRate, uint64(capacity), expansion, nonScaling)
+					return bfreserve(txn, currentDb(conn), cmd.Args[1], errRate, uint64(capacity), expansion, nonScaling)
 				})
 				if err != nil {
 					conn.WriteError("ERR " + err.Error())
@@ -2207,7 +2127,7 @@ func Serve(db *badger.DB) {
 				var added int
 				err := db.Update(func(txn *badger.Txn) error {
 					var err error
-					added, err = bfadd(txn, conn, cmd.Args[1], cmd.Args[2])
+					added, err = bfadd(txn, currentDb(conn), cmd.Args[1], cmd.Args[2])
 					return err
 				})
 				if err != nil {
@@ -2222,7 +2142,7 @@ func Serve(db *badger.DB) {
 				var exists bool
 				err := db.View(func(txn *badger.Txn) error {
 					var err error
-					exists, err = bfexists(txn, conn, cmd.Args[1], cmd.Args[2])
+					exists, err = bfexists(txn, currentDb(conn), cmd.Args[1], cmd.Args[2])
 					return err
 				})
 				if err != nil {
@@ -2241,7 +2161,7 @@ func Serve(db *badger.DB) {
 				var results []int
 				err := db.Update(func(txn *badger.Txn) error {
 					var err error
-					results, err = bfmadd(txn, conn, cmd.Args[1], cmd.Args[2:])
+					results, err = bfmadd(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:])
 					return err
 				})
 				if err != nil {
@@ -2259,7 +2179,7 @@ func Serve(db *badger.DB) {
 				var results []int
 				err := db.View(func(txn *badger.Txn) error {
 					var err error
-					results, err = bfmexists(txn, conn, cmd.Args[1], cmd.Args[2:])
+					results, err = bfmexists(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:])
 					return err
 				})
 				if err != nil {
@@ -2320,7 +2240,7 @@ func Serve(db *badger.DB) {
 				var results []int
 				err := db.Update(func(txn *badger.Txn) error {
 					var err error
-					results, err = bfinsert(txn, conn, cmd.Args[1], info)
+					results, err = bfinsert(txn, currentDb(conn), cmd.Args[1], info)
 					return err
 				})
 				if err != nil {
@@ -2336,7 +2256,7 @@ func Serve(db *badger.DB) {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-					info, err := bfinfo(txn, conn, cmd.Args[1])
+					info, err := bfinfo(txn, currentDb(conn), cmd.Args[1])
 					if err != nil {
 						conn.WriteError("ERR " + err.Error())
 						return nil

@@ -2,12 +2,10 @@ package redis
 
 import (
 	"bytes"
-	"encoding/binary"
 	"math/rand/v2"
 	"strconv"
 
 	"github.com/dgraph-io/badger/v4"
-	"github.com/tidwall/redcon"
 )
 
 // Internal key format:  -{db}:{setname}\x00{member}
@@ -35,24 +33,11 @@ func memberFromInternalKey(key []byte) []byte {
 }
 
 func writeSetCount(txn *badger.Txn, setName []byte, count uint32, dbSlot int) error {
-	buf := make([]byte, 4)
-	binary.BigEndian.PutUint32(buf, count)
-	return txn.SetEntry(badger.NewEntry(rawKeyPrefixWithDb(setName, dbSlot), buf).WithMeta(byte(RedisSet)))
+	return writeUint32Sentinel(txn, setName, count, RedisSet, dbSlot)
 }
 
 func readSetCount(txn *badger.Txn, setName []byte, dbSlot int) (uint32, error) {
-	item, err := txn.Get(rawKeyPrefixWithDb(setName, dbSlot))
-	if err != nil {
-		return 0, err
-	}
-	var count uint32
-	if err := item.Value(func(val []byte) error {
-		count = binary.BigEndian.Uint32(val)
-		return nil
-	}); err != nil {
-		return 0, err
-	}
-	return count, nil
+	return readUint32Sentinel(txn, setName, dbSlot)
 }
 
 func loadSetMembers(txn *badger.Txn, setName []byte, dbSlot int) (map[string]struct{}, error) {
@@ -74,40 +59,17 @@ func loadSetMembers(txn *badger.Txn, setName []byte, dbSlot int) (map[string]str
 }
 
 func clearSet(txn *badger.Txn, setName []byte, dbSlot int) error {
-	prefix := membersPrefix(setName, dbSlot)
-	opts := badger.DefaultIteratorOptions
-	opts.Prefix = prefix
-	it := txn.NewIterator(opts)
-	defer it.Close()
-	for it.Rewind(); it.Valid(); it.Next() {
-		if err := txn.Delete(it.Item().KeyCopy(nil)); err != nil {
-			return err
-		}
-	}
-	return txn.Delete(rawKeyPrefixWithDb(setName, dbSlot))
+	return clearPrefixedKeys(txn, membersPrefix(setName, dbSlot), rawKeyPrefix(setName, dbSlot))
 }
 
-func sadd(txn *badger.Txn, conn redcon.Conn, key []byte, members ...[]byte) (int, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func sadd(txn *badger.Txn, dbSlot int, key []byte, members ...[]byte) (int, error) {
 
 	var added int
-	var count uint32
-
-	item, err := txn.Get(rawKeyPrefixWithDb(key, dbSlot))
+	count, err := readSetCount(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
 		count = 0
 	} else if err != nil {
 		return 0, err
-	} else {
-		if err := item.Value(func(val []byte) error {
-			count = binary.BigEndian.Uint32(val)
-			return nil
-		}); err != nil {
-			return 0, err
-		}
 	}
 
 	for _, member := range members {
@@ -126,11 +88,7 @@ func sadd(txn *badger.Txn, conn redcon.Conn, key []byte, members ...[]byte) (int
 	return added, writeSetCount(txn, key, count, dbSlot)
 }
 
-func srem(txn *badger.Txn, conn redcon.Conn, key []byte, members ...[]byte) (int, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func srem(txn *badger.Txn, dbSlot int, key []byte, members ...[]byte) (int, error) {
 
 	count, err := readSetCount(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
@@ -158,16 +116,12 @@ func srem(txn *badger.Txn, conn redcon.Conn, key []byte, members ...[]byte) (int
 	}
 
 	if count == 0 {
-		return removed, txn.Delete(rawKeyPrefixWithDb(key, dbSlot))
+		return removed, txn.Delete(rawKeyPrefix(key, dbSlot))
 	}
 	return removed, writeSetCount(txn, key, count, dbSlot)
 }
 
-func scard(txn *badger.Txn, conn redcon.Conn, key []byte) (int, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func scard(txn *badger.Txn, dbSlot int, key []byte) (int, error) {
 
 	count, err := readSetCount(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
@@ -179,13 +133,9 @@ func scard(txn *badger.Txn, conn redcon.Conn, key []byte) (int, error) {
 	return int(count), nil
 }
 
-func smembers(txn *badger.Txn, conn redcon.Conn, key []byte) ([][]byte, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func smembers(txn *badger.Txn, dbSlot int, key []byte) ([][]byte, error) {
 
-	_, err := txn.Get(rawKeyPrefixWithDb(key, dbSlot))
+	_, err := txn.Get(rawKeyPrefix(key, dbSlot))
 	if err == badger.ErrKeyNotFound {
 		return [][]byte{}, nil
 	}
@@ -210,11 +160,7 @@ func smembers(txn *badger.Txn, conn redcon.Conn, key []byte) ([][]byte, error) {
 	return members, nil
 }
 
-func sismember(txn *badger.Txn, conn redcon.Conn, key, member []byte) (bool, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func sismember(txn *badger.Txn, dbSlot int, key, member []byte) (bool, error) {
 
 	_, err := txn.Get(internalSetKey(key, member, dbSlot))
 	if err == badger.ErrKeyNotFound {
@@ -226,11 +172,7 @@ func sismember(txn *badger.Txn, conn redcon.Conn, key, member []byte) (bool, err
 	return true, nil
 }
 
-func spop(txn *badger.Txn, conn redcon.Conn, key []byte) ([]byte, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func spop(txn *badger.Txn, dbSlot int, key []byte) ([]byte, error) {
 
 	count, err := readSetCount(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
@@ -262,16 +204,12 @@ func spop(txn *badger.Txn, conn redcon.Conn, key []byte) ([]byte, error) {
 
 	count--
 	if count == 0 {
-		return member, txn.Delete(rawKeyPrefixWithDb(key, dbSlot))
+		return member, txn.Delete(rawKeyPrefix(key, dbSlot))
 	}
 	return member, writeSetCount(txn, key, count, dbSlot)
 }
 
-func srandmember(txn *badger.Txn, conn redcon.Conn, key []byte, count int) ([][]byte, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func srandmember(txn *badger.Txn, dbSlot int, key []byte, count int) ([][]byte, error) {
 
 	all, err := loadSetMembers(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
@@ -311,19 +249,15 @@ func srandmember(txn *badger.Txn, conn redcon.Conn, key []byte, count int) ([][]
 	return result, nil
 }
 
-func smove(txn *badger.Txn, conn redcon.Conn, src, dst, member []byte) (bool, error) {
+func smove(txn *badger.Txn, dbSlot int, src, dst, member []byte) (bool, error) {
 	if bytes.Equal(src, dst) {
-		_, err := txn.Get(internalSetKey(src, member, currentDb(conn)))
+		_, err := txn.Get(internalSetKey(src, member, dbSlot))
 		if err == badger.ErrKeyNotFound {
 			return false, nil
 		}
 		return err == nil, err
 	}
 
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
 
 	srcKey := internalSetKey(src, member, dbSlot)
 	_, err := txn.Get(srcKey)
@@ -344,7 +278,7 @@ func smove(txn *badger.Txn, conn redcon.Conn, src, dst, member []byte) (bool, er
 	}
 	srcCount--
 	if srcCount == 0 {
-		if err := txn.Delete(rawKeyPrefixWithDb(src, dbSlot)); err != nil {
+		if err := txn.Delete(rawKeyPrefix(src, dbSlot)); err != nil {
 			return false, err
 		}
 	} else {
@@ -376,13 +310,9 @@ func smove(txn *badger.Txn, conn redcon.Conn, src, dst, member []byte) (bool, er
 	return true, nil
 }
 
-func sdiff(txn *badger.Txn, conn redcon.Conn, keys ...[]byte) ([][]byte, error) {
+func sdiff(txn *badger.Txn, dbSlot int, keys ...[]byte) ([][]byte, error) {
 	if len(keys) == 0 {
 		return [][]byte{}, nil
-	}
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
 	}
 
 	result, err := loadSetMembers(txn, keys[0], dbSlot)
@@ -407,13 +337,9 @@ func sdiff(txn *badger.Txn, conn redcon.Conn, keys ...[]byte) ([][]byte, error) 
 	return members, nil
 }
 
-func sinter(txn *badger.Txn, conn redcon.Conn, keys ...[]byte) ([][]byte, error) {
+func sinter(txn *badger.Txn, dbSlot int, keys ...[]byte) ([][]byte, error) {
 	if len(keys) == 0 {
 		return [][]byte{}, nil
-	}
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
 	}
 
 	result, err := loadSetMembers(txn, keys[0], dbSlot)
@@ -440,13 +366,9 @@ func sinter(txn *badger.Txn, conn redcon.Conn, keys ...[]byte) ([][]byte, error)
 	return members, nil
 }
 
-func sunion(txn *badger.Txn, conn redcon.Conn, keys ...[]byte) ([][]byte, error) {
+func sunion(txn *badger.Txn, dbSlot int, keys ...[]byte) ([][]byte, error) {
 	if len(keys) == 0 {
 		return [][]byte{}, nil
-	}
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
 	}
 
 	result := make(map[string]struct{})
@@ -467,11 +389,7 @@ func sunion(txn *badger.Txn, conn redcon.Conn, keys ...[]byte) ([][]byte, error)
 	return members, nil
 }
 
-func storeSetResult(txn *badger.Txn, conn redcon.Conn, dest []byte, members [][]byte) (int, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func storeSetResult(txn *badger.Txn, dbSlot int, dest []byte, members [][]byte) (int, error) {
 
 	_ = clearSet(txn, dest, dbSlot)
 
@@ -484,26 +402,26 @@ func storeSetResult(txn *badger.Txn, conn redcon.Conn, dest []byte, members [][]
 	return len(members), writeSetCount(txn, dest, uint32(len(members)), dbSlot)
 }
 
-func sdiffstore(txn *badger.Txn, conn redcon.Conn, dest []byte, keys ...[]byte) (int, error) {
-	result, err := sdiff(txn, conn, keys...)
+func sdiffstore(txn *badger.Txn, dbSlot int, dest []byte, keys ...[]byte) (int, error) {
+	result, err := sdiff(txn, dbSlot, keys...)
 	if err != nil {
 		return 0, err
 	}
-	return storeSetResult(txn, conn, dest, result)
+	return storeSetResult(txn, dbSlot, dest, result)
 }
 
-func sinterstore(txn *badger.Txn, conn redcon.Conn, dest []byte, keys ...[]byte) (int, error) {
-	result, err := sinter(txn, conn, keys...)
+func sinterstore(txn *badger.Txn, dbSlot int, dest []byte, keys ...[]byte) (int, error) {
+	result, err := sinter(txn, dbSlot, keys...)
 	if err != nil {
 		return 0, err
 	}
-	return storeSetResult(txn, conn, dest, result)
+	return storeSetResult(txn, dbSlot, dest, result)
 }
 
-func sunionstore(txn *badger.Txn, conn redcon.Conn, dest []byte, keys ...[]byte) (int, error) {
-	result, err := sunion(txn, conn, keys...)
+func sunionstore(txn *badger.Txn, dbSlot int, dest []byte, keys ...[]byte) (int, error) {
+	result, err := sunion(txn, dbSlot, keys...)
 	if err != nil {
 		return 0, err
 	}
-	return storeSetResult(txn, conn, dest, result)
+	return storeSetResult(txn, dbSlot, dest, result)
 }

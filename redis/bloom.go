@@ -7,7 +7,6 @@ import (
 	"strconv"
 
 	"github.com/dgraph-io/badger/v4"
-	"github.com/tidwall/redcon"
 )
 
 const (
@@ -39,15 +38,11 @@ type bloomMeta struct {
 }
 
 func readBloomMeta(txn *badger.Txn, key []byte, dbSlot int) (*bloomMeta, error) {
-	item, err := txn.Get(rawKeyPrefixWithDb(key, dbSlot))
+	item, err := txn.Get(rawKeyPrefix(key, dbSlot))
 	if err != nil {
 		return nil, err
 	}
-	var val []byte
-	err = item.Value(func(v []byte) error {
-		val = append([]byte{}, v...)
-		return nil
-	})
+	val, err := copyItemValue(item)
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +65,7 @@ func writeBloomMeta(txn *badger.Txn, key []byte, m *bloomMeta, dbSlot int) error
 	if err != nil {
 		return err
 	}
-	return txn.SetEntry(badger.NewEntry(rawKeyPrefixWithDb(key, dbSlot), data).WithMeta(byte(RedisBloom)))
+	return txn.SetEntry(badger.NewEntry(rawKeyPrefix(key, dbSlot), data).WithMeta(byte(RedisBloom)))
 }
 
 func encodeBloomMeta(m *bloomMeta) ([]byte, error) {
@@ -239,15 +234,7 @@ func readPage(txn *badger.Txn, name []byte, filterID, pageNum uint64, dbSlot int
 	if err != nil {
 		return nil, err
 	}
-	var val []byte
-	err = item.Value(func(v []byte) error {
-		val = append([]byte{}, v...)
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return val, nil
+	return copyItemValue(item)
 }
 
 func writePage(txn *badger.Txn, name []byte, filterID, pageNum uint64, data []byte, dbSlot int) error {
@@ -271,10 +258,10 @@ type errStr struct{ msg string }
 
 func (e *errStr) Error() string { return e.msg }
 
-func bfreserve(txn *badger.Txn, conn redcon.Conn, key []byte, errorRate float64, capacity uint64, expansion int, nonScaling bool) error {
-	dbSlot := currentDb(conn)
+func bfreserve(txn *badger.Txn, dbSlot int, key []byte, errorRate float64, capacity uint64, expansion int, nonScaling bool) error {
 
-	_, err := txn.Get(rawKeyPrefixWithDb(key, dbSlot))
+
+	_, err := txn.Get(rawKeyPrefix(key, dbSlot))
 	if err == nil {
 		return errKeyExists
 	}
@@ -294,8 +281,8 @@ func bfreserve(txn *badger.Txn, conn redcon.Conn, key []byte, errorRate float64,
 	return writeBloomMeta(txn, key, meta, dbSlot)
 }
 
-func bfadd(txn *badger.Txn, conn redcon.Conn, key, item []byte) (int, error) {
-	dbSlot := currentDb(conn)
+func bfadd(txn *badger.Txn, dbSlot int, key, item []byte) (int, error) {
+
 
 	meta, err := readBloomMetaOrNil(txn, key, dbSlot)
 	if err != nil {
@@ -383,8 +370,8 @@ func bfadd(txn *badger.Txn, conn redcon.Conn, key, item []byte) (int, error) {
 	return 1, nil
 }
 
-func bfexists(txn *badger.Txn, conn redcon.Conn, key, item []byte) (bool, error) {
-	dbSlot := currentDb(conn)
+func bfexists(txn *badger.Txn, dbSlot int, key, item []byte) (bool, error) {
+
 
 	meta, err := readBloomMetaOrNil(txn, key, dbSlot)
 	if err != nil {
@@ -417,10 +404,10 @@ func bfexists(txn *badger.Txn, conn redcon.Conn, key, item []byte) (bool, error)
 	return false, nil
 }
 
-func bfmadd(txn *badger.Txn, conn redcon.Conn, key []byte, items [][]byte) ([]int, error) {
+func bfmadd(txn *badger.Txn, dbSlot int, key []byte, items [][]byte) ([]int, error) {
 	results := make([]int, len(items))
 	for i, item := range items {
-		r, err := bfadd(txn, conn, key, item)
+		r, err := bfadd(txn, dbSlot, key, item)
 		if err != nil {
 			return nil, err
 		}
@@ -429,10 +416,10 @@ func bfmadd(txn *badger.Txn, conn redcon.Conn, key []byte, items [][]byte) ([]in
 	return results, nil
 }
 
-func bfmexists(txn *badger.Txn, conn redcon.Conn, key []byte, items [][]byte) ([]int, error) {
+func bfmexists(txn *badger.Txn, dbSlot int, key []byte, items [][]byte) ([]int, error) {
 	results := make([]int, len(items))
 	for i, item := range items {
-		exists, err := bfexists(txn, conn, key, item)
+		exists, err := bfexists(txn, dbSlot, key, item)
 		if err != nil {
 			return nil, err
 		}
@@ -454,8 +441,8 @@ type bfInsertInfo struct {
 	Items      [][]byte
 }
 
-func bfinsert(txn *badger.Txn, conn redcon.Conn, key []byte, info *bfInsertInfo) ([]int, error) {
-	dbSlot := currentDb(conn)
+func bfinsert(txn *badger.Txn, dbSlot int, key []byte, info *bfInsertInfo) ([]int, error) {
+
 
 	meta, err := readBloomMetaOrNil(txn, key, dbSlot)
 	if err != nil {
@@ -489,11 +476,11 @@ func bfinsert(txn *badger.Txn, conn redcon.Conn, key []byte, info *bfInsertInfo)
 		}
 	}
 
-	return bfmadd(txn, conn, key, info.Items)
+	return bfmadd(txn, dbSlot, key, info.Items)
 }
 
-func bfinfo(txn *badger.Txn, conn redcon.Conn, key []byte) (map[string]interface{}, error) {
-	dbSlot := currentDb(conn)
+func bfinfo(txn *badger.Txn, dbSlot int, key []byte) (map[string]interface{}, error) {
+
 
 	meta, err := readBloomMetaOrNil(txn, key, dbSlot)
 	if err != nil {

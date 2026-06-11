@@ -47,10 +47,7 @@ func getKey(conn redcon.Conn, db *badger.DB, key []byte) {
 			return nil
 		}
 		var valCopy []byte
-		err = item.Value(func(val []byte) error {
-			valCopy = append([]byte{}, val...)
-			return nil
-		})
+		valCopy, err = copyItemValue(item)
 		if err != nil {
 			conn.WriteError("ERR " + err.Error())
 			return err
@@ -74,10 +71,7 @@ func getSet(conn redcon.Conn, db *badger.DB, key, value []byte) {
 			return nil
 		}
 		var valCopy []byte
-		err = item.Value(func(val []byte) error {
-			valCopy = append([]byte{}, val...)
-			return nil
-		})
+		valCopy, err = copyItemValue(item)
 		if err != nil {
 			conn.WriteError("ERR " + err.Error())
 			return err
@@ -106,10 +100,7 @@ func getDel(conn redcon.Conn, db *badger.DB, key []byte) {
 			return nil
 		}
 		var valCopy []byte
-		err = item.Value(func(val []byte) error {
-			valCopy = append([]byte{}, val...)
-			return nil
-		})
+		valCopy, err = copyItemValue(item)
 		if err != nil {
 			conn.WriteError("ERR " + err.Error())
 			return err
@@ -137,10 +128,7 @@ func strlenKey(conn redcon.Conn, db *badger.DB, key []byte) {
 			return nil
 		}
 		var valCopy []byte
-		err = item.Value(func(val []byte) error {
-			valCopy = append([]byte{}, val...)
-			return nil
-		})
+		valCopy, err = copyItemValue(item)
 		if err != nil {
 			conn.WriteError("ERR " + err.Error())
 			return err
@@ -162,10 +150,7 @@ func substrKey(conn redcon.Conn, db *badger.DB, key []byte, start, end int) {
 			return nil
 		}
 		var valCopy []byte
-		err = item.Value(func(val []byte) error {
-			valCopy = append([]byte{}, val...)
-			return nil
-		})
+		valCopy, err = copyItemValue(item)
 		if err != nil {
 			conn.WriteError("ERR " + err.Error())
 			return nil
@@ -243,10 +228,7 @@ func appendKey(conn redcon.Conn, db *badger.DB, key, value []byte) {
 			return nil
 		}
 		var oldVal []byte
-		err = item.Value(func(val []byte) error {
-			oldVal = append([]byte{}, val...)
-			return nil
-		})
+		oldVal, err = copyItemValue(item)
 		if err != nil {
 			conn.WriteError("ERR " + err.Error())
 			return err
@@ -336,10 +318,7 @@ func getEx(conn redcon.Conn, db *badger.DB, args ...[]byte) {
 			return nil
 		}
 		var valCopy []byte
-		err = item.Value(func(val []byte) error {
-			valCopy = append([]byte{}, val...)
-			return nil
-		})
+		valCopy, err = copyItemValue(item)
 		if err != nil {
 			conn.WriteError("ERR " + err.Error())
 			return err
@@ -406,10 +385,7 @@ func incrByFloat(conn redcon.Conn, db *badger.DB, key []byte, amount float64) {
 			return nil
 		}
 		var valCopy []byte
-		err = item.Value(func(val []byte) error {
-			valCopy = append([]byte{}, val...)
-			return nil
-		})
+		valCopy, err = copyItemValue(item)
 		if err != nil {
 			conn.WriteError("ERR " + err.Error())
 			return err
@@ -522,10 +498,7 @@ func setRangeKey(conn redcon.Conn, db *badger.DB, key []byte, offset int, value 
 			return nil
 		}
 		var oldVal []byte
-		err = item.Value(func(val []byte) error {
-			oldVal = append([]byte{}, val...)
-			return nil
-		})
+		oldVal, err = copyItemValue(item)
 		if err != nil {
 			conn.WriteError("ERR " + err.Error())
 			return err
@@ -558,4 +531,47 @@ func formatFloat(f float64) string {
 		return "-inf"
 	}
 	return strconv.FormatFloat(f, 'f', -1, 64)
+}
+
+func incrementKey(conn redcon.Conn, db *badger.DB, key []byte, amount int64) {
+	_ = db.Update(func(txn *badger.Txn) error {
+		var currentValue int64 = 0
+		var meta byte = byte(RedisString)
+		item, err := txn.Get(rawKeyPrefix(key, currentDb(conn)))
+		if err != nil {
+			if err != badger.ErrKeyNotFound {
+				conn.WriteError("ERR " + err.Error())
+				return err
+			}
+			currentValue = amount
+			entry := badger.NewEntry(rawKeyPrefix(key, currentDb(conn)), []byte(strconv.FormatInt(currentValue, 10))).WithMeta(meta)
+			err = txn.SetEntry(entry)
+			if err != nil {
+				conn.WriteError("ERR " + err.Error())
+				return err
+			}
+			conn.WriteInt64(currentValue)
+			return nil
+		}
+
+		valCopy, err := copyItemValue(item)
+		if err != nil {
+			conn.WriteError("ERR " + err.Error())
+			return err
+		}
+		currentValue, err = strconv.ParseInt(string(valCopy), 10, 64)
+		if err != nil {
+			conn.WriteError("ERR value is not an integer or out of range")
+			return err
+		}
+		currentValue += amount
+		entry := badger.NewEntry(rawKeyPrefix(key, currentDb(conn)), []byte(strconv.FormatInt(currentValue, 10))).WithMeta(item.UserMeta())
+		err = txn.SetEntry(entry)
+		if err != nil {
+			conn.WriteError("ERR " + err.Error())
+			return err
+		}
+		conn.WriteInt64(currentValue)
+		return nil
+	})
 }

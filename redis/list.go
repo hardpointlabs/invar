@@ -9,7 +9,6 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/rs/zerolog/log"
-	"github.com/tidwall/redcon"
 )
 
 type listNode struct {
@@ -158,7 +157,7 @@ func newSentinelNode(listName []byte, head []byte, tail []byte, size uint32, dbS
 	binary.Write(buf, binary.BigEndian, size)
 	buf.Write(head)
 	buf.Write(tail)
-	return badger.NewEntry(rawKeyPrefixWithDb(listName, dbSlot), buf.Bytes()).WithMeta(byte(RedisList))
+	return badger.NewEntry(rawKeyPrefix(listName, dbSlot), buf.Bytes()).WithMeta(byte(RedisList))
 }
 
 // creates a list node entry
@@ -174,7 +173,7 @@ func newListNode(listName []byte, nodeKey []byte, value []byte, next []byte, pre
 
 // loadList reads a list from Badger and returns the linkedList struct
 func loadList(txn *badger.Txn, listName []byte, dbSlot int) (*linkedList, error) {
-	item, err := txn.Get(rawKeyPrefixWithDb(listName, dbSlot))
+	item, err := txn.Get(rawKeyPrefix(listName, dbSlot))
 	if err != nil {
 		return nil, err
 	}
@@ -282,7 +281,7 @@ func loadList(txn *badger.Txn, listName []byte, dbSlot int) (*linkedList, error)
 // persistList writes the entire list to Badger
 func persistList(txn *badger.Txn, ll *linkedList, dbSlot int) error {
 	// Delete old sentinel
-	if err := txn.Delete(rawKeyPrefixWithDb(ll.name, dbSlot)); err != nil && err != badger.ErrKeyNotFound {
+	if err := txn.Delete(rawKeyPrefix(ll.name, dbSlot)); err != nil && err != badger.ErrKeyNotFound {
 		return err
 	}
 
@@ -302,11 +301,7 @@ func persistList(txn *badger.Txn, ll *linkedList, dbSlot int) error {
 }
 
 // lpush pushes values to the head of the list
-func lpush(txn *badger.Txn, conn redcon.Conn, key []byte, values ...[]byte) (uint32, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func lpush(txn *badger.Txn, dbSlot int, key []byte, values ...[]byte) (uint32, error) {
 	ll, err := loadList(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
 		// Create new list and push values to head
@@ -331,11 +326,7 @@ func lpush(txn *badger.Txn, conn redcon.Conn, key []byte, values ...[]byte) (uin
 }
 
 // rpush pushes values to the tail of the list
-func rpush(txn *badger.Txn, conn redcon.Conn, key []byte, values ...[]byte) (uint32, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func rpush(txn *badger.Txn, dbSlot int, key []byte, values ...[]byte) (uint32, error) {
 	ll, err := loadList(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
 		// Create new list and push values to tail
@@ -359,11 +350,7 @@ func rpush(txn *badger.Txn, conn redcon.Conn, key []byte, values ...[]byte) (uin
 }
 
 // lpop removes and returns the first element
-func lpop(txn *badger.Txn, conn redcon.Conn, key []byte) ([]byte, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func lpop(txn *badger.Txn, dbSlot int, key []byte) ([]byte, error) {
 	ll, err := loadList(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
 		return nil, nil
@@ -375,7 +362,7 @@ func lpop(txn *badger.Txn, conn redcon.Conn, key []byte) ([]byte, error) {
 	val := ll.removeFirst()
 	if ll.size == 0 {
 		// Delete the entire list
-		if err := txn.Delete(rawKeyPrefixWithDb(key, dbSlot)); err != nil {
+		if err := txn.Delete(rawKeyPrefix(key, dbSlot)); err != nil {
 			return nil, err
 		}
 	} else {
@@ -388,11 +375,7 @@ func lpop(txn *badger.Txn, conn redcon.Conn, key []byte) ([]byte, error) {
 }
 
 // rpop removes and returns the last element
-func rpop(txn *badger.Txn, conn redcon.Conn, key []byte) ([]byte, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func rpop(txn *badger.Txn, dbSlot int, key []byte) ([]byte, error) {
 	ll, err := loadList(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
 		return nil, nil
@@ -403,7 +386,7 @@ func rpop(txn *badger.Txn, conn redcon.Conn, key []byte) ([]byte, error) {
 
 	val := ll.removeLast()
 	if ll.size == 0 {
-		if err := txn.Delete(rawKeyPrefixWithDb(key, dbSlot)); err != nil {
+		if err := txn.Delete(rawKeyPrefix(key, dbSlot)); err != nil {
 			return nil, err
 		}
 	} else {
@@ -416,12 +399,8 @@ func rpop(txn *badger.Txn, conn redcon.Conn, key []byte) ([]byte, error) {
 }
 
 // llen returns the length of the list
-func llen(txn *badger.Txn, conn redcon.Conn, key []byte) (int, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
-	item, err := txn.Get(rawKeyPrefixWithDb(key, dbSlot))
+func llen(txn *badger.Txn, dbSlot int, key []byte) (int, error) {
+	item, err := txn.Get(rawKeyPrefix(key, dbSlot))
 	if err == badger.ErrKeyNotFound {
 		return 0, nil
 	}
@@ -441,11 +420,7 @@ func llen(txn *badger.Txn, conn redcon.Conn, key []byte) (int, error) {
 }
 
 // lrange returns elements from start to stop
-func lrange(txn *badger.Txn, conn redcon.Conn, key []byte, start, stop int) ([][]byte, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func lrange(txn *badger.Txn, dbSlot int, key []byte, start, stop int) ([][]byte, error) {
 	ll, err := loadList(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
 		return [][]byte{}, nil
@@ -487,11 +462,7 @@ func lrange(txn *badger.Txn, conn redcon.Conn, key []byte, start, stop int) ([][
 }
 
 // lindex returns the element at index
-func lindex(txn *badger.Txn, conn redcon.Conn, key []byte, index int) ([]byte, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func lindex(txn *badger.Txn, dbSlot int, key []byte, index int) ([]byte, error) {
 	ll, err := loadList(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
 		return nil, nil
@@ -516,11 +487,7 @@ func lindex(txn *badger.Txn, conn redcon.Conn, key []byte, index int) ([]byte, e
 }
 
 // lset sets the value at index
-func lset(txn *badger.Txn, conn redcon.Conn, key []byte, index int, value []byte) error {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func lset(txn *badger.Txn, dbSlot int, key []byte, index int, value []byte) error {
 	ll, err := loadList(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
 		return badger.ErrKeyNotFound
@@ -546,11 +513,7 @@ func lset(txn *badger.Txn, conn redcon.Conn, key []byte, index int, value []byte
 }
 
 // lrem removes count occurrences of value
-func lrem(txn *badger.Txn, conn redcon.Conn, key []byte, count int, value []byte) (int, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func lrem(txn *badger.Txn, dbSlot int, key []byte, count int, value []byte) (int, error) {
 	ll, err := loadList(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
 		return 0, nil
@@ -665,18 +628,14 @@ func lrem(txn *badger.Txn, conn redcon.Conn, key []byte, count int, value []byte
 	}
 
 	if ll.size == 0 {
-		return removed, txn.Delete(rawKeyPrefixWithDb(key, dbSlot))
+		return removed, txn.Delete(rawKeyPrefix(key, dbSlot))
 	}
 
 	return removed, persistList(txn, ll, dbSlot)
 }
 
 // ltrim trims the list to the specified range
-func ltrim(txn *badger.Txn, conn redcon.Conn, key []byte, start, stop int) error {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func ltrim(txn *badger.Txn, dbSlot int, key []byte, start, stop int) error {
 	ll, err := loadList(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
 		return nil
@@ -704,7 +663,7 @@ func ltrim(txn *badger.Txn, conn redcon.Conn, key []byte, start, stop int) error
 		ll.size = 0
 		ll.head = nil
 		ll.tail = nil
-		return txn.Delete(rawKeyPrefixWithDb(key, dbSlot))
+		return txn.Delete(rawKeyPrefix(key, dbSlot))
 	}
 
 	// Keep only elements in range [start, stop]
@@ -738,11 +697,7 @@ func ltrim(txn *badger.Txn, conn redcon.Conn, key []byte, start, stop int) error
 }
 
 // linsert inserts value before or after pivot
-func linsert(txn *badger.Txn, conn redcon.Conn, key []byte, before bool, pivot []byte, value []byte) (int, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func linsert(txn *badger.Txn, dbSlot int, key []byte, before bool, pivot []byte, value []byte) (int, error) {
 	ll, err := loadList(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
 		return -1, nil
@@ -792,30 +747,28 @@ func linsert(txn *badger.Txn, conn redcon.Conn, key []byte, before bool, pivot [
 	return int(ll.size), persistList(txn, ll, dbSlot)
 }
 
-// consList is a convenience function for LPUSH/RPUSH logic
-func consList(conn redcon.Conn, db *badger.DB, key []byte, values ...[]byte) {
-	if len(values) == 0 {
-		return
+// lpushx pushes a value to the head only if the list already exists.
+// Returns the new list length, or 0 if the key does not exist.
+func lpushx(txn *badger.Txn, dbSlot int, key []byte, value []byte) (uint32, error) {
+	_, err := txn.Get(rawKeyPrefix(key, dbSlot))
+	if err == badger.ErrKeyNotFound {
+		return 0, nil
 	}
-
-	err := db.Update(func(txn *badger.Txn) error {
-		_, err := lpush(txn, conn, key, values...)
-		return err
-	})
-
 	if err != nil {
-		conn.WriteError("ERR " + err.Error())
-		return
+		return 0, err
 	}
+	return lpush(txn, dbSlot, key, value)
+}
 
-	// Return the new length
-	db.View(func(txn *badger.Txn) error {
-		size, err := llen(txn, conn, key)
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return err
-		}
-		conn.WriteInt(size)
-		return nil
-	})
+// rpushx pushes a value to the tail only if the list already exists.
+// Returns the new list length, or 0 if the key does not exist.
+func rpushx(txn *badger.Txn, dbSlot int, key []byte, value []byte) (uint32, error) {
+	_, err := txn.Get(rawKeyPrefix(key, dbSlot))
+	if err == badger.ErrKeyNotFound {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return rpush(txn, dbSlot, key, value)
 }

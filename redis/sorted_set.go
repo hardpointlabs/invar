@@ -11,13 +11,19 @@ import (
 	"strings"
 
 	"github.com/dgraph-io/badger/v4"
-	"github.com/tidwall/redcon"
 )
 
 // Sorted set key structure:
 //   Sentinel:   {db}:{keyname}                      → 4-byte uint32 count, meta=RedisSortedSet
 //   Score idx:  -{db}:{keyname}:score:{8B encScore}:{member}  → empty value
 //   Member idx: -{db}:{keyname}:member:{member}               → 8-byte big-endian score
+
+// zsetInternalBase builds the base for internal sorted-set keys: "-{dbSlot}:{setName}"
+func zsetInternalBase(setName []byte, dbSlot int) []byte {
+	b := append([]byte(internalPrefix), strconv.Itoa(dbSlot)...)
+	b = append(b, ':')
+	return append(b, setName...)
+}
 
 func encodeScore(score float64) []byte {
 	bits := math.Float64bits(score)
@@ -42,35 +48,26 @@ func decodeScore(b []byte) float64 {
 }
 
 func internalScoreKey(setName []byte, score float64, member []byte, dbSlot int) []byte {
-	prefix := append([]byte(internalPrefix), []byte(strconv.Itoa(dbSlot)+prefixSeparator)...)
-	prefix = append(prefix, setName...)
-	prefix = append(prefix, ":score:"...)
+	prefix := append(zsetInternalBase(setName, dbSlot), ":score:"...)
 	prefix = append(prefix, encodeScore(score)...)
 	prefix = append(prefix, ':')
 	return append(prefix, member...)
 }
 
 func internalMemberKey(setName []byte, member []byte, dbSlot int) []byte {
-	prefix := append([]byte(internalPrefix), []byte(strconv.Itoa(dbSlot)+prefixSeparator)...)
-	prefix = append(prefix, setName...)
-	return append(prefix, ":member:"...)
+	return append(zsetInternalBase(setName, dbSlot), ":member:"...)
 }
 
 func internalMemberFullKey(setName []byte, member []byte, dbSlot int) []byte {
-	prefix := internalMemberKey(setName, member, dbSlot)
-	return append(prefix, member...)
+	return append(internalMemberKey(setName, member, dbSlot), member...)
 }
 
 func scorePrefixBytes(setName []byte, dbSlot int) []byte {
-	prefix := append([]byte(internalPrefix), []byte(strconv.Itoa(dbSlot)+prefixSeparator)...)
-	prefix = append(prefix, setName...)
-	return append(prefix, ":score:"...)
+	return append(zsetInternalBase(setName, dbSlot), ":score:"...)
 }
 
 func memberPrefixBytes(setName []byte, dbSlot int) []byte {
-	prefix := append([]byte(internalPrefix), []byte(strconv.Itoa(dbSlot)+prefixSeparator)...)
-	prefix = append(prefix, setName...)
-	return append(prefix, ":member:"...)
+	return append(zsetInternalBase(setName, dbSlot), ":member:"...)
 }
 
 func makeScoreEntry(setName []byte, score float64, member []byte, dbSlot int) *badger.Entry {
@@ -84,24 +81,11 @@ func makeMemberEntry(setName []byte, score float64, member []byte, dbSlot int) *
 }
 
 func readZSetCount(txn *badger.Txn, setName []byte, dbSlot int) (uint32, error) {
-	item, err := txn.Get(rawKeyPrefixWithDb(setName, dbSlot))
-	if err != nil {
-		return 0, err
-	}
-	var count uint32
-	if err := item.Value(func(val []byte) error {
-		count = binary.BigEndian.Uint32(val)
-		return nil
-	}); err != nil {
-		return 0, err
-	}
-	return count, nil
+	return readUint32Sentinel(txn, setName, dbSlot)
 }
 
 func writeZSetCount(txn *badger.Txn, setName []byte, count uint32, dbSlot int) error {
-	buf := make([]byte, 4)
-	binary.BigEndian.PutUint32(buf, count)
-	return txn.SetEntry(badger.NewEntry(rawKeyPrefixWithDb(setName, dbSlot), buf).WithMeta(byte(RedisSortedSet)))
+	return writeUint32Sentinel(txn, setName, count, RedisSortedSet, dbSlot)
 }
 
 // memberScore holds a member and its score, used for sorted iteration
@@ -157,12 +141,12 @@ func deleteAllInternalKeys(txn *badger.Txn, setName []byte, dbSlot int) error {
 	}
 	it2.Close()
 
-	return txn.Delete(rawKeyPrefixWithDb(setName, dbSlot))
+	return txn.Delete(rawKeyPrefix(setName, dbSlot))
 }
 
 // --- Command implementations ---
 
-func zadd(txn *badger.Txn, conn redcon.Conn, key []byte, args ...[]byte) (int, error) {
+func zadd(txn *badger.Txn, dbSlot int, key []byte, args ...[]byte) (int, error) {
 	if len(args) == 0 {
 		return 0, fmt.Errorf("ERR wrong number of arguments for 'zadd' command")
 	}
@@ -215,13 +199,8 @@ func zadd(txn *badger.Txn, conn redcon.Conn, key []byte, args ...[]byte) (int, e
 		return 0, fmt.Errorf("ERR wrong number of arguments for 'zadd' command")
 	}
 
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
 
-	var count uint32
-	item, err := txn.Get(rawKeyPrefixWithDb(key, dbSlot))
+	count, err := readZSetCount(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
 		if xx {
 			return 0, nil
@@ -229,13 +208,6 @@ func zadd(txn *badger.Txn, conn redcon.Conn, key []byte, args ...[]byte) (int, e
 		count = 0
 	} else if err != nil {
 		return 0, err
-	} else {
-		if err := item.Value(func(val []byte) error {
-			count = binary.BigEndian.Uint32(val)
-			return nil
-		}); err != nil {
-			return 0, err
-		}
 	}
 
 	changed := 0
@@ -331,11 +303,7 @@ func zadd(txn *badger.Txn, conn redcon.Conn, key []byte, args ...[]byte) (int, e
 	return added, nil
 }
 
-func zcard(txn *badger.Txn, conn redcon.Conn, key []byte) (int, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func zcard(txn *badger.Txn, dbSlot int, key []byte) (int, error) {
 	count, err := readZSetCount(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
 		return 0, nil
@@ -346,11 +314,7 @@ func zcard(txn *badger.Txn, conn redcon.Conn, key []byte) (int, error) {
 	return int(count), nil
 }
 
-func zscore(txn *badger.Txn, conn redcon.Conn, key, member []byte) (float64, bool, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func zscore(txn *badger.Txn, dbSlot int, key, member []byte) (float64, bool, error) {
 
 	item, err := txn.Get(internalMemberFullKey(key, member, dbSlot))
 	if err == badger.ErrKeyNotFound {
@@ -370,11 +334,7 @@ func zscore(txn *badger.Txn, conn redcon.Conn, key, member []byte) (float64, boo
 	return score, true, nil
 }
 
-func zrem(txn *badger.Txn, conn redcon.Conn, key []byte, members ...[]byte) (int, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func zrem(txn *badger.Txn, dbSlot int, key []byte, members ...[]byte) (int, error) {
 
 	count, err := readZSetCount(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
@@ -414,16 +374,12 @@ func zrem(txn *badger.Txn, conn redcon.Conn, key []byte, members ...[]byte) (int
 	}
 
 	if count == 0 {
-		return removed, txn.Delete(rawKeyPrefixWithDb(key, dbSlot))
+		return removed, txn.Delete(rawKeyPrefix(key, dbSlot))
 	}
 	return removed, writeZSetCount(txn, key, count, dbSlot)
 }
 
-func zrange(txn *badger.Txn, conn redcon.Conn, key []byte, start, stop int, withScores bool) ([][]byte, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func zrange(txn *badger.Txn, dbSlot int, key []byte, start, stop int, withScores bool) ([][]byte, error) {
 
 	entries, err := loadAllSortedMembers(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
@@ -467,11 +423,7 @@ func zrange(txn *badger.Txn, conn redcon.Conn, key []byte, start, stop int, with
 	return result, nil
 }
 
-func zrevrange(txn *badger.Txn, conn redcon.Conn, key []byte, start, stop int, withScores bool) ([][]byte, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func zrevrange(txn *badger.Txn, dbSlot int, key []byte, start, stop int, withScores bool) ([][]byte, error) {
 
 	entries, err := loadAllSortedMembers(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
@@ -524,13 +476,9 @@ func zrevrange(txn *badger.Txn, conn redcon.Conn, key []byte, start, stop int, w
 	return result, nil
 }
 
-func zrank(txn *badger.Txn, conn redcon.Conn, key, member []byte) (int, bool, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func zrank(txn *badger.Txn, dbSlot int, key, member []byte) (int, bool, error) {
 
-	score, found, err := zscore(txn, conn, key, member)
+	score, found, err := zscore(txn, dbSlot, key, member)
 	if err != nil {
 		return 0, false, err
 	}
@@ -551,13 +499,9 @@ func zrank(txn *badger.Txn, conn redcon.Conn, key, member []byte) (int, bool, er
 	return 0, false, nil
 }
 
-func zrevrank(txn *badger.Txn, conn redcon.Conn, key, member []byte) (int, bool, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func zrevrank(txn *badger.Txn, dbSlot int, key, member []byte) (int, bool, error) {
 
-	score, found, err := zscore(txn, conn, key, member)
+	score, found, err := zscore(txn, dbSlot, key, member)
 	if err != nil {
 		return 0, false, err
 	}
@@ -579,11 +523,7 @@ func zrevrank(txn *badger.Txn, conn redcon.Conn, key, member []byte) (int, bool,
 	return 0, false, nil
 }
 
-func zcount(txn *badger.Txn, conn redcon.Conn, key []byte, minStr, maxStr string) (int, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func zcount(txn *badger.Txn, dbSlot int, key []byte, minStr, maxStr string) (int, error) {
 
 	entries, err := loadAllSortedMembers(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
@@ -621,13 +561,9 @@ func zcount(txn *badger.Txn, conn redcon.Conn, key []byte, minStr, maxStr string
 	return count, nil
 }
 
-func zincrby(txn *badger.Txn, conn redcon.Conn, key []byte, increment float64, member []byte) (float64, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func zincrby(txn *badger.Txn, dbSlot int, key []byte, increment float64, member []byte) (float64, error) {
 
-	score, found, err := zscore(txn, conn, key, member)
+	score, found, err := zscore(txn, dbSlot, key, member)
 	if err != nil {
 		return 0, err
 	}
@@ -676,11 +612,7 @@ func zincrby(txn *badger.Txn, conn redcon.Conn, key []byte, increment float64, m
 	return newScore, nil
 }
 
-func zrangebyscore(txn *badger.Txn, conn redcon.Conn, key []byte, minStr, maxStr string, withScores bool, limitOffset, limitCount int, hasLimit bool) ([][]byte, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func zrangebyscore(txn *badger.Txn, dbSlot int, key []byte, minStr, maxStr string, withScores bool, limitOffset, limitCount int, hasLimit bool) ([][]byte, error) {
 
 	entries, err := loadAllSortedMembers(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
@@ -748,9 +680,9 @@ func zrangebyscore(txn *badger.Txn, conn redcon.Conn, key []byte, minStr, maxStr
 	return result, nil
 }
 
-func zrevrangebyscore(txn *badger.Txn, conn redcon.Conn, key []byte, maxStr, minStr string, withScores bool, limitOffset, limitCount int, hasLimit bool) ([][]byte, error) {
+func zrevrangebyscore(txn *badger.Txn, dbSlot int, key []byte, maxStr, minStr string, withScores bool, limitOffset, limitCount int, hasLimit bool) ([][]byte, error) {
 	// Note: ZREVRANGEBYSCORE takes max first, then min
-	result, err := zrangebyscore(txn, conn, key, minStr, maxStr, withScores, limitOffset, limitCount, hasLimit)
+	result, err := zrangebyscore(txn, dbSlot, key, minStr, maxStr, withScores, limitOffset, limitCount, hasLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -820,11 +752,7 @@ func filterLexRange(members [][]byte, minStr, maxStr string) ([][]byte, error) {
 	return result, nil
 }
 
-func zrangebylex(txn *badger.Txn, conn redcon.Conn, key []byte, minStr, maxStr string, limitOffset, limitCount int, hasLimit bool) ([][]byte, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func zrangebylex(txn *badger.Txn, dbSlot int, key []byte, minStr, maxStr string, limitOffset, limitCount int, hasLimit bool) ([][]byte, error) {
 
 	members, err := loadLexMembers(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
@@ -858,8 +786,8 @@ func zrangebylex(txn *badger.Txn, conn redcon.Conn, key []byte, minStr, maxStr s
 	return result, nil
 }
 
-func zrevrangebylex(txn *badger.Txn, conn redcon.Conn, key []byte, maxStr, minStr string, limitOffset, limitCount int, hasLimit bool) ([][]byte, error) {
-	result, err := zrangebylex(txn, conn, key, minStr, maxStr, limitOffset, limitCount, hasLimit)
+func zrevrangebylex(txn *badger.Txn, dbSlot int, key []byte, maxStr, minStr string, limitOffset, limitCount int, hasLimit bool) ([][]byte, error) {
+	result, err := zrangebylex(txn, dbSlot, key, minStr, maxStr, limitOffset, limitCount, hasLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -870,11 +798,7 @@ func zrevrangebylex(txn *badger.Txn, conn redcon.Conn, key []byte, maxStr, minSt
 	return result, nil
 }
 
-func zlexcount(txn *badger.Txn, conn redcon.Conn, key []byte, minStr, maxStr string) (int, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func zlexcount(txn *badger.Txn, dbSlot int, key []byte, minStr, maxStr string) (int, error) {
 
 	members, err := loadLexMembers(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
@@ -891,11 +815,7 @@ func zlexcount(txn *badger.Txn, conn redcon.Conn, key []byte, minStr, maxStr str
 	return len(result), nil
 }
 
-func zremrangebyrank(txn *badger.Txn, conn redcon.Conn, key []byte, start, stop int) (int, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func zremrangebyrank(txn *badger.Txn, dbSlot int, key []byte, start, stop int) (int, error) {
 
 	entries, err := loadAllSortedMembers(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
@@ -936,16 +856,12 @@ func zremrangebyrank(txn *badger.Txn, conn redcon.Conn, key []byte, start, stop 
 
 	newCount := n - removed
 	if newCount == 0 {
-		return removed, txn.Delete(rawKeyPrefixWithDb(key, dbSlot))
+		return removed, txn.Delete(rawKeyPrefix(key, dbSlot))
 	}
 	return removed, writeZSetCount(txn, key, uint32(newCount), dbSlot)
 }
 
-func zremrangebyscore(txn *badger.Txn, conn redcon.Conn, key []byte, minStr, maxStr string) (int, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func zremrangebyscore(txn *badger.Txn, dbSlot int, key []byte, minStr, maxStr string) (int, error) {
 
 	entries, err := loadAllSortedMembers(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
@@ -1002,16 +918,12 @@ func zremrangebyscore(txn *badger.Txn, conn redcon.Conn, key []byte, minStr, max
 	}
 	newCount -= uint32(removed)
 	if newCount == 0 {
-		return removed, txn.Delete(rawKeyPrefixWithDb(key, dbSlot))
+		return removed, txn.Delete(rawKeyPrefix(key, dbSlot))
 	}
 	return removed, writeZSetCount(txn, key, newCount, dbSlot)
 }
 
-func zremrangebylex(txn *badger.Txn, conn redcon.Conn, key []byte, minStr, maxStr string) (int, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func zremrangebylex(txn *badger.Txn, dbSlot int, key []byte, minStr, maxStr string) (int, error) {
 
 	entries, err := loadAllSortedMembers(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
@@ -1062,18 +974,14 @@ func zremrangebylex(txn *badger.Txn, conn redcon.Conn, key []byte, minStr, maxSt
 	}
 	newCount -= uint32(removed)
 	if newCount == 0 {
-		return removed, txn.Delete(rawKeyPrefixWithDb(key, dbSlot))
+		return removed, txn.Delete(rawKeyPrefix(key, dbSlot))
 	}
 	return removed, writeZSetCount(txn, key, newCount, dbSlot)
 }
 
 // --- Pop commands ---
 
-func zpopmin(txn *badger.Txn, conn redcon.Conn, key []byte, count int) ([]memberScore, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func zpopmin(txn *badger.Txn, dbSlot int, key []byte, count int) ([]memberScore, error) {
 
 	entries, err := loadAllSortedMembers(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
@@ -1099,16 +1007,12 @@ func zpopmin(txn *badger.Txn, conn redcon.Conn, key []byte, count int) ([]member
 
 	newCount := len(entries) - count
 	if newCount == 0 {
-		return popped, txn.Delete(rawKeyPrefixWithDb(key, dbSlot))
+		return popped, txn.Delete(rawKeyPrefix(key, dbSlot))
 	}
 	return popped, writeZSetCount(txn, key, uint32(newCount), dbSlot)
 }
 
-func zpopmax(txn *badger.Txn, conn redcon.Conn, key []byte, count int) ([]memberScore, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func zpopmax(txn *badger.Txn, dbSlot int, key []byte, count int) ([]memberScore, error) {
 
 	entries, err := loadAllSortedMembers(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
@@ -1134,19 +1038,19 @@ func zpopmax(txn *badger.Txn, conn redcon.Conn, key []byte, count int) ([]member
 
 	newCount := len(entries) - count
 	if newCount == 0 {
-		return popped, txn.Delete(rawKeyPrefixWithDb(key, dbSlot))
+		return popped, txn.Delete(rawKeyPrefix(key, dbSlot))
 	}
 	return popped, writeZSetCount(txn, key, uint32(newCount), dbSlot)
 }
 
 // --- Multi-score ---
 
-func zmscore(txn *badger.Txn, conn redcon.Conn, key []byte, members ...[]byte) ([]float64, []bool, error) {
+func zmscore(txn *badger.Txn, dbSlot int, key []byte, members ...[]byte) ([]float64, []bool, error) {
 	scores := make([]float64, len(members))
 	found := make([]bool, len(members))
 
 	for i, member := range members {
-		score, ok, err := zscore(txn, conn, key, member)
+		score, ok, err := zscore(txn, dbSlot, key, member)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1159,11 +1063,7 @@ func zmscore(txn *badger.Txn, conn redcon.Conn, key []byte, members ...[]byte) (
 
 // --- Random member ---
 
-func zrandmember(txn *badger.Txn, conn redcon.Conn, key []byte, count int) ([][]byte, []float64, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func zrandmember(txn *badger.Txn, dbSlot int, key []byte, count int) ([][]byte, []float64, error) {
 
 	entries, err := loadAllSortedMembers(txn, key, dbSlot)
 	if err == badger.ErrKeyNotFound {
@@ -1239,11 +1139,7 @@ func zsetToSlice(m map[string]float64) []memberScore {
 	return result
 }
 
-func storeZSetResult(txn *badger.Txn, conn redcon.Conn, dest []byte, members []memberScore) (int, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func storeZSetResult(txn *badger.Txn, dbSlot int, dest []byte, members []memberScore) (int, error) {
 
 	_ = deleteAllInternalKeys(txn, dest, dbSlot)
 
@@ -1317,13 +1213,9 @@ func intersectScores(aggregate string, maps ...map[string]float64) map[string]fl
 	return result
 }
 
-func zdiff(txn *badger.Txn, conn redcon.Conn, keys ...[]byte) (map[string]float64, error) {
+func zdiff(txn *badger.Txn, dbSlot int, keys ...[]byte) (map[string]float64, error) {
 	if len(keys) == 0 {
 		return map[string]float64{}, nil
-	}
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
 	}
 
 	first, err := loadZSetMap(txn, keys[0], dbSlot)
@@ -1343,13 +1235,9 @@ func zdiff(txn *badger.Txn, conn redcon.Conn, keys ...[]byte) (map[string]float6
 	return first, nil
 }
 
-func zinter(txn *badger.Txn, conn redcon.Conn, aggregate string, keys ...[]byte) (map[string]float64, error) {
+func zinter(txn *badger.Txn, dbSlot int, aggregate string, keys ...[]byte) (map[string]float64, error) {
 	if len(keys) == 0 {
 		return map[string]float64{}, nil
-	}
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
 	}
 
 	maps := make([]map[string]float64, len(keys))
@@ -1364,13 +1252,9 @@ func zinter(txn *badger.Txn, conn redcon.Conn, aggregate string, keys ...[]byte)
 	return intersectScores(aggregate, maps...), nil
 }
 
-func zunion(txn *badger.Txn, conn redcon.Conn, aggregate string, keys ...[]byte) (map[string]float64, error) {
+func zunion(txn *badger.Txn, dbSlot int, aggregate string, keys ...[]byte) (map[string]float64, error) {
 	if len(keys) == 0 {
 		return map[string]float64{}, nil
-	}
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
 	}
 
 	maps := make([]map[string]float64, len(keys))

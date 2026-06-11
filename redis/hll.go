@@ -6,7 +6,6 @@ import (
 	"math/bits"
 
 	"github.com/dgraph-io/badger/v4"
-	"github.com/tidwall/redcon"
 )
 
 const (
@@ -280,28 +279,19 @@ func hllRawToDense(destDense []byte, raw []byte) {
 	hllInvalidateCache(destDense)
 }
 
-func pfadd(txn *badger.Txn, conn redcon.Conn, key []byte, elements ...[]byte) (int, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func pfadd(txn *badger.Txn, dbSlot int, key []byte, elements ...[]byte) (int, error) {
 
 	var hllData []byte
-	item, err := txn.Get(rawKeyPrefixWithDb(key, dbSlot))
+	item, err := txn.Get(rawKeyPrefix(key, dbSlot))
 	if err == badger.ErrKeyNotFound {
 		hllData = createHLL()
 	} else if err != nil {
 		return 0, err
 	} else {
-		var valCopy []byte
-		err = item.Value(func(val []byte) error {
-			valCopy = append([]byte{}, val...)
-			return nil
-		})
+		hllData, err = copyItemValue(item)
 		if err != nil {
 			return 0, err
 		}
-		hllData = valCopy
 	}
 
 	if !isValidHLL(hllData) {
@@ -318,7 +308,7 @@ func pfadd(txn *badger.Txn, conn redcon.Conn, key []byte, elements ...[]byte) (i
 
 	if updated == 1 {
 		hllInvalidateCache(hllData)
-		entry := badger.NewEntry(rawKeyPrefixWithDb(key, dbSlot), hllData).WithMeta(byte(RedisString))
+		entry := badger.NewEntry(rawKeyPrefix(key, dbSlot), hllData).WithMeta(byte(RedisString))
 		if err := txn.SetEntry(entry); err != nil {
 			return 0, err
 		}
@@ -327,29 +317,21 @@ func pfadd(txn *badger.Txn, conn redcon.Conn, key []byte, elements ...[]byte) (i
 	return updated, nil
 }
 
-func pfcount(txn *badger.Txn, conn redcon.Conn, keys ...[]byte) (uint64, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func pfcount(txn *badger.Txn, dbSlot int, keys ...[]byte) (uint64, error) {
 
 	if len(keys) == 0 {
 		return 0, nil
 	}
 
 	if len(keys) == 1 {
-		item, err := txn.Get(rawKeyPrefixWithDb(keys[0], dbSlot))
+		item, err := txn.Get(rawKeyPrefix(keys[0], dbSlot))
 		if err == badger.ErrKeyNotFound {
 			return 0, nil
 		}
 		if err != nil {
 			return 0, err
 		}
-		var valCopy []byte
-		err = item.Value(func(val []byte) error {
-			valCopy = append([]byte{}, val...)
-			return nil
-		})
+		valCopy, err := copyItemValue(item)
 		if err != nil {
 			return 0, err
 		}
@@ -361,18 +343,14 @@ func pfcount(txn *badger.Txn, conn redcon.Conn, keys ...[]byte) (uint64, error) 
 
 	raw := make([]byte, HLL_REGISTERS)
 	for _, key := range keys {
-		item, err := txn.Get(rawKeyPrefixWithDb(key, dbSlot))
+		item, err := txn.Get(rawKeyPrefix(key, dbSlot))
 		if err == badger.ErrKeyNotFound {
 			continue
 		}
 		if err != nil {
 			return 0, err
 		}
-		var valCopy []byte
-		err = item.Value(func(val []byte) error {
-			valCopy = append([]byte{}, val...)
-			return nil
-		})
+		valCopy, err := copyItemValue(item)
 		if err != nil {
 			return 0, err
 		}
@@ -387,26 +365,18 @@ func pfcount(txn *badger.Txn, conn redcon.Conn, keys ...[]byte) (uint64, error) 
 	return hllCount(dense), nil
 }
 
-func pfmerge(txn *badger.Txn, conn redcon.Conn, dest []byte, sources ...[]byte) error {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func pfmerge(txn *badger.Txn, dbSlot int, dest []byte, sources ...[]byte) error {
 
 	raw := make([]byte, HLL_REGISTERS)
 	for _, key := range sources {
-		item, err := txn.Get(rawKeyPrefixWithDb(key, dbSlot))
+		item, err := txn.Get(rawKeyPrefix(key, dbSlot))
 		if err == badger.ErrKeyNotFound {
 			continue
 		}
 		if err != nil {
 			return err
 		}
-		var valCopy []byte
-		err = item.Value(func(val []byte) error {
-			valCopy = append([]byte{}, val...)
-			return nil
-		})
+		valCopy, err := copyItemValue(item)
 		if err != nil {
 			return err
 		}
@@ -418,5 +388,5 @@ func pfmerge(txn *badger.Txn, conn redcon.Conn, dest []byte, sources ...[]byte) 
 
 	dense := createHLL()
 	hllRawToDense(dense, raw)
-	return txn.SetEntry(badger.NewEntry(rawKeyPrefixWithDb(dest, dbSlot), dense).WithMeta(byte(RedisString)))
+	return txn.SetEntry(badger.NewEntry(rawKeyPrefix(dest, dbSlot), dense).WithMeta(byte(RedisString)))
 }

@@ -800,11 +800,7 @@ func readJSONDocument(conn redcon.Conn, db *badger.DB, key []byte) (*JSONDocumen
 		if item.UserMeta() != byte(RedisJSON) {
 			return errWrongType
 		}
-		var data []byte
-		err = item.Value(func(val []byte) error {
-			data = append([]byte{}, val...)
-			return nil
-		})
+		data, err := copyItemValue(item)
 		if err != nil {
 			return err
 		}
@@ -816,6 +812,51 @@ func readJSONDocument(conn redcon.Conn, db *badger.DB, key []byte) (*JSONDocumen
 }
 
 var errWrongType = fmt.Errorf("WRONGTYPE Operation against a key holding the wrong kind of value")
+
+// errSkip is a sentinel used inside JSON transactions to signal "do nothing, return null".
+var errSkip = fmt.Errorf("skip")
+
+// writeJSONErr writes the appropriate RESP error response for a JSON command error.
+func writeJSONErr(conn redcon.Conn, err error) {
+	if err == badger.ErrKeyNotFound {
+		conn.WriteNull()
+	} else if err == errWrongType {
+		conn.WriteError(err.Error())
+	} else {
+		conn.WriteError("ERR " + err.Error())
+	}
+}
+
+// updateJSONDoc loads the JSON document at key, runs fn against it, then serializes and saves it back.
+// fn should return errSkip to write null without error.
+func updateJSONDoc(conn redcon.Conn, db *badger.DB, key []byte, fn func(*JSONDocument) error) error {
+	prefix := rawKeyPrefix(key, currentDb(conn))
+	return db.Update(func(txn *badger.Txn) error {
+		item, err := txn.Get(prefix)
+		if err != nil {
+			return err
+		}
+		if item.UserMeta() != byte(RedisJSON) {
+			return errWrongType
+		}
+		data, err := copyItemValue(item)
+		if err != nil {
+			return err
+		}
+		doc, err := newJSONDocument(data)
+		if err != nil {
+			return err
+		}
+		if err := fn(doc); err != nil {
+			return err
+		}
+		newData, err := doc.serialize()
+		if err != nil {
+			return err
+		}
+		return txn.SetEntry(badger.NewEntry(prefix, newData).WithMeta(byte(RedisJSON)))
+	})
+}
 
 type fphaType int
 
@@ -948,11 +989,7 @@ func handleJSONSet(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 			if item.UserMeta() != byte(RedisJSON) {
 				return errWrongType
 			}
-			var data []byte
-			err = item.Value(func(val []byte) error {
-				data = append([]byte{}, val...)
-				return nil
-			})
+			data, err := copyItemValue(item)
 			if err != nil {
 				return err
 			}
@@ -969,23 +1006,23 @@ func handleJSONSet(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 
 		if path == "$" || path == "." {
 			if nx && keyExists {
-				return fmt.Errorf("skip")
+				return errSkip
 			}
 			if xx && !keyExists {
-				return fmt.Errorf("skip")
+				return errSkip
 			}
 			doc.root = value
 		} else {
 			if nx {
 				_, err := doc.get(path)
 				if err == nil {
-					return fmt.Errorf("skip")
+					return errSkip
 				}
 			}
 			if xx {
 				_, err := doc.get(path)
 				if err != nil {
-					return fmt.Errorf("skip")
+					return errSkip
 				}
 			}
 			if err := doc.set(path, value); err != nil {
@@ -1003,12 +1040,10 @@ func handleJSONSet(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 	})
 
 	if err != nil {
-		if err.Error() == "skip" {
+		if err == errSkip {
 			conn.WriteNull()
-		} else if err.Error() == "WRONGTYPE Operation against a key holding the wrong kind of value" {
-			conn.WriteError(err.Error())
 		} else {
-			conn.WriteError("ERR " + err.Error())
+			writeJSONErr(conn, err)
 		}
 		return
 	}
@@ -1025,13 +1060,7 @@ func handleJSONGet(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 	key := cmd.Args[1]
 	doc, err := readJSONDocument(conn, db, key)
 	if err != nil {
-		if err == badger.ErrKeyNotFound {
-			conn.WriteNull()
-		} else if err == errWrongType {
-			conn.WriteError(err.Error())
-		} else {
-			conn.WriteError("ERR " + err.Error())
-		}
+		writeJSONErr(conn, err)
 		return
 	}
 
@@ -1114,11 +1143,7 @@ func handleJSONDel(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 		if item.UserMeta() != byte(RedisJSON) {
 			return errWrongType
 		}
-		var data []byte
-		err = item.Value(func(val []byte) error {
-			data = append([]byte{}, val...)
-			return nil
-		})
+		data, err := copyItemValue(item)
 		if err != nil {
 			return err
 		}
@@ -1165,13 +1190,7 @@ func handleJSONType(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 	key := cmd.Args[1]
 	doc, err := readJSONDocument(conn, db, key)
 	if err != nil {
-		if err == badger.ErrKeyNotFound {
-			conn.WriteNull()
-		} else if err == errWrongType {
-			conn.WriteError(err.Error())
-		} else {
-			conn.WriteError("ERR " + err.Error())
-		}
+		writeJSONErr(conn, err)
 		return
 	}
 
@@ -1207,51 +1226,14 @@ func handleJSONArrAppend(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 		values = append(values, v)
 	}
 
-	prefix := rawKeyPrefix(key, currentDb(conn))
 	var newLen int
-
-	err := db.Update(func(txn *badger.Txn) error {
-		item, err := txn.Get(prefix)
-		if err != nil {
-			return err
-		}
-		if item.UserMeta() != byte(RedisJSON) {
-			return errWrongType
-		}
-		var data []byte
-		err = item.Value(func(val []byte) error {
-			data = append([]byte{}, val...)
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-		doc, err := newJSONDocument(data)
-		if err != nil {
-			return err
-		}
-
+	err := updateJSONDoc(conn, db, key, func(doc *JSONDocument) error {
+		var err error
 		newLen, err = doc.arrAppend(path, values...)
-		if err != nil {
-			return err
-		}
-
-		newData, err := doc.serialize()
-		if err != nil {
-			return err
-		}
-		e := badger.NewEntry(prefix, newData).WithMeta(byte(RedisJSON))
-		return txn.SetEntry(e)
+		return err
 	})
-
 	if err != nil {
-		if err == badger.ErrKeyNotFound {
-			conn.WriteNull()
-		} else if err == errWrongType {
-			conn.WriteError(err.Error())
-		} else {
-			conn.WriteError("ERR " + err.Error())
-		}
+		writeJSONErr(conn, err)
 		return
 	}
 
@@ -1275,13 +1257,7 @@ func handleJSONArrIndex(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 
 	doc, err := readJSONDocument(conn, db, key)
 	if err != nil {
-		if err == badger.ErrKeyNotFound {
-			conn.WriteNull()
-		} else if err == errWrongType {
-			conn.WriteError(err.Error())
-		} else {
-			conn.WriteError("ERR " + err.Error())
-		}
+		writeJSONErr(conn, err)
 		return
 	}
 
@@ -1307,13 +1283,7 @@ func handleJSONArrLen(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 
 	doc, err := readJSONDocument(conn, db, key)
 	if err != nil {
-		if err == badger.ErrKeyNotFound {
-			conn.WriteNull()
-		} else if err == errWrongType {
-			conn.WriteError(err.Error())
-		} else {
-			conn.WriteError("ERR " + err.Error())
-		}
+		writeJSONErr(conn, err)
 		return
 	}
 
@@ -1340,51 +1310,14 @@ func handleJSONNumIncrBy(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 		return
 	}
 
-	prefix := rawKeyPrefix(key, currentDb(conn))
 	var newVal float64
-
-	err = db.Update(func(txn *badger.Txn) error {
-		item, err := txn.Get(prefix)
-		if err != nil {
-			return err
-		}
-		if item.UserMeta() != byte(RedisJSON) {
-			return errWrongType
-		}
-		var data []byte
-		err = item.Value(func(val []byte) error {
-			data = append([]byte{}, val...)
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-		doc, err := newJSONDocument(data)
-		if err != nil {
-			return err
-		}
-
-		newVal, err = doc.numIncrBy(path, delta)
-		if err != nil {
-			return err
-		}
-
-		newData, err := doc.serialize()
-		if err != nil {
-			return err
-		}
-		e := badger.NewEntry(prefix, newData).WithMeta(byte(RedisJSON))
-		return txn.SetEntry(e)
+	err = updateJSONDoc(conn, db, key, func(doc *JSONDocument) error {
+		var e error
+		newVal, e = doc.numIncrBy(path, delta)
+		return e
 	})
-
 	if err != nil {
-		if err == badger.ErrKeyNotFound {
-			conn.WriteNull()
-		} else if err == errWrongType {
-			conn.WriteError(err.Error())
-		} else {
-			conn.WriteError("ERR " + err.Error())
-		}
+		writeJSONErr(conn, err)
 		return
 	}
 
@@ -1406,51 +1339,14 @@ func handleJSONNumMultBy(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 		return
 	}
 
-	prefix := rawKeyPrefix(key, currentDb(conn))
 	var newVal float64
-
-	err = db.Update(func(txn *badger.Txn) error {
-		item, err := txn.Get(prefix)
-		if err != nil {
-			return err
-		}
-		if item.UserMeta() != byte(RedisJSON) {
-			return errWrongType
-		}
-		var data []byte
-		err = item.Value(func(val []byte) error {
-			data = append([]byte{}, val...)
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-		doc, err := newJSONDocument(data)
-		if err != nil {
-			return err
-		}
-
-		newVal, err = doc.numMultBy(path, factor)
-		if err != nil {
-			return err
-		}
-
-		newData, err := doc.serialize()
-		if err != nil {
-			return err
-		}
-		e := badger.NewEntry(prefix, newData).WithMeta(byte(RedisJSON))
-		return txn.SetEntry(e)
+	err = updateJSONDoc(conn, db, key, func(doc *JSONDocument) error {
+		var e error
+		newVal, e = doc.numMultBy(path, factor)
+		return e
 	})
-
 	if err != nil {
-		if err == badger.ErrKeyNotFound {
-			conn.WriteNull()
-		} else if err == errWrongType {
-			conn.WriteError(err.Error())
-		} else {
-			conn.WriteError("ERR " + err.Error())
-		}
+		writeJSONErr(conn, err)
 		return
 	}
 
@@ -1471,13 +1367,7 @@ func handleJSONObjKeys(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 
 	doc, err := readJSONDocument(conn, db, key)
 	if err != nil {
-		if err == badger.ErrKeyNotFound {
-			conn.WriteNull()
-		} else if err == errWrongType {
-			conn.WriteError(err.Error())
-		} else {
-			conn.WriteError("ERR " + err.Error())
-		}
+		writeJSONErr(conn, err)
 		return
 	}
 
@@ -1507,13 +1397,7 @@ func handleJSONObjLen(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 
 	doc, err := readJSONDocument(conn, db, key)
 	if err != nil {
-		if err == badger.ErrKeyNotFound {
-			conn.WriteNull()
-		} else if err == errWrongType {
-			conn.WriteError(err.Error())
-		} else {
-			conn.WriteError("ERR " + err.Error())
-		}
+		writeJSONErr(conn, err)
 		return
 	}
 
@@ -1548,51 +1432,14 @@ func handleJSONStrAppend(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 		return
 	}
 
-	prefix := rawKeyPrefix(key, currentDb(conn))
 	var newLen int
-
-	err := db.Update(func(txn *badger.Txn) error {
-		item, err := txn.Get(prefix)
-		if err != nil {
-			return err
-		}
-		if item.UserMeta() != byte(RedisJSON) {
-			return errWrongType
-		}
-		var data []byte
-		err = item.Value(func(val []byte) error {
-			data = append([]byte{}, val...)
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-		doc, err := newJSONDocument(data)
-		if err != nil {
-			return err
-		}
-
-		newLen, err = doc.strAppend(path, suffix)
-		if err != nil {
-			return err
-		}
-
-		newData, err := doc.serialize()
-		if err != nil {
-			return err
-		}
-		e := badger.NewEntry(prefix, newData).WithMeta(byte(RedisJSON))
-		return txn.SetEntry(e)
+	err := updateJSONDoc(conn, db, key, func(doc *JSONDocument) error {
+		var e error
+		newLen, e = doc.strAppend(path, suffix)
+		return e
 	})
-
 	if err != nil {
-		if err == badger.ErrKeyNotFound {
-			conn.WriteNull()
-		} else if err == errWrongType {
-			conn.WriteError(err.Error())
-		} else {
-			conn.WriteError("ERR " + err.Error())
-		}
+		writeJSONErr(conn, err)
 		return
 	}
 
@@ -1613,13 +1460,7 @@ func handleJSONStrLen(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 
 	doc, err := readJSONDocument(conn, db, key)
 	if err != nil {
-		if err == badger.ErrKeyNotFound {
-			conn.WriteNull()
-		} else if err == errWrongType {
-			conn.WriteError(err.Error())
-		} else {
-			conn.WriteError("ERR " + err.Error())
-		}
+		writeJSONErr(conn, err)
 		return
 	}
 
@@ -1668,13 +1509,7 @@ func handleJSONResp(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 	key := cmd.Args[1]
 	doc, err := readJSONDocument(conn, db, key)
 	if err != nil {
-		if err == badger.ErrKeyNotFound {
-			conn.WriteNull()
-		} else if err == errWrongType {
-			conn.WriteError(err.Error())
-		} else {
-			conn.WriteError("ERR " + err.Error())
-		}
+		writeJSONErr(conn, err)
 		return
 	}
 
@@ -1719,11 +1554,7 @@ func handleJSONClear(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 		if item.UserMeta() != byte(RedisJSON) {
 			return errWrongType
 		}
-		var data []byte
-		err = item.Value(func(val []byte) error {
-			data = append([]byte{}, val...)
-			return nil
-		})
+		data, err := copyItemValue(item)
 		if err != nil {
 			return err
 		}
@@ -1812,11 +1643,7 @@ func handleJSONArrPop(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 		if item.UserMeta() != byte(RedisJSON) {
 			return errWrongType
 		}
-		var data []byte
-		err = item.Value(func(val []byte) error {
-			data = append([]byte{}, val...)
-			return nil
-		})
+		data, err := copyItemValue(item)
 		if err != nil {
 			return err
 		}
@@ -1834,7 +1661,7 @@ func handleJSONArrPop(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 			return fmt.Errorf("err not an array")
 		}
 		if len(arr) == 0 {
-			return fmt.Errorf("skip")
+			return errSkip
 		}
 
 		popIdx := idx
@@ -1880,7 +1707,7 @@ func handleJSONArrPop(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 			conn.WriteNull()
 		} else if err == errWrongType {
 			conn.WriteError(err.Error())
-		} else if err.Error() == "skip" {
+		} else if err == errSkip {
 			conn.WriteNull()
 		} else {
 			conn.WriteError("ERR " + err.Error())
@@ -1925,11 +1752,7 @@ func handleJSONArrTrim(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 		if item.UserMeta() != byte(RedisJSON) {
 			return errWrongType
 		}
-		var data []byte
-		err = item.Value(func(val []byte) error {
-			data = append([]byte{}, val...)
-			return nil
-		})
+		data, err := copyItemValue(item)
 		if err != nil {
 			return err
 		}
@@ -1994,13 +1817,7 @@ func handleJSONArrTrim(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 	})
 
 	if err != nil {
-		if err == badger.ErrKeyNotFound {
-			conn.WriteNull()
-		} else if err == errWrongType {
-			conn.WriteError(err.Error())
-		} else {
-			conn.WriteError("ERR " + err.Error())
-		}
+		writeJSONErr(conn, err)
 		return
 	}
 
@@ -2042,11 +1859,7 @@ func handleJSONArrInsert(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 		if item.UserMeta() != byte(RedisJSON) {
 			return errWrongType
 		}
-		var data []byte
-		err = item.Value(func(val []byte) error {
-			data = append([]byte{}, val...)
-			return nil
-		})
+		data, err := copyItemValue(item)
 		if err != nil {
 			return err
 		}
@@ -2102,13 +1915,7 @@ func handleJSONArrInsert(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 	})
 
 	if err != nil {
-		if err == badger.ErrKeyNotFound {
-			conn.WriteNull()
-		} else if err == errWrongType {
-			conn.WriteError(err.Error())
-		} else {
-			conn.WriteError("ERR " + err.Error())
-		}
+		writeJSONErr(conn, err)
 		return
 	}
 

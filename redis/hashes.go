@@ -1,8 +1,6 @@
 package redis
 
 import (
-	"bytes"
-	"encoding/binary"
 	"fmt"
 	"math"
 	"math/rand/v2"
@@ -10,7 +8,6 @@ import (
 	"strconv"
 
 	"github.com/dgraph-io/badger/v4"
-	"github.com/tidwall/redcon"
 )
 
 func internalHashKey(hash, field []byte, dbSlot int) []byte {
@@ -26,47 +23,41 @@ func hashFieldsPrefix(hash []byte, dbSlot int) []byte {
 	return append(prefix, 0)
 }
 
+// fieldFromInternalKey extracts the field name from an internal hash key.
+// The internal key format is: -{db}:{hash}\x00{field}
+// This is an alias for the same operation used by sets.
 func fieldFromInternalKey(key []byte) []byte {
-	idx := bytes.LastIndexByte(key, 0)
-	if idx < 0 {
-		return nil
+	return memberFromInternalKey(key)
+}
+
+// hsetnx sets a hash field only if it does not already exist.
+// Returns 1 if the field was set, 0 if it already existed.
+func hsetnx(txn *badger.Txn, dbSlot int, hash, field, value []byte) (int, error) {
+	_, err := txn.Get(internalHashKey(hash, field, dbSlot))
+	if err == nil {
+		return 0, nil
 	}
-	return key[idx+1:]
-}
-
-func writeHashCount(txn *badger.Txn, hash []byte, count uint32, dbSlot int) error {
-	buf := make([]byte, 4)
-	binary.BigEndian.PutUint32(buf, count)
-	return txn.SetEntry(badger.NewEntry(rawKeyPrefixWithDb(hash, dbSlot), buf).WithMeta(byte(RedisHash)))
-}
-
-func readHashCount(txn *badger.Txn, hash []byte, dbSlot int) (uint32, error) {
-	item, err := txn.Get(rawKeyPrefixWithDb(hash, dbSlot))
+	if err != badger.ErrKeyNotFound {
+		return 0, err
+	}
+	added, err := hset(txn, dbSlot, hash, field, value)
 	if err != nil {
 		return 0, err
 	}
-	var count uint32
-	if err := item.Value(func(val []byte) error {
-		count = binary.BigEndian.Uint32(val)
-		return nil
-	}); err != nil {
-		return 0, err
-	}
-	return count, nil
+	_ = added
+	return 1, nil
+}
+
+func writeHashCount(txn *badger.Txn, hash []byte, count uint32, dbSlot int) error {
+	return writeUint32Sentinel(txn, hash, count, RedisHash, dbSlot)
+}
+
+func readHashCount(txn *badger.Txn, hash []byte, dbSlot int) (uint32, error) {
+	return readUint32Sentinel(txn, hash, dbSlot)
 }
 
 func clearHash(txn *badger.Txn, hash []byte, dbSlot int) error {
-	prefix := hashFieldsPrefix(hash, dbSlot)
-	opts := badger.DefaultIteratorOptions
-	opts.Prefix = prefix
-	it := txn.NewIterator(opts)
-	defer it.Close()
-	for it.Rewind(); it.Valid(); it.Next() {
-		if err := txn.Delete(it.Item().KeyCopy(nil)); err != nil {
-			return err
-		}
-	}
-	return txn.Delete(rawKeyPrefixWithDb(hash, dbSlot))
+	return clearPrefixedKeys(txn, hashFieldsPrefix(hash, dbSlot), rawKeyPrefix(hash, dbSlot))
 }
 
 func loadAllFields(txn *badger.Txn, hash []byte, dbSlot int) (map[string][]byte, error) {
@@ -88,27 +79,14 @@ func loadAllFields(txn *badger.Txn, hash []byte, dbSlot int) (map[string][]byte,
 	return fields, nil
 }
 
-func hset(txn *badger.Txn, conn redcon.Conn, hash []byte, args ...[]byte) (int, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func hset(txn *badger.Txn, dbSlot int, hash []byte, args ...[]byte) (int, error) {
 
 	var added int
-	var count uint32
-
-	item, err := txn.Get(rawKeyPrefixWithDb(hash, dbSlot))
+	count, err := readHashCount(txn, hash, dbSlot)
 	if err == badger.ErrKeyNotFound {
 		count = 0
 	} else if err != nil {
 		return 0, err
-	} else {
-		if err := item.Value(func(val []byte) error {
-			count = binary.BigEndian.Uint32(val)
-			return nil
-		}); err != nil {
-			return 0, err
-		}
 	}
 
 	for i := 0; i < len(args); i += 2 {
@@ -130,31 +108,20 @@ func hset(txn *badger.Txn, conn redcon.Conn, hash []byte, args ...[]byte) (int, 
 	return added, writeHashCount(txn, hash, count, dbSlot)
 }
 
-func hget(txn *badger.Txn, conn redcon.Conn, hash, field []byte) ([]byte, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func hget(txn *badger.Txn, dbSlot int, hash, field []byte) ([]byte, error) {
 
 	item, err := txn.Get(internalHashKey(hash, field, dbSlot))
 	if err != nil {
 		return nil, err
 	}
-	var valCopy []byte
-	if err := item.Value(func(val []byte) error {
-		valCopy = append([]byte{}, val...)
-		return nil
-	}); err != nil {
+	valCopy, err := copyItemValue(item)
+	if err != nil {
 		return nil, err
 	}
 	return valCopy, nil
 }
 
-func hdel(txn *badger.Txn, conn redcon.Conn, hash []byte, fields ...[]byte) (int, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func hdel(txn *badger.Txn, dbSlot int, hash []byte, fields ...[]byte) (int, error) {
 
 	count, err := readHashCount(txn, hash, dbSlot)
 	if err == badger.ErrKeyNotFound {
@@ -182,16 +149,12 @@ func hdel(txn *badger.Txn, conn redcon.Conn, hash []byte, fields ...[]byte) (int
 	}
 
 	if count == 0 {
-		return removed, txn.Delete(rawKeyPrefixWithDb(hash, dbSlot))
+		return removed, txn.Delete(rawKeyPrefix(hash, dbSlot))
 	}
 	return removed, writeHashCount(txn, hash, count, dbSlot)
 }
 
-func hexists(txn *badger.Txn, conn redcon.Conn, hash, field []byte) (bool, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func hexists(txn *badger.Txn, dbSlot int, hash, field []byte) (bool, error) {
 
 	_, err := txn.Get(internalHashKey(hash, field, dbSlot))
 	if err == badger.ErrKeyNotFound {
@@ -203,11 +166,7 @@ func hexists(txn *badger.Txn, conn redcon.Conn, hash, field []byte) (bool, error
 	return true, nil
 }
 
-func hlen(txn *badger.Txn, conn redcon.Conn, hash []byte) (int, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func hlen(txn *badger.Txn, dbSlot int, hash []byte) (int, error) {
 
 	count, err := readHashCount(txn, hash, dbSlot)
 	if err == badger.ErrKeyNotFound {
@@ -219,11 +178,7 @@ func hlen(txn *badger.Txn, conn redcon.Conn, hash []byte) (int, error) {
 	return int(count), nil
 }
 
-func hmget(txn *badger.Txn, conn redcon.Conn, hash []byte, fields ...[]byte) ([][]byte, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func hmget(txn *badger.Txn, dbSlot int, hash []byte, fields ...[]byte) ([][]byte, error) {
 
 	results := make([][]byte, len(fields))
 	for i, field := range fields {
@@ -243,13 +198,9 @@ func hmget(txn *badger.Txn, conn redcon.Conn, hash []byte, fields ...[]byte) ([]
 	return results, nil
 }
 
-func hkeys(txn *badger.Txn, conn redcon.Conn, hash []byte) ([][]byte, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func hkeys(txn *badger.Txn, dbSlot int, hash []byte) ([][]byte, error) {
 
-	_, err := txn.Get(rawKeyPrefixWithDb(hash, dbSlot))
+	_, err := txn.Get(rawKeyPrefix(hash, dbSlot))
 	if err == badger.ErrKeyNotFound {
 		return [][]byte{}, nil
 	}
@@ -271,13 +222,9 @@ func hkeys(txn *badger.Txn, conn redcon.Conn, hash []byte) ([][]byte, error) {
 	return keys, nil
 }
 
-func hvals(txn *badger.Txn, conn redcon.Conn, hash []byte) ([][]byte, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func hvals(txn *badger.Txn, dbSlot int, hash []byte) ([][]byte, error) {
 
-	_, err := txn.Get(rawKeyPrefixWithDb(hash, dbSlot))
+	_, err := txn.Get(rawKeyPrefix(hash, dbSlot))
 	if err == badger.ErrKeyNotFound {
 		return [][]byte{}, nil
 	}
@@ -301,13 +248,9 @@ func hvals(txn *badger.Txn, conn redcon.Conn, hash []byte) ([][]byte, error) {
 	return vals, nil
 }
 
-func hgetall(txn *badger.Txn, conn redcon.Conn, hash []byte) ([][]byte, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func hgetall(txn *badger.Txn, dbSlot int, hash []byte) ([][]byte, error) {
 
-	_, err := txn.Get(rawKeyPrefixWithDb(hash, dbSlot))
+	_, err := txn.Get(rawKeyPrefix(hash, dbSlot))
 	if err == badger.ErrKeyNotFound {
 		return [][]byte{}, nil
 	}
@@ -334,11 +277,7 @@ func hgetall(txn *badger.Txn, conn redcon.Conn, hash []byte) ([][]byte, error) {
 	return pairs, nil
 }
 
-func hincrby(txn *badger.Txn, conn redcon.Conn, hash, field []byte, amount int64) (int64, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func hincrby(txn *badger.Txn, dbSlot int, hash, field []byte, amount int64) (int64, error) {
 
 	internalKey := internalHashKey(hash, field, dbSlot)
 	item, err := txn.Get(internalKey)
@@ -356,11 +295,8 @@ func hincrby(txn *badger.Txn, conn redcon.Conn, hash, field []byte, amount int64
 		return 0, err
 	}
 
-	var valCopy []byte
-	if err := item.Value(func(val []byte) error {
-		valCopy = append([]byte{}, val...)
-		return nil
-	}); err != nil {
+	valCopy, err := copyItemValue(item)
+	if err != nil {
 		return 0, err
 	}
 
@@ -387,13 +323,9 @@ func hashFieldAdded(txn *badger.Txn, hash []byte, dbSlot int) error {
 	return writeHashCount(txn, hash, count+1, dbSlot)
 }
 
-func hincrbyfloat(txn *badger.Txn, conn redcon.Conn, hash, field []byte, amount float64) (string, error) {
+func hincrbyfloat(txn *badger.Txn, dbSlot int, hash, field []byte, amount float64) (string, error) {
 	if math.IsNaN(amount) {
 		return "", fmt.Errorf("value is not a valid float")
-	}
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
 	}
 
 	internalKey := internalHashKey(hash, field, dbSlot)
@@ -413,11 +345,8 @@ func hincrbyfloat(txn *badger.Txn, conn redcon.Conn, hash, field []byte, amount 
 		return "", err
 	}
 
-	var valCopy []byte
-	if err := item.Value(func(val []byte) error {
-		valCopy = append([]byte{}, val...)
-		return nil
-	}); err != nil {
+	valCopy, err := copyItemValue(item)
+	if err != nil {
 		return "", err
 	}
 
@@ -434,11 +363,7 @@ func hincrbyfloat(txn *badger.Txn, conn redcon.Conn, hash, field []byte, amount 
 	return str, nil
 }
 
-func hrandfield(txn *badger.Txn, conn redcon.Conn, hash []byte, count int, withValues bool) ([][]byte, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func hrandfield(txn *badger.Txn, dbSlot int, hash []byte, count int, withValues bool) ([][]byte, error) {
 
 	fields, err := loadAllFields(txn, hash, dbSlot)
 	if err == badger.ErrKeyNotFound || len(fields) == 0 {
@@ -507,11 +432,7 @@ func hrandfield(txn *badger.Txn, conn redcon.Conn, hash []byte, count int, withV
 	return result, nil
 }
 
-func hstrlen(txn *badger.Txn, conn redcon.Conn, hash, field []byte) (int, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func hstrlen(txn *badger.Txn, dbSlot int, hash, field []byte) (int, error) {
 
 	item, err := txn.Get(internalHashKey(hash, field, dbSlot))
 	if err != nil {
@@ -527,13 +448,9 @@ func hstrlen(txn *badger.Txn, conn redcon.Conn, hash, field []byte) (int, error)
 	return length, nil
 }
 
-func hscan(txn *badger.Txn, conn redcon.Conn, hash []byte, pattern string, count int) ([][]byte, error) {
-	dbSlot := 0
-	if conn != nil {
-		dbSlot = currentDb(conn)
-	}
+func hscan(txn *badger.Txn, dbSlot int, hash []byte, pattern string, count int) ([][]byte, error) {
 
-	_, err := txn.Get(rawKeyPrefixWithDb(hash, dbSlot))
+	_, err := txn.Get(rawKeyPrefix(hash, dbSlot))
 	if err == badger.ErrKeyNotFound {
 		return [][]byte{}, nil
 	}

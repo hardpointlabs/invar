@@ -13,7 +13,7 @@ func TestZAddNewKey(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		added, err := zadd(txn, nil, []byte("z1"), []byte("1.0"), []byte("a"), []byte("2.0"), []byte("b"))
+		added, err := zadd(txn, 0, []byte("z1"), []byte("1.0"), []byte("a"), []byte("2.0"), []byte("b"))
 		if err != nil {
 			return err
 		}
@@ -32,11 +32,11 @@ func TestZAddUpdatesExisting(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z2"), []byte("1.0"), []byte("a"))
+		_, err := zadd(txn, 0, []byte("z2"), []byte("1.0"), []byte("a"))
 		if err != nil {
 			return err
 		}
-		added, err := zadd(txn, nil, []byte("z2"), []byte("2.0"), []byte("a"))
+		added, err := zadd(txn, 0, []byte("z2"), []byte("2.0"), []byte("a"))
 		if err != nil {
 			return err
 		}
@@ -55,7 +55,7 @@ func TestZAddWithNx(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		added, err := zadd(txn, nil, []byte("z3"), []byte("nx"), []byte("1.0"), []byte("a"))
+		added, err := zadd(txn, 0, []byte("z3"), []byte("nx"), []byte("1.0"), []byte("a"))
 		if err != nil {
 			return err
 		}
@@ -63,7 +63,7 @@ func TestZAddWithNx(t *testing.T) {
 			t.Fatalf("expected 1 added, got %d", added)
 		}
 		// Second NX add should not add
-		added, err = zadd(txn, nil, []byte("z3"), []byte("nx"), []byte("2.0"), []byte("a"))
+		added, err = zadd(txn, 0, []byte("z3"), []byte("nx"), []byte("2.0"), []byte("a"))
 		if err != nil {
 			return err
 		}
@@ -83,7 +83,7 @@ func TestZAddWithXx(t *testing.T) {
 
 	err := db.Update(func(txn *badger.Txn) error {
 		// XX on non-existing key should add nothing
-		added, err := zadd(txn, nil, []byte("z4"), []byte("xx"), []byte("1.0"), []byte("a"))
+		added, err := zadd(txn, 0, []byte("z4"), []byte("xx"), []byte("1.0"), []byte("a"))
 		if err != nil {
 			return err
 		}
@@ -91,7 +91,7 @@ func TestZAddWithXx(t *testing.T) {
 			t.Fatalf("expected 0 added (XX non-existing), got %d", added)
 		}
 		// Add first without XX
-		added, err = zadd(txn, nil, []byte("z4"), []byte("1.0"), []byte("a"))
+		added, err = zadd(txn, 0, []byte("z4"), []byte("1.0"), []byte("a"))
 		if err != nil {
 			return err
 		}
@@ -99,7 +99,7 @@ func TestZAddWithXx(t *testing.T) {
 			t.Fatalf("expected 1 added, got %d", added)
 		}
 		// XX update existing
-		added, err = zadd(txn, nil, []byte("z4"), []byte("xx"), []byte("2.0"), []byte("a"))
+		added, err = zadd(txn, 0, []byte("z4"), []byte("xx"), []byte("2.0"), []byte("a"))
 		if err != nil {
 			return err
 		}
@@ -118,14 +118,14 @@ func TestZAddWithCh(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		added, err := zadd(txn, nil, []byte("z5"), []byte("ch"), []byte("1.0"), []byte("a"))
+		added, err := zadd(txn, 0, []byte("z5"), []byte("ch"), []byte("1.0"), []byte("a"))
 		if err != nil {
 			return err
 		}
 		if added != 1 {
 			t.Fatalf("expected 1 (CH new), got %d", added)
 		}
-		added, err = zadd(txn, nil, []byte("z5"), []byte("ch"), []byte("2.0"), []byte("a"))
+		added, err = zadd(txn, 0, []byte("z5"), []byte("ch"), []byte("2.0"), []byte("a"))
 		if err != nil {
 			return err
 		}
@@ -144,7 +144,7 @@ func TestZCard(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z6"), []byte("1.0"), []byte("a"), []byte("2.0"), []byte("b"), []byte("3.0"), []byte("c"))
+		_, err := zadd(txn, 0, []byte("z6"), []byte("1.0"), []byte("a"), []byte("2.0"), []byte("b"), []byte("3.0"), []byte("c"))
 		return err
 	})
 	if err != nil {
@@ -152,7 +152,7 @@ func TestZCard(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		count, err := zcard(txn, nil, []byte("z6"))
+		count, err := zcard(txn, 0, []byte("z6"))
 		if err != nil {
 			return err
 		}
@@ -171,7 +171,7 @@ func TestZCardNonExisting(t *testing.T) {
 	defer db.Close()
 
 	err := db.View(func(txn *badger.Txn) error {
-		count, err := zcard(txn, nil, []byte("nonexistent"))
+		count, err := zcard(txn, 0, []byte("nonexistent"))
 		if err != nil {
 			return err
 		}
@@ -190,7 +190,7 @@ func TestZScore(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z7"), []byte("3.14"), []byte("pi"))
+		_, err := zadd(txn, 0, []byte("z7"), []byte("3.14"), []byte("pi"))
 		return err
 	})
 	if err != nil {
@@ -198,7 +198,7 @@ func TestZScore(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		score, found, err := zscore(txn, nil, []byte("z7"), []byte("pi"))
+		score, found, err := zscore(txn, 0, []byte("z7"), []byte("pi"))
 		if err != nil {
 			return err
 		}
@@ -220,7 +220,7 @@ func TestZScoreNonExisting(t *testing.T) {
 	defer db.Close()
 
 	err := db.View(func(txn *badger.Txn) error {
-		_, found, err := zscore(txn, nil, []byte("z8"), []byte("nonexistent"))
+		_, found, err := zscore(txn, 0, []byte("z8"), []byte("nonexistent"))
 		if err != nil {
 			return err
 		}
@@ -239,7 +239,7 @@ func TestZRem(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z9"), []byte("1.0"), []byte("a"), []byte("2.0"), []byte("b"), []byte("3.0"), []byte("c"))
+		_, err := zadd(txn, 0, []byte("z9"), []byte("1.0"), []byte("a"), []byte("2.0"), []byte("b"), []byte("3.0"), []byte("c"))
 		return err
 	})
 	if err != nil {
@@ -247,7 +247,7 @@ func TestZRem(t *testing.T) {
 	}
 
 	err = db.Update(func(txn *badger.Txn) error {
-		removed, err := zrem(txn, nil, []byte("z9"), []byte("a"), []byte("c"))
+		removed, err := zrem(txn, 0, []byte("z9"), []byte("a"), []byte("c"))
 		if err != nil {
 			return err
 		}
@@ -261,7 +261,7 @@ func TestZRem(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		count, err := zcard(txn, nil, []byte("z9"))
+		count, err := zcard(txn, 0, []byte("z9"))
 		if err != nil {
 			return err
 		}
@@ -280,7 +280,7 @@ func TestZRemLastMemberDeletesKey(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z10"), []byte("1.0"), []byte("a"))
+		_, err := zadd(txn, 0, []byte("z10"), []byte("1.0"), []byte("a"))
 		return err
 	})
 	if err != nil {
@@ -288,7 +288,7 @@ func TestZRemLastMemberDeletesKey(t *testing.T) {
 	}
 
 	err = db.Update(func(txn *badger.Txn) error {
-		removed, err := zrem(txn, nil, []byte("z10"), []byte("a"))
+		removed, err := zrem(txn, 0, []byte("z10"), []byte("a"))
 		if err != nil {
 			return err
 		}
@@ -302,7 +302,7 @@ func TestZRemLastMemberDeletesKey(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		_, found, err := zscore(txn, nil, []byte("z10"), []byte("a"))
+		_, found, err := zscore(txn, 0, []byte("z10"), []byte("a"))
 		if err != nil {
 			return err
 		}
@@ -321,7 +321,7 @@ func TestZRange(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z11"),
+		_, err := zadd(txn, 0, []byte("z11"),
 			[]byte("1.0"), []byte("a"),
 			[]byte("3.0"), []byte("c"),
 			[]byte("2.0"), []byte("b"))
@@ -332,7 +332,7 @@ func TestZRange(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		result, err := zrange(txn, nil, []byte("z11"), 0, -1, false)
+		result, err := zrange(txn, 0, []byte("z11"), 0, -1, false)
 		if err != nil {
 			return err
 		}
@@ -354,7 +354,7 @@ func TestZRangeWithScores(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z12"),
+		_, err := zadd(txn, 0, []byte("z12"),
 			[]byte("1.0"), []byte("a"),
 			[]byte("2.0"), []byte("b"))
 		return err
@@ -364,7 +364,7 @@ func TestZRangeWithScores(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		result, err := zrange(txn, nil, []byte("z12"), 0, -1, true)
+		result, err := zrange(txn, 0, []byte("z12"), 0, -1, true)
 		if err != nil {
 			return err
 		}
@@ -389,7 +389,7 @@ func TestZRangeNegativeIndices(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z13"),
+		_, err := zadd(txn, 0, []byte("z13"),
 			[]byte("1.0"), []byte("a"),
 			[]byte("2.0"), []byte("b"),
 			[]byte("3.0"), []byte("c"))
@@ -400,7 +400,7 @@ func TestZRangeNegativeIndices(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		result, err := zrange(txn, nil, []byte("z13"), -2, -1, false)
+		result, err := zrange(txn, 0, []byte("z13"), -2, -1, false)
 		if err != nil {
 			return err
 		}
@@ -422,7 +422,7 @@ func TestZRevRange(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z14"),
+		_, err := zadd(txn, 0, []byte("z14"),
 			[]byte("1.0"), []byte("a"),
 			[]byte("2.0"), []byte("b"),
 			[]byte("3.0"), []byte("c"))
@@ -433,7 +433,7 @@ func TestZRevRange(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		result, err := zrevrange(txn, nil, []byte("z14"), 0, -1, false)
+		result, err := zrevrange(txn, 0, []byte("z14"), 0, -1, false)
 		if err != nil {
 			return err
 		}
@@ -455,7 +455,7 @@ func TestZRank(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z15"),
+		_, err := zadd(txn, 0, []byte("z15"),
 			[]byte("1.0"), []byte("a"),
 			[]byte("3.0"), []byte("c"),
 			[]byte("2.0"), []byte("b"))
@@ -466,7 +466,7 @@ func TestZRank(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		rank, found, err := zrank(txn, nil, []byte("z15"), []byte("b"))
+		rank, found, err := zrank(txn, 0, []byte("z15"), []byte("b"))
 		if err != nil {
 			return err
 		}
@@ -488,7 +488,7 @@ func TestZRankNonExisting(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z16"), []byte("1.0"), []byte("a"))
+		_, err := zadd(txn, 0, []byte("z16"), []byte("1.0"), []byte("a"))
 		return err
 	})
 	if err != nil {
@@ -496,7 +496,7 @@ func TestZRankNonExisting(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		_, found, err := zrank(txn, nil, []byte("z16"), []byte("nonexistent"))
+		_, found, err := zrank(txn, 0, []byte("z16"), []byte("nonexistent"))
 		if err != nil {
 			return err
 		}
@@ -515,7 +515,7 @@ func TestZRevRank(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z17"),
+		_, err := zadd(txn, 0, []byte("z17"),
 			[]byte("1.0"), []byte("a"),
 			[]byte("3.0"), []byte("c"),
 			[]byte("2.0"), []byte("b"))
@@ -526,7 +526,7 @@ func TestZRevRank(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		rank, found, err := zrevrank(txn, nil, []byte("z17"), []byte("b"))
+		rank, found, err := zrevrank(txn, 0, []byte("z17"), []byte("b"))
 		if err != nil {
 			return err
 		}
@@ -548,7 +548,7 @@ func TestZCount(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z18"),
+		_, err := zadd(txn, 0, []byte("z18"),
 			[]byte("1.0"), []byte("a"),
 			[]byte("2.0"), []byte("b"),
 			[]byte("3.0"), []byte("c"),
@@ -560,7 +560,7 @@ func TestZCount(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		count, err := zcount(txn, nil, []byte("z18"), "2.0", "3.0")
+		count, err := zcount(txn, 0, []byte("z18"), "2.0", "3.0")
 		if err != nil {
 			return err
 		}
@@ -579,7 +579,7 @@ func TestZCountExclusive(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z19"),
+		_, err := zadd(txn, 0, []byte("z19"),
 			[]byte("1.0"), []byte("a"),
 			[]byte("2.0"), []byte("b"),
 			[]byte("3.0"), []byte("c"))
@@ -590,7 +590,7 @@ func TestZCountExclusive(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		count, err := zcount(txn, nil, []byte("z19"), "(1.0", "(3.0")
+		count, err := zcount(txn, 0, []byte("z19"), "(1.0", "(3.0")
 		if err != nil {
 			return err
 		}
@@ -609,7 +609,7 @@ func TestZCountInf(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z20"),
+		_, err := zadd(txn, 0, []byte("z20"),
 			[]byte("1.0"), []byte("a"),
 			[]byte("2.0"), []byte("b"))
 		return err
@@ -619,7 +619,7 @@ func TestZCountInf(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		count, err := zcount(txn, nil, []byte("z20"), "-inf", "+inf")
+		count, err := zcount(txn, 0, []byte("z20"), "-inf", "+inf")
 		if err != nil {
 			return err
 		}
@@ -638,7 +638,7 @@ func TestZIncrByNewMember(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		newScore, err := zincrby(txn, nil, []byte("z21"), 5.0, []byte("a"))
+		newScore, err := zincrby(txn, 0, []byte("z21"), 5.0, []byte("a"))
 		if err != nil {
 			return err
 		}
@@ -657,11 +657,11 @@ func TestZIncrByExistingMember(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z22"), []byte("10.0"), []byte("a"))
+		_, err := zadd(txn, 0, []byte("z22"), []byte("10.0"), []byte("a"))
 		if err != nil {
 			return err
 		}
-		newScore, err := zincrby(txn, nil, []byte("z22"), 5.0, []byte("a"))
+		newScore, err := zincrby(txn, 0, []byte("z22"), 5.0, []byte("a"))
 		if err != nil {
 			return err
 		}
@@ -680,7 +680,7 @@ func TestZRangeByScore(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z23"),
+		_, err := zadd(txn, 0, []byte("z23"),
 			[]byte("1.0"), []byte("a"),
 			[]byte("2.0"), []byte("b"),
 			[]byte("3.0"), []byte("c"),
@@ -692,7 +692,7 @@ func TestZRangeByScore(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		result, err := zrangebyscore(txn, nil, []byte("z23"), "2.0", "3.0", false, 0, 0, false)
+		result, err := zrangebyscore(txn, 0, []byte("z23"), "2.0", "3.0", false, 0, 0, false)
 		if err != nil {
 			return err
 		}
@@ -714,7 +714,7 @@ func TestZRangeByScoreWithScoresLimit(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z24"),
+		_, err := zadd(txn, 0, []byte("z24"),
 			[]byte("1.0"), []byte("a"),
 			[]byte("2.0"), []byte("b"),
 			[]byte("3.0"), []byte("c"),
@@ -726,7 +726,7 @@ func TestZRangeByScoreWithScoresLimit(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		result, err := zrangebyscore(txn, nil, []byte("z24"), "-inf", "+inf", true, 1, 2, true)
+		result, err := zrangebyscore(txn, 0, []byte("z24"), "-inf", "+inf", true, 1, 2, true)
 		if err != nil {
 			return err
 		}
@@ -748,7 +748,7 @@ func TestZRevRangeByScore(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z25"),
+		_, err := zadd(txn, 0, []byte("z25"),
 			[]byte("1.0"), []byte("a"),
 			[]byte("2.0"), []byte("b"),
 			[]byte("3.0"), []byte("c"))
@@ -759,7 +759,7 @@ func TestZRevRangeByScore(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		result, err := zrevrangebyscore(txn, nil, []byte("z25"), "3.0", "1.0", false, 0, 0, false)
+		result, err := zrevrangebyscore(txn, 0, []byte("z25"), "3.0", "1.0", false, 0, 0, false)
 		if err != nil {
 			return err
 		}
@@ -781,7 +781,7 @@ func TestZPopMin(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z26"),
+		_, err := zadd(txn, 0, []byte("z26"),
 			[]byte("1.0"), []byte("a"),
 			[]byte("2.0"), []byte("b"),
 			[]byte("3.0"), []byte("c"))
@@ -792,7 +792,7 @@ func TestZPopMin(t *testing.T) {
 	}
 
 	err = db.Update(func(txn *badger.Txn) error {
-		popped, err := zpopmin(txn, nil, []byte("z26"), 2)
+		popped, err := zpopmin(txn, 0, []byte("z26"), 2)
 		if err != nil {
 			return err
 		}
@@ -812,7 +812,7 @@ func TestZPopMin(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		count, err := zcard(txn, nil, []byte("z26"))
+		count, err := zcard(txn, 0, []byte("z26"))
 		if err != nil {
 			return err
 		}
@@ -831,7 +831,7 @@ func TestZPopMax(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z27"),
+		_, err := zadd(txn, 0, []byte("z27"),
 			[]byte("1.0"), []byte("a"),
 			[]byte("2.0"), []byte("b"),
 			[]byte("3.0"), []byte("c"))
@@ -842,7 +842,7 @@ func TestZPopMax(t *testing.T) {
 	}
 
 	err = db.Update(func(txn *badger.Txn) error {
-		popped, err := zpopmax(txn, nil, []byte("z27"), 1)
+		popped, err := zpopmax(txn, 0, []byte("z27"), 1)
 		if err != nil {
 			return err
 		}
@@ -864,7 +864,7 @@ func TestZRemRangeByRank(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z28"),
+		_, err := zadd(txn, 0, []byte("z28"),
 			[]byte("1.0"), []byte("a"),
 			[]byte("2.0"), []byte("b"),
 			[]byte("3.0"), []byte("c"),
@@ -876,7 +876,7 @@ func TestZRemRangeByRank(t *testing.T) {
 	}
 
 	err = db.Update(func(txn *badger.Txn) error {
-		removed, err := zremrangebyrank(txn, nil, []byte("z28"), 1, 2)
+		removed, err := zremrangebyrank(txn, 0, []byte("z28"), 1, 2)
 		if err != nil {
 			return err
 		}
@@ -890,7 +890,7 @@ func TestZRemRangeByRank(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		result, err := zrange(txn, nil, []byte("z28"), 0, -1, false)
+		result, err := zrange(txn, 0, []byte("z28"), 0, -1, false)
 		if err != nil {
 			return err
 		}
@@ -912,7 +912,7 @@ func TestZRemRangeByScore(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z29"),
+		_, err := zadd(txn, 0, []byte("z29"),
 			[]byte("1.0"), []byte("a"),
 			[]byte("2.0"), []byte("b"),
 			[]byte("3.0"), []byte("c"))
@@ -923,7 +923,7 @@ func TestZRemRangeByScore(t *testing.T) {
 	}
 
 	err = db.Update(func(txn *badger.Txn) error {
-		removed, err := zremrangebyscore(txn, nil, []byte("z29"), "1.0", "2.0")
+		removed, err := zremrangebyscore(txn, 0, []byte("z29"), "1.0", "2.0")
 		if err != nil {
 			return err
 		}
@@ -937,7 +937,7 @@ func TestZRemRangeByScore(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		result, err := zrange(txn, nil, []byte("z29"), 0, -1, false)
+		result, err := zrange(txn, 0, []byte("z29"), 0, -1, false)
 		if err != nil {
 			return err
 		}
@@ -959,7 +959,7 @@ func TestZMScore(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z30"),
+		_, err := zadd(txn, 0, []byte("z30"),
 			[]byte("1.0"), []byte("a"),
 			[]byte("2.0"), []byte("b"),
 			[]byte("3.0"), []byte("c"))
@@ -970,7 +970,7 @@ func TestZMScore(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		scores, found, err := zmscore(txn, nil, []byte("z30"), []byte("a"), []byte("nonexistent"), []byte("c"))
+		scores, found, err := zmscore(txn, 0, []byte("z30"), []byte("a"), []byte("nonexistent"), []byte("c"))
 		if err != nil {
 			return err
 		}
@@ -995,7 +995,7 @@ func TestZRandMember(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z31"),
+		_, err := zadd(txn, 0, []byte("z31"),
 			[]byte("1.0"), []byte("a"),
 			[]byte("2.0"), []byte("b"),
 			[]byte("3.0"), []byte("c"))
@@ -1006,7 +1006,7 @@ func TestZRandMember(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		members, scores, err := zrandmember(txn, nil, []byte("z31"), 2)
+		members, scores, err := zrandmember(txn, 0, []byte("z31"), 2)
 		if err != nil {
 			return err
 		}
@@ -1028,7 +1028,7 @@ func TestZRandMemberWithScores(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z32"),
+		_, err := zadd(txn, 0, []byte("z32"),
 			[]byte("1.0"), []byte("a"),
 			[]byte("2.0"), []byte("b"),
 			[]byte("3.0"), []byte("c"))
@@ -1039,7 +1039,7 @@ func TestZRandMemberWithScores(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		members, scores, err := zrandmember(txn, nil, []byte("z32"), -2)
+		members, scores, err := zrandmember(txn, 0, []byte("z32"), -2)
 		if err != nil {
 			return err
 		}
@@ -1061,7 +1061,7 @@ func TestZLexCount(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z33"),
+		_, err := zadd(txn, 0, []byte("z33"),
 			[]byte("0"), []byte("a"),
 			[]byte("0"), []byte("b"),
 			[]byte("0"), []byte("c"),
@@ -1073,7 +1073,7 @@ func TestZLexCount(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		count, err := zlexcount(txn, nil, []byte("z33"), "[a", "[c")
+		count, err := zlexcount(txn, 0, []byte("z33"), "[a", "[c")
 		if err != nil {
 			return err
 		}
@@ -1092,7 +1092,7 @@ func TestZRangeByLex(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z34"),
+		_, err := zadd(txn, 0, []byte("z34"),
 			[]byte("0"), []byte("alpha"),
 			[]byte("0"), []byte("bravo"),
 			[]byte("0"), []byte("charlie"),
@@ -1104,7 +1104,7 @@ func TestZRangeByLex(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		result, err := zrangebylex(txn, nil, []byte("z34"), "[alpha", "(charlie", 0, 0, false)
+		result, err := zrangebylex(txn, 0, []byte("z34"), "[alpha", "(charlie", 0, 0, false)
 		if err != nil {
 			return err
 		}
@@ -1126,7 +1126,7 @@ func TestZRemRangeByLex(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z35"),
+		_, err := zadd(txn, 0, []byte("z35"),
 			[]byte("0"), []byte("a"),
 			[]byte("0"), []byte("b"),
 			[]byte("0"), []byte("c"),
@@ -1138,7 +1138,7 @@ func TestZRemRangeByLex(t *testing.T) {
 	}
 
 	err = db.Update(func(txn *badger.Txn) error {
-		removed, err := zremrangebylex(txn, nil, []byte("z35"), "[b", "[c")
+		removed, err := zremrangebylex(txn, 0, []byte("z35"), "[b", "[c")
 		if err != nil {
 			return err
 		}
@@ -1152,7 +1152,7 @@ func TestZRemRangeByLex(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		result, err := zrange(txn, nil, []byte("z35"), 0, -1, false)
+		result, err := zrange(txn, 0, []byte("z35"), 0, -1, false)
 		if err != nil {
 			return err
 		}
@@ -1174,7 +1174,7 @@ func TestZRevRangeByLex(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z36"),
+		_, err := zadd(txn, 0, []byte("z36"),
 			[]byte("0"), []byte("a"),
 			[]byte("0"), []byte("b"),
 			[]byte("0"), []byte("c"))
@@ -1185,7 +1185,7 @@ func TestZRevRangeByLex(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		result, err := zrevrangebylex(txn, nil, []byte("z36"), "[c", "[a", 0, 0, false)
+		result, err := zrevrangebylex(txn, 0, []byte("z36"), "[c", "[a", 0, 0, false)
 		if err != nil {
 			return err
 		}
@@ -1235,12 +1235,12 @@ func TestZAddWithGtLt(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("z37"), []byte("5.0"), []byte("a"))
+		_, err := zadd(txn, 0, []byte("z37"), []byte("5.0"), []byte("a"))
 		if err != nil {
 			return err
 		}
 		// GT with lower score should not update
-		added, err := zadd(txn, nil, []byte("z37"), []byte("gt"), []byte("3.0"), []byte("a"))
+		added, err := zadd(txn, 0, []byte("z37"), []byte("gt"), []byte("3.0"), []byte("a"))
 		if err != nil {
 			return err
 		}
@@ -1248,7 +1248,7 @@ func TestZAddWithGtLt(t *testing.T) {
 			t.Fatalf("expected 0 (GT with lower), got %d", added)
 		}
 		// LT with higher score should not update
-		added, err = zadd(txn, nil, []byte("z37"), []byte("lt"), []byte("7.0"), []byte("a"))
+		added, err = zadd(txn, 0, []byte("z37"), []byte("lt"), []byte("7.0"), []byte("a"))
 		if err != nil {
 			return err
 		}
@@ -1256,7 +1256,7 @@ func TestZAddWithGtLt(t *testing.T) {
 			t.Fatalf("expected 0 (LT with higher), got %d", added)
 		}
 		// GT with higher score should update
-		added, err = zadd(txn, nil, []byte("z37"), []byte("ch"), []byte("gt"), []byte("7.0"), []byte("a"))
+		added, err = zadd(txn, 0, []byte("z37"), []byte("ch"), []byte("gt"), []byte("7.0"), []byte("a"))
 		if err != nil {
 			return err
 		}
@@ -1275,11 +1275,11 @@ func TestZDiff(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("za"), []byte("1.0"), []byte("a"), []byte("2.0"), []byte("b"), []byte("3.0"), []byte("c"))
+		_, err := zadd(txn, 0, []byte("za"), []byte("1.0"), []byte("a"), []byte("2.0"), []byte("b"), []byte("3.0"), []byte("c"))
 		if err != nil {
 			return err
 		}
-		_, err = zadd(txn, nil, []byte("zb"), []byte("2.0"), []byte("b"), []byte("4.0"), []byte("d"))
+		_, err = zadd(txn, 0, []byte("zb"), []byte("2.0"), []byte("b"), []byte("4.0"), []byte("d"))
 		return err
 	})
 	if err != nil {
@@ -1287,7 +1287,7 @@ func TestZDiff(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		m, err := zdiff(txn, nil, []byte("za"), []byte("zb"))
+		m, err := zdiff(txn, 0, []byte("za"), []byte("zb"))
 		if err != nil {
 			return err
 		}
@@ -1312,11 +1312,11 @@ func TestZInter(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("zk1"), []byte("1.0"), []byte("a"), []byte("2.0"), []byte("b"))
+		_, err := zadd(txn, 0, []byte("zk1"), []byte("1.0"), []byte("a"), []byte("2.0"), []byte("b"))
 		if err != nil {
 			return err
 		}
-		_, err = zadd(txn, nil, []byte("zk2"), []byte("2.0"), []byte("b"), []byte("3.0"), []byte("c"))
+		_, err = zadd(txn, 0, []byte("zk2"), []byte("2.0"), []byte("b"), []byte("3.0"), []byte("c"))
 		return err
 	})
 	if err != nil {
@@ -1324,7 +1324,7 @@ func TestZInter(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		m, err := zinter(txn, nil, "SUM", []byte("zk1"), []byte("zk2"))
+		m, err := zinter(txn, 0, "SUM", []byte("zk1"), []byte("zk2"))
 		if err != nil {
 			return err
 		}
@@ -1346,11 +1346,11 @@ func TestZUnion(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("zu1"), []byte("1.0"), []byte("a"), []byte("2.0"), []byte("b"))
+		_, err := zadd(txn, 0, []byte("zu1"), []byte("1.0"), []byte("a"), []byte("2.0"), []byte("b"))
 		if err != nil {
 			return err
 		}
-		_, err = zadd(txn, nil, []byte("zu2"), []byte("3.0"), []byte("c"))
+		_, err = zadd(txn, 0, []byte("zu2"), []byte("3.0"), []byte("c"))
 		return err
 	})
 	if err != nil {
@@ -1358,7 +1358,7 @@ func TestZUnion(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		m, err := zunion(txn, nil, "SUM", []byte("zu1"), []byte("zu2"))
+		m, err := zunion(txn, 0, "SUM", []byte("zu1"), []byte("zu2"))
 		if err != nil {
 			return err
 		}
@@ -1377,7 +1377,7 @@ func TestZStoreResult(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("zsrc"), []byte("1.0"), []byte("a"), []byte("2.0"), []byte("b"))
+		_, err := zadd(txn, 0, []byte("zsrc"), []byte("1.0"), []byte("a"), []byte("2.0"), []byte("b"))
 		return err
 	})
 	if err != nil {
@@ -1402,7 +1402,7 @@ func TestZStoreResult(t *testing.T) {
 			{member: []byte("x"), score: 10.0},
 			{member: []byte("y"), score: 20.0},
 		}
-		count, err := storeZSetResult(txn, nil, []byte("zdest"), members)
+		count, err := storeZSetResult(txn, 0, []byte("zdest"), members)
 		if err != nil {
 			return err
 		}
@@ -1416,7 +1416,7 @@ func TestZStoreResult(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		count, err := zcard(txn, nil, []byte("zdest"))
+		count, err := zcard(txn, 0, []byte("zdest"))
 		if err != nil {
 			return err
 		}
@@ -1435,7 +1435,7 @@ func TestZRangeNonExistingKey(t *testing.T) {
 	defer db.Close()
 
 	err := db.View(func(txn *badger.Txn) error {
-		result, err := zrange(txn, nil, []byte("nonexistent"), 0, -1, false)
+		result, err := zrange(txn, 0, []byte("nonexistent"), 0, -1, false)
 		if err != nil {
 			return err
 		}
@@ -1456,7 +1456,7 @@ func TestZAddWithIncr(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		newScore, err := zincrby(txn, nil, []byte("zincr"), 5.0, []byte("cnt"))
+		newScore, err := zincrby(txn, 0, []byte("zincr"), 5.0, []byte("cnt"))
 		if err != nil {
 			return err
 		}
@@ -1475,7 +1475,7 @@ func TestLexicalOrderingWithSameScore(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("zlex"),
+		_, err := zadd(txn, 0, []byte("zlex"),
 			[]byte("0"), []byte("delta"),
 			[]byte("0"), []byte("alpha"),
 			[]byte("0"), []byte("charlie"),
@@ -1487,7 +1487,7 @@ func TestLexicalOrderingWithSameScore(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		result, err := zrange(txn, nil, []byte("zlex"), 0, -1, false)
+		result, err := zrange(txn, 0, []byte("zlex"), 0, -1, false)
 		if err != nil {
 			return err
 		}
@@ -1513,7 +1513,7 @@ func TestZAddScoresNotForcingLexOrder(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("zsc"),
+		_, err := zadd(txn, 0, []byte("zsc"),
 			[]byte("0"), []byte("a"),
 			[]byte("2"), []byte("b"),
 			[]byte("1"), []byte("c"))
@@ -1524,7 +1524,7 @@ func TestZAddScoresNotForcingLexOrder(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		result, err := zrange(txn, nil, []byte("zsc"), 0, -1, false)
+		result, err := zrange(txn, 0, []byte("zsc"), 0, -1, false)
 		if err != nil {
 			return err
 		}
@@ -1547,7 +1547,7 @@ func TestZDestroysKeyOnLastRem(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("zlast"), []byte("1.0"), []byte("onlyme"))
+		_, err := zadd(txn, 0, []byte("zlast"), []byte("1.0"), []byte("onlyme"))
 		return err
 	})
 	if err != nil {
@@ -1555,7 +1555,7 @@ func TestZDestroysKeyOnLastRem(t *testing.T) {
 	}
 
 	err = db.Update(func(txn *badger.Txn) error {
-		removed, err := zrem(txn, nil, []byte("zlast"), []byte("onlyme"))
+		removed, err := zrem(txn, 0, []byte("zlast"), []byte("onlyme"))
 		if err != nil {
 			return err
 		}
@@ -1585,7 +1585,7 @@ func TestZScoreFormat(t *testing.T) {
 	defer db.Close()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		_, err := zadd(txn, nil, []byte("zfmt"), []byte("3.14"), []byte("pi"))
+		_, err := zadd(txn, 0, []byte("zfmt"), []byte("3.14"), []byte("pi"))
 		return err
 	})
 	if err != nil {
@@ -1593,7 +1593,7 @@ func TestZScoreFormat(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		score, found, err := zscore(txn, nil, []byte("zfmt"), []byte("pi"))
+		score, found, err := zscore(txn, 0, []byte("zfmt"), []byte("pi"))
 		if err != nil {
 			return err
 		}

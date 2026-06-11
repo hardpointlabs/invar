@@ -112,7 +112,7 @@ func TestLPushRPush(t *testing.T) {
 
 	// Test LPUSH - push to head
 	err = db.Update(func(txn *badger.Txn) error {
-		size, err := lpush(txn, nil, []byte("mylist"), []byte("b"), []byte("a"))
+		size, err := lpush(txn, 0, []byte("mylist"), []byte("b"), []byte("a"))
 		if err != nil {
 			return err
 		}
@@ -145,7 +145,7 @@ func TestLPushRPush(t *testing.T) {
 
 	// Test RPUSH - push to tail
 	err = db.Update(func(txn *badger.Txn) error {
-		size, err := rpush(txn, nil, []byte("mylist"), []byte("c"), []byte("d"))
+		size, err := rpush(txn, 0, []byte("mylist"), []byte("c"), []byte("d"))
 		if err != nil {
 			return err
 		}
@@ -184,7 +184,7 @@ func TestLPopRPop(t *testing.T) {
 
 	// Create list: a -> b -> c
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := lpush(txn, nil, []byte("mylist"), []byte("c"), []byte("b"), []byte("a"))
+		_, err := lpush(txn, 0, []byte("mylist"), []byte("c"), []byte("b"), []byte("a"))
 		return err
 	})
 	if err != nil {
@@ -194,7 +194,7 @@ func TestLPopRPop(t *testing.T) {
 	// Test LPOP
 	var popped []byte
 	err = db.Update(func(txn *badger.Txn) error {
-		popped, err = lpop(txn, nil, []byte("mylist"))
+		popped, err = lpop(txn, 0, []byte("mylist"))
 		return err
 	})
 	if err != nil {
@@ -206,7 +206,7 @@ func TestLPopRPop(t *testing.T) {
 
 	// Test RPOP
 	err = db.Update(func(txn *badger.Txn) error {
-		popped, err = rpop(txn, nil, []byte("mylist"))
+		popped, err = rpop(txn, 0, []byte("mylist"))
 		return err
 	})
 	if err != nil {
@@ -227,7 +227,7 @@ func TestLLen(t *testing.T) {
 
 	// Non-existing list
 	err = db.View(func(txn *badger.Txn) error {
-		size, err := llen(txn, nil, []byte("nonexistent"))
+		size, err := llen(txn, 0, []byte("nonexistent"))
 		if err != nil && err != badger.ErrKeyNotFound {
 			return err
 		}
@@ -242,7 +242,7 @@ func TestLLen(t *testing.T) {
 
 	// Create list
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := lpush(txn, nil, []byte("mylist"), []byte("a"), []byte("b"))
+		_, err := lpush(txn, 0, []byte("mylist"), []byte("a"), []byte("b"))
 		return err
 	})
 	if err != nil {
@@ -250,7 +250,7 @@ func TestLLen(t *testing.T) {
 	}
 
 	err = db.View(func(txn *badger.Txn) error {
-		size, err := llen(txn, nil, []byte("mylist"))
+		size, err := llen(txn, 0, []byte("mylist"))
 		if err != nil {
 			return err
 		}
@@ -274,7 +274,7 @@ func TestLRange(t *testing.T) {
 
 	// Create list: a -> b -> c -> d -> e
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := rpush(txn, nil, []byte("mylist"), []byte("a"), []byte("b"), []byte("c"), []byte("d"), []byte("e"))
+		_, err := rpush(txn, 0, []byte("mylist"), []byte("a"), []byte("b"), []byte("c"), []byte("d"), []byte("e"))
 		return err
 	})
 	if err != nil {
@@ -283,7 +283,7 @@ func TestLRange(t *testing.T) {
 
 	// Test full range
 	err = db.View(func(txn *badger.Txn) error {
-		items, err := lrange(txn, nil, []byte("mylist"), 0, -1)
+		items, err := lrange(txn, 0, []byte("mylist"), 0, -1)
 		if err != nil {
 			return err
 		}
@@ -298,7 +298,7 @@ func TestLRange(t *testing.T) {
 
 	// Test partial range
 	err = db.View(func(txn *badger.Txn) error {
-		items, err := lrange(txn, nil, []byte("mylist"), 1, 3)
+		items, err := lrange(txn, 0, []byte("mylist"), 1, 3)
 		if err != nil {
 			return err
 		}
@@ -325,7 +325,7 @@ func TestLIndex(t *testing.T) {
 
 	// Create list: a -> b -> c
 	err = db.Update(func(txn *badger.Txn) error {
-		_, err := rpush(txn, nil, []byte("mylist"), []byte("a"), []byte("b"), []byte("c"))
+		_, err := rpush(txn, 0, []byte("mylist"), []byte("a"), []byte("b"), []byte("c"))
 		return err
 	})
 	if err != nil {
@@ -334,7 +334,7 @@ func TestLIndex(t *testing.T) {
 
 	// Test valid index
 	err = db.View(func(txn *badger.Txn) error {
-		val, err := lindex(txn, nil, []byte("mylist"), 1)
+		val, err := lindex(txn, 0, []byte("mylist"), 1)
 		if err != nil {
 			return err
 		}
@@ -349,7 +349,7 @@ func TestLIndex(t *testing.T) {
 
 	// Test negative index
 	err = db.View(func(txn *badger.Txn) error {
-		val, err := lindex(txn, nil, []byte("mylist"), -1)
+		val, err := lindex(txn, 0, []byte("mylist"), -1)
 		if err != nil {
 			return err
 		}
@@ -364,7 +364,7 @@ func TestLIndex(t *testing.T) {
 
 	// Test out of range
 	err = db.View(func(txn *badger.Txn) error {
-		val, err := lindex(txn, nil, []byte("mylist"), 10)
+		val, err := lindex(txn, 0, []byte("mylist"), 10)
 		if err != nil {
 			return err
 		}
