@@ -26,6 +26,9 @@ trap cleanup EXIT
 echo "Building invar daemon..."
 go build -o "$KV_BINARY" .
 
+echo "Running unit & linearizability tests..."
+go test ./...
+
 echo "Starting invar daemon on port $PORT..."
 ./invar > "$LOG_FILE" 2>&1 &
 echo $! > "$PID_FILE"
