@@ -245,7 +245,13 @@ func Serve(ctx context.Context, db *badger.DB) error {
 					return
 				}
 			case "bgsave":
-				// no-op for us
+				go db.Sync()
+				conn.WriteString("OK")
+			case "save":
+				if err := db.Sync(); err != nil {
+					conn.WriteError("ERR " + err.Error())
+					return
+				}
 				conn.WriteString("OK")
 			case "flushall":
 				err := db.DropAll()

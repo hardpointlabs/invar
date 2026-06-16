@@ -303,7 +303,7 @@ in this implementation.
 | REPLICAOF | 🚫 | |
 | RESTORE-ASKING | 🚫 | |
 | ROLE | 🚫 | |
-| SAVE | 🚫 | |
+| SAVE | ✅ | |
 | SHUTDOWN | 🚫 | |
 | SLAVEOF | 🚫 | |
 | SLOWLOG GET | 🚫 | |
