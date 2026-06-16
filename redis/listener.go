@@ -1,9 +1,11 @@
 package redis
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"math/rand/v2"
+	"net"
 	"strconv"
 	"strings"
 	"sync"
@@ -180,10 +182,20 @@ func moveKey(conn redcon.Conn, db *badger.DB, key []byte, targetDb int) {	_ = db
 	})
 }
 
-func Serve(db *badger.DB) {
+func Serve(ctx context.Context, db *badger.DB) error {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+
+	go func() {
+		<-ctx.Done()
+		ln.Close()
+	}()
+
 	var ps redcon.PubSub
 	go log.Info().Msgf("started redis listener at %s", addr)
-	err := redcon.ListenAndServe(addr,
+	err = redcon.Serve(ln,
 		func(conn redcon.Conn, cmd redcon.Command) {
 			setContext(conn)
 
@@ -2343,6 +2355,12 @@ func Serve(db *badger.DB) {
 		},
 	)
 	if err != nil {
-		log.Fatal().Err(err).Msg("")
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			return err
+		}
 	}
+	return nil
 }
