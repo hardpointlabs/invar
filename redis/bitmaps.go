@@ -384,8 +384,6 @@ func handleBitPos(conn redcon.Conn, db *badger.DB, cmd redcon.Command) {
 		pos := bitPosInRange(data, startBit, endBit, bit, false)
 		if pos >= 0 {
 			conn.WriteInt(pos)
-		} else if bit == 0 {
-			conn.WriteInt(-1)
 		} else {
 			conn.WriteInt(-1)
 		}
