@@ -253,6 +253,8 @@ func Serve(ctx context.Context, db *badger.DB) error {
 					return
 				}
 				conn.WriteString("OK")
+			case "sync", "psync":
+				conn.WriteString("OK")
 			case "flushall":
 				err := db.DropAll()
 				if err != nil {

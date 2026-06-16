@@ -298,7 +298,7 @@ in this implementation.
 | MODULE LOADEX | 🚫 | |
 | MODULE UNLOAD | 🚫 | |
 | MONITOR | 🚫 | |
-| PSYNC | 🚫 | |
+| PSYNC | ✅ | No-op |
 | REPLCONF | 🚫 | |
 | REPLICAOF | 🚫 | |
 | RESTORE-ASKING | 🚫 | |
@@ -310,7 +310,7 @@ in this implementation.
 | SLOWLOG LEN | 🚫 | |
 | SLOWLOG RESET | 🚫 | |
 | SWAPDB | 🚫 | |
-| SYNC | 🚫 | |
+| SYNC | ✅ | No-op |
 | TIME | 🚫 | |
 
 ---
