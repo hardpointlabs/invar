@@ -1,3 +1,10 @@
+## [1.0.5](https://github.com/hardpointlabs/invar/compare/v1.0.4...v1.0.5) (2026-06-16)
+
+
+### Bug Fixes
+
+* implement LOLWUT, TIME, fix shutdown blocking on metrics reporting ([841a3da](https://github.com/hardpointlabs/invar/commit/841a3da1c3364c98e23abd585814df6776e88558))
+
 ## [1.0.4](https://github.com/hardpointlabs/invar/compare/v1.0.3...v1.0.4) (2026-06-16)
 
 
