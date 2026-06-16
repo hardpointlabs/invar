@@ -164,13 +164,13 @@ in this implementation.
 
 | Command | Status | Notes |
 |---------|--------|-------|
-| BITCOUNT | 🚫 | |
+| BITCOUNT | ✅ | Supports BYTE and BIT range modes |
 | BITFIELD | 🚫 | |
 | BITFIELD_RO | 🚫 | |
-| BITOP | 🚫 | |
-| BITPOS | 🚫 | |
-| GETBIT | 🚫 | |
-| SETBIT | 🚫 | |
+| BITOP | ✅ | Supports AND, OR, XOR, NOT, DIFF, DIFF1, ANDOR, ONE |
+| BITPOS | ✅ | Supports BYTE and BIT range modes |
+| GETBIT | ✅ | |
+| SETBIT | ✅ | |
 
 ---
 

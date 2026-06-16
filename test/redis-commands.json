@@ -2025,5 +2025,208 @@
     "version": "2.0.0",
     "description": "After HDEL removes one field, remaining fields are still accessible",
     "setup": [["DEL", "h_del_multi"], ["HSET", "h_del_multi", "a", "1", "b", "2", "c", "3"], ["HDEL", "h_del_multi", "a"]]
+  },
+  {
+    "name": "SETBIT sets a bit to 1",
+    "command": ["SETBIT", "bm_set1", "0", "1"],
+    "expected": 0,
+    "type": "integer",
+    "version": "2.2.0",
+    "description": "SETBIT returns 0 when setting a bit that was 0",
+    "setup": [["DEL", "bm_set1"]]
+  },
+  {
+    "name": "GETBIT returns 1 for set bit",
+    "command": ["GETBIT", "bm_set1", "0"],
+    "expected": 1,
+    "type": "integer",
+    "version": "2.2.0",
+    "description": "GETBIT returns 1 for a bit that was set",
+    "setup": [["DEL", "bm_set1"], ["SETBIT", "bm_set1", "0", "1"]]
+  },
+  {
+    "name": "GETBIT returns 0 for unset bit",
+    "command": ["GETBIT", "bm_set1", "1"],
+    "expected": 0,
+    "type": "integer",
+    "version": "2.2.0",
+    "description": "GETBIT returns 0 for a bit that was not set",
+    "setup": [["DEL", "bm_set1"], ["SETBIT", "bm_set1", "0", "1"]]
+  },
+  {
+    "name": "SETBIT returns old bit value",
+    "command": ["SETBIT", "bm_set2", "0", "0"],
+    "expected": 1,
+    "type": "integer",
+    "version": "2.2.0",
+    "description": "SETBIT returns 1 when overwriting a bit that was 1",
+    "setup": [["DEL", "bm_set2"], ["SETBIT", "bm_set2", "0", "1"]]
+  },
+  {
+    "name": "GETBIT on non-existing key",
+    "command": ["GETBIT", "bm_nonexist", "0"],
+    "expected": 0,
+    "type": "integer",
+    "version": "2.2.0",
+    "description": "GETBIT returns 0 for a non-existing key"
+  },
+  {
+    "name": "BITCOUNT of empty key",
+    "command": ["BITCOUNT", "bm_count_empty"],
+    "expected": 0,
+    "type": "integer",
+    "version": "2.6.0",
+    "description": "BITCOUNT returns 0 for a non-existing key"
+  },
+  {
+    "name": "BITCOUNT with single byte",
+    "command": ["BITCOUNT", "bm_count1"],
+    "expected": 4,
+    "type": "integer",
+    "version": "2.6.0",
+    "description": "BITCOUNT of a byte with 4 set bits",
+    "setup": [["DEL", "bm_count1"], ["SETBIT", "bm_count1", "0", "1"], ["SETBIT", "bm_count1", "2", "1"], ["SETBIT", "bm_count1", "5", "1"], ["SETBIT", "bm_count1", "7", "1"]]
+  },
+  {
+    "name": "BITCOUNT with range",
+    "command": ["BITCOUNT", "bm_count2", "0", "0"],
+    "expected": 3,
+    "type": "integer",
+    "version": "2.6.0",
+    "description": "BITCOUNT with byte range 0-0 counts bits in first byte only",
+    "setup": [["DEL", "bm_count2"], ["SETBIT", "bm_count2", "0", "1"], ["SETBIT", "bm_count2", "1", "1"], ["SETBIT", "bm_count2", "2", "1"], ["SETBIT", "bm_count2", "8", "1"]]
+  },
+  {
+    "name": "BITPOS find first 1",
+    "command": ["BITPOS", "bm_pos1", "1"],
+    "expected": 3,
+    "type": "integer",
+    "version": "2.8.7",
+    "description": "BITPOS finds the first bit set to 1",
+    "setup": [["DEL", "bm_pos1"], ["SETBIT", "bm_pos1", "3", "1"]]
+  },
+  {
+    "name": "BITPOS find first 0 on all-ones byte",
+    "command": ["BITPOS", "bm_pos2", "0"],
+    "expected": 8,
+    "type": "integer",
+    "version": "2.8.7",
+    "description": "BITPOS returns 8 (next bit pos) when byte is all 1s",
+    "setup": [["DEL", "bm_pos2"], ["SETBIT", "bm_pos2", "0", "1"], ["SETBIT", "bm_pos2", "1", "1"], ["SETBIT", "bm_pos2", "2", "1"], ["SETBIT", "bm_pos2", "3", "1"], ["SETBIT", "bm_pos2", "4", "1"], ["SETBIT", "bm_pos2", "5", "1"], ["SETBIT", "bm_pos2", "6", "1"], ["SETBIT", "bm_pos2", "7", "1"]]
+  },
+  {
+    "name": "BITPOS non-existing key find 0",
+    "command": ["BITPOS", "bm_nonexist_pos", "0"],
+    "expected": 0,
+    "type": "integer",
+    "version": "2.8.7",
+    "description": "BITPOS returns 0 for non-existing key when looking for 0"
+  },
+  {
+    "name": "BITPOS non-existing key find 1",
+    "command": ["BITPOS", "bm_nonexist_pos2", "1"],
+    "expected": -1,
+    "type": "integer",
+    "version": "2.8.7",
+    "description": "BITPOS returns -1 for non-existing key when looking for 1"
+  },
+  {
+    "name": "BITOP AND",
+    "command": ["BITOP", "AND", "bm_and_dest", "bm_and_a", "bm_and_b"],
+    "expected": 1,
+    "type": "integer",
+    "version": "2.6.0",
+    "description": "BITOP AND returns size of longest string",
+    "setup": [["DEL", "bm_and_a"], ["DEL", "bm_and_b"], ["DEL", "bm_and_dest"], ["SETBIT", "bm_and_a", "0", "1"], ["SETBIT", "bm_and_b", "0", "1"]]
+  },
+  {
+    "name": "GETBIT after BITOP AND",
+    "command": ["GETBIT", "bm_and_dest", "0"],
+    "expected": 1,
+    "type": "integer",
+    "version": "2.6.0",
+    "description": "BITOP AND result stored correctly",
+    "setup": [["DEL", "bm_and_a"], ["DEL", "bm_and_b"], ["DEL", "bm_and_dest"], ["SETBIT", "bm_and_a", "0", "1"], ["SETBIT", "bm_and_b", "0", "1"], ["BITOP", "AND", "bm_and_dest", "bm_and_a", "bm_and_b"]]
+  },
+  {
+    "name": "BITOP OR",
+    "command": ["BITOP", "OR", "bm_or_dest", "bm_or_a", "bm_or_b"],
+    "expected": 1,
+    "type": "integer",
+    "version": "2.6.0",
+    "description": "BITOP OR returns size of longest string",
+    "setup": [["DEL", "bm_or_a"], ["DEL", "bm_or_b"], ["DEL", "bm_or_dest"], ["SETBIT", "bm_or_a", "0", "1"], ["SETBIT", "bm_or_b", "1", "1"]]
+  },
+  {
+    "name": "GETBIT after BITOP OR",
+    "command": ["GETBIT", "bm_or_dest", "0"],
+    "expected": 1,
+    "type": "integer",
+    "version": "2.6.0",
+    "description": "BITOP OR has bit 0 set from source a",
+    "setup": [["DEL", "bm_or_a"], ["DEL", "bm_or_b"], ["DEL", "bm_or_dest"], ["SETBIT", "bm_or_a", "0", "1"], ["SETBIT", "bm_or_b", "1", "1"], ["BITOP", "OR", "bm_or_dest", "bm_or_a", "bm_or_b"]]
+  },
+  {
+    "name": "GETBIT after BITOP OR bit 1",
+    "command": ["GETBIT", "bm_or_dest", "1"],
+    "expected": 1,
+    "type": "integer",
+    "version": "2.6.0",
+    "description": "BITOP OR has bit 1 set from source b",
+    "setup": [["DEL", "bm_or_a"], ["DEL", "bm_or_b"], ["DEL", "bm_or_dest"], ["SETBIT", "bm_or_a", "0", "1"], ["SETBIT", "bm_or_b", "1", "1"], ["BITOP", "OR", "bm_or_dest", "bm_or_a", "bm_or_b"]]
+  },
+  {
+    "name": "BITOP XOR",
+    "command": ["BITOP", "XOR", "bm_xor_dest", "bm_xor_a", "bm_xor_b"],
+    "expected": 1,
+    "type": "integer",
+    "version": "2.6.0",
+    "description": "BITOP XOR returns size of longest string",
+    "setup": [["DEL", "bm_xor_a"], ["DEL", "bm_xor_b"], ["DEL", "bm_xor_dest"], ["SETBIT", "bm_xor_a", "0", "1"], ["SETBIT", "bm_xor_b", "0", "1"], ["SETBIT", "bm_xor_b", "1", "1"]]
+  },
+  {
+    "name": "GETBIT after BITOP XOR both set",
+    "command": ["GETBIT", "bm_xor_dest", "0"],
+    "expected": 0,
+    "type": "integer",
+    "version": "2.6.0",
+    "description": "BITOP XOR: bit 0 was set in both, so result is 0",
+    "setup": [["DEL", "bm_xor_a"], ["DEL", "bm_xor_b"], ["DEL", "bm_xor_dest"], ["SETBIT", "bm_xor_a", "0", "1"], ["SETBIT", "bm_xor_b", "0", "1"], ["SETBIT", "bm_xor_b", "1", "1"], ["BITOP", "XOR", "bm_xor_dest", "bm_xor_a", "bm_xor_b"]]
+  },
+  {
+    "name": "GETBIT after BITOP XOR one set",
+    "command": ["GETBIT", "bm_xor_dest", "1"],
+    "expected": 1,
+    "type": "integer",
+    "version": "2.6.0",
+    "description": "BITOP XOR: bit 1 was set in only one source, so result is 1",
+    "setup": [["DEL", "bm_xor_a"], ["DEL", "bm_xor_b"], ["DEL", "bm_xor_dest"], ["SETBIT", "bm_xor_a", "0", "1"], ["SETBIT", "bm_xor_b", "0", "1"], ["SETBIT", "bm_xor_b", "1", "1"], ["BITOP", "XOR", "bm_xor_dest", "bm_xor_a", "bm_xor_b"]]
+  },
+  {
+    "name": "BITOP NOT",
+    "command": ["BITOP", "NOT", "bm_not_dest", "bm_not_src"],
+    "expected": 1,
+    "type": "integer",
+    "version": "2.6.0",
+    "description": "BITOP NOT returns size of source string",
+    "setup": [["DEL", "bm_not_src"], ["DEL", "bm_not_dest"], ["SETBIT", "bm_not_src", "0", "1"]]
+  },
+  {
+    "name": "GETBIT after BITOP NOT",
+    "command": ["GETBIT", "bm_not_dest", "0"],
+    "expected": 0,
+    "type": "integer",
+    "version": "2.6.0",
+    "description": "BITOP NOT flips bit 0 from 1 to 0",
+    "setup": [["DEL", "bm_not_src"], ["DEL", "bm_not_dest"], ["SETBIT", "bm_not_src", "0", "1"], ["BITOP", "NOT", "bm_not_dest", "bm_not_src"]]
+  },
+  {
+    "name": "TYPE of bitmap key is string",
+    "command": ["TYPE", "bm_type_test"],
+    "expected": "string",
+    "type": "simple_string",
+    "version": "2.2.0",
+    "description": "TYPE returns 'string' for bitmap keys",
+    "setup": [["DEL", "bm_type_test"], ["SETBIT", "bm_type_test", "0", "1"]]
   }
 ]

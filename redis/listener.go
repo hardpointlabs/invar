@@ -247,6 +247,12 @@ func Serve(ctx context.Context, db *badger.DB) error {
 					conn.WriteBulkString(infoString)
 					return
 				}
+			case "bitcount":
+				handleBitCount(conn, db, cmd)
+			case "bitop":
+				handleBitOp(conn, db, cmd)
+			case "bitpos":
+				handleBitPos(conn, db, cmd)
 			case "bgsave":
 				go db.Sync()
 				conn.WriteString("OK")
@@ -309,6 +315,8 @@ func Serve(ctx context.Context, db *badger.DB) error {
 					return
 				}
 				setKey(conn, db, cmd.Args[1], cmd.Args[2])
+			case "setbit":
+				handleSetBit(conn, db, cmd)
 			case "setex":
 				if !checkExactArgs(conn, cmd, 4) {
 					return
@@ -336,6 +344,8 @@ func Serve(ctx context.Context, db *badger.DB) error {
 					return
 				}
 				substrKey(conn, db, cmd.Args[1], start, end)
+			case "getbit":
+				handleGetBit(conn, db, cmd)
 			case "get":
 				if !checkExactArgs(conn, cmd, 2) {
 					return
