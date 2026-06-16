@@ -23,8 +23,13 @@ cleanup() {
 
 trap cleanup EXIT
 
-echo "Building invar daemon..."
-go build -o "$KV_BINARY" .
+COMMIT=${1:-$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")}
+VERSION=${2:-dev}
+
+SHORT_COMMIT=${COMMIT:0:7}
+
+echo "Building version $VERSION (commit $SHORT_COMMIT)..."
+go build -ldflags="-X github.com/hardpointlabs/invar/config.Version=$VERSION -X github.com/hardpointlabs/invar/config.Commit=$SHORT_COMMIT" -o "$KV_BINARY" .
 
 echo "Running unit & linearizability tests..."
 go test ./...

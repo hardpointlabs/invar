@@ -9,8 +9,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/hardpointlabs/invar/config"
 	"github.com/rs/zerolog/log"
 	"github.com/tidwall/redcon"
 )
@@ -150,7 +152,8 @@ func getKeys(conn redcon.Conn, db *badger.DB, keys ...[]byte) {
 	})
 }
 
-func moveKey(conn redcon.Conn, db *badger.DB, key []byte, targetDb int) {	_ = db.Update(func(txn *badger.Txn) error {
+func moveKey(conn redcon.Conn, db *badger.DB, key []byte, targetDb int) {
+	_ = db.Update(func(txn *badger.Txn) error {
 		item, err := txn.Get(rawKeyPrefix(key, currentDb(conn)))
 		if err != nil {
 			conn.WriteInt(0)
@@ -213,18 +216,18 @@ func Serve(ctx context.Context, db *badger.DB) error {
 				}
 				setCurrentDb(conn, dbIndex)
 				conn.WriteString("OK")
-		case "echo":
+			case "echo":
 				if len(cmd.Args) != 2 {
 					conn.WriteError("ERR wrong number of arguments for 'echo' command")
 				} else {
 					conn.WriteBulkString(string(cmd.Args[1]))
 				}
-		case "ping":
-			if len(cmd.Args) > 1 {
-				conn.WriteBulkString(string(cmd.Args[1]))
-			} else {
-				conn.WriteString("PONG")
-			}
+			case "ping":
+				if len(cmd.Args) > 1 {
+					conn.WriteBulkString(string(cmd.Args[1]))
+				} else {
+					conn.WriteString("PONG")
+				}
 			case "quit":
 				conn.WriteString("OK")
 				conn.Close()
@@ -254,7 +257,18 @@ func Serve(ctx context.Context, db *badger.DB) error {
 				}
 				conn.WriteString("OK")
 			case "sync", "psync":
+				// since Invar only runs in a single process, 'replication' is meaningless, however
+				// we're implementing to avoid breaking callers who expect these commands
 				conn.WriteString("OK")
+			case "lolwut":
+				conn.WriteBulkString(fmt.Sprintf("Invar version: %s, commit: %s\n", config.Version, config.Commit))
+			case "time":
+				now := time.Now()
+				sec := now.Unix()
+				micro := now.Nanosecond() / 1000
+				conn.WriteArray(2)
+				conn.WriteBulkString(strconv.FormatInt(sec, 10))
+				conn.WriteBulkString(strconv.FormatInt(int64(micro), 10))
 			case "flushall":
 				err := db.DropAll()
 				if err != nil {
@@ -594,12 +608,12 @@ func Serve(ctx context.Context, db *badger.DB) error {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-				items, err := lrange(txn, currentDb(conn), cmd.Args[1], start, stop)
-				if err != nil {
-					conn.WriteError("ERR " + err.Error())
-					return err
-				}
-				writeBulkArray(conn, items)
+					items, err := lrange(txn, currentDb(conn), cmd.Args[1], start, stop)
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return err
+					}
+					writeBulkArray(conn, items)
 					return nil
 				})
 			case "lindex":
@@ -859,12 +873,12 @@ func Serve(ctx context.Context, db *badger.DB) error {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-				keys, err := hkeys(txn, currentDb(conn), cmd.Args[1])
-				if err != nil {
-					conn.WriteError("ERR " + err.Error())
-					return nil
-				}
-				writeBulkArray(conn, keys)
+					keys, err := hkeys(txn, currentDb(conn), cmd.Args[1])
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return nil
+					}
+					writeBulkArray(conn, keys)
 					return nil
 				})
 			case "hvals":
@@ -872,12 +886,12 @@ func Serve(ctx context.Context, db *badger.DB) error {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-				vals, err := hvals(txn, currentDb(conn), cmd.Args[1])
-				if err != nil {
-					conn.WriteError("ERR " + err.Error())
-					return nil
-				}
-				writeBulkArray(conn, vals)
+					vals, err := hvals(txn, currentDb(conn), cmd.Args[1])
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return nil
+					}
+					writeBulkArray(conn, vals)
 					return nil
 				})
 			case "hgetall":
@@ -885,12 +899,12 @@ func Serve(ctx context.Context, db *badger.DB) error {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-				pairs, err := hgetall(txn, currentDb(conn), cmd.Args[1])
-				if err != nil {
-					conn.WriteError("ERR " + err.Error())
-					return nil
-				}
-				writeBulkArray(conn, pairs)
+					pairs, err := hgetall(txn, currentDb(conn), cmd.Args[1])
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return nil
+					}
+					writeBulkArray(conn, pairs)
 					return nil
 				})
 			case "hincrby":
@@ -1073,12 +1087,12 @@ func Serve(ctx context.Context, db *badger.DB) error {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-				members, err := smembers(txn, currentDb(conn), cmd.Args[1])
-				if err != nil {
-					conn.WriteError("ERR " + err.Error())
-					return nil
-				}
-				writeBulkArray(conn, members)
+					members, err := smembers(txn, currentDb(conn), cmd.Args[1])
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return nil
+					}
+					writeBulkArray(conn, members)
 					return nil
 				})
 			case "sismember":
@@ -1159,12 +1173,12 @@ func Serve(ctx context.Context, db *badger.DB) error {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-				result, err := sdiff(txn, currentDb(conn), cmd.Args[1:]...)
-				if err != nil {
-					conn.WriteError("ERR " + err.Error())
-					return nil
-				}
-				writeBulkArray(conn, result)
+					result, err := sdiff(txn, currentDb(conn), cmd.Args[1:]...)
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return nil
+					}
+					writeBulkArray(conn, result)
 					return nil
 				})
 			case "sinter":
@@ -1172,12 +1186,12 @@ func Serve(ctx context.Context, db *badger.DB) error {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-				result, err := sinter(txn, currentDb(conn), cmd.Args[1:]...)
-				if err != nil {
-					conn.WriteError("ERR " + err.Error())
-					return nil
-				}
-				writeBulkArray(conn, result)
+					result, err := sinter(txn, currentDb(conn), cmd.Args[1:]...)
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return nil
+					}
+					writeBulkArray(conn, result)
 					return nil
 				})
 			case "sunion":
@@ -1185,12 +1199,12 @@ func Serve(ctx context.Context, db *badger.DB) error {
 					return
 				}
 				db.View(func(txn *badger.Txn) error {
-				result, err := sunion(txn, currentDb(conn), cmd.Args[1:]...)
-				if err != nil {
-					conn.WriteError("ERR " + err.Error())
-					return nil
-				}
-				writeBulkArray(conn, result)
+					result, err := sunion(txn, currentDb(conn), cmd.Args[1:]...)
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return nil
+					}
+					writeBulkArray(conn, result)
 					return nil
 				})
 			case "sdiffstore":
@@ -1500,12 +1514,12 @@ func Serve(ctx context.Context, db *badger.DB) error {
 					withScores = true
 				}
 				db.View(func(txn *badger.Txn) error {
-				result, err := zrange(txn, currentDb(conn), cmd.Args[1], start, stop, withScores)
-				if err != nil {
-					conn.WriteError("ERR " + err.Error())
-					return nil
-				}
-				writeBulkArray(conn, result)
+					result, err := zrange(txn, currentDb(conn), cmd.Args[1], start, stop, withScores)
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return nil
+					}
+					writeBulkArray(conn, result)
 					return nil
 				})
 			case "zrangebylex":
@@ -1529,12 +1543,12 @@ func Serve(ctx context.Context, db *badger.DB) error {
 					hasLimit = true
 				}
 				db.View(func(txn *badger.Txn) error {
-				result, err := zrangebylex(txn, currentDb(conn), cmd.Args[1], minStr, maxStr, limitOffset, limitCount, hasLimit)
-				if err != nil {
-					conn.WriteError("ERR " + err.Error())
-					return nil
-				}
-				writeBulkArray(conn, result)
+					result, err := zrangebylex(txn, currentDb(conn), cmd.Args[1], minStr, maxStr, limitOffset, limitCount, hasLimit)
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return nil
+					}
+					writeBulkArray(conn, result)
 					return nil
 				})
 			case "zrangebyscore":
@@ -1565,12 +1579,12 @@ func Serve(ctx context.Context, db *badger.DB) error {
 					}
 				}
 				db.View(func(txn *badger.Txn) error {
-				result, err := zrangebyscore(txn, currentDb(conn), cmd.Args[1], minStr, maxStr, withScores, limitOffset, limitCount, hasLimit)
-				if err != nil {
-					conn.WriteError("ERR " + err.Error())
-					return nil
-				}
-				writeBulkArray(conn, result)
+					result, err := zrangebyscore(txn, currentDb(conn), cmd.Args[1], minStr, maxStr, withScores, limitOffset, limitCount, hasLimit)
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return nil
+					}
+					writeBulkArray(conn, result)
 					return nil
 				})
 			case "zrank":
@@ -1675,12 +1689,12 @@ func Serve(ctx context.Context, db *badger.DB) error {
 					withScores = true
 				}
 				db.View(func(txn *badger.Txn) error {
-				result, err := zrevrange(txn, currentDb(conn), cmd.Args[1], start, stop, withScores)
-				if err != nil {
-					conn.WriteError("ERR " + err.Error())
-					return nil
-				}
-				writeBulkArray(conn, result)
+					result, err := zrevrange(txn, currentDb(conn), cmd.Args[1], start, stop, withScores)
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return nil
+					}
+					writeBulkArray(conn, result)
 					return nil
 				})
 			case "zrevrangebylex":
@@ -1704,12 +1718,12 @@ func Serve(ctx context.Context, db *badger.DB) error {
 					hasLimit = true
 				}
 				db.View(func(txn *badger.Txn) error {
-				result, err := zrevrangebylex(txn, currentDb(conn), cmd.Args[1], maxStr, minStr, limitOffset, limitCount, hasLimit)
-				if err != nil {
-					conn.WriteError("ERR " + err.Error())
-					return nil
-				}
-				writeBulkArray(conn, result)
+					result, err := zrevrangebylex(txn, currentDb(conn), cmd.Args[1], maxStr, minStr, limitOffset, limitCount, hasLimit)
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return nil
+					}
+					writeBulkArray(conn, result)
 					return nil
 				})
 			case "zrevrangebyscore":
@@ -1740,12 +1754,12 @@ func Serve(ctx context.Context, db *badger.DB) error {
 					}
 				}
 				db.View(func(txn *badger.Txn) error {
-				result, err := zrevrangebyscore(txn, currentDb(conn), cmd.Args[1], maxStr, minStr, withScores, limitOffset, limitCount, hasLimit)
-				if err != nil {
-					conn.WriteError("ERR " + err.Error())
-					return nil
-				}
-				writeBulkArray(conn, result)
+					result, err := zrevrangebyscore(txn, currentDb(conn), cmd.Args[1], maxStr, minStr, withScores, limitOffset, limitCount, hasLimit)
+					if err != nil {
+						conn.WriteError("ERR " + err.Error())
+						return nil
+					}
+					writeBulkArray(conn, result)
 					return nil
 				})
 			case "zrevrank":
@@ -2295,49 +2309,49 @@ func Serve(ctx context.Context, db *badger.DB) error {
 					}
 					return nil
 				})
-		case "json.set":
-			handleJSONSet(conn, db, cmd)
-		case "json.get":
-			handleJSONGet(conn, db, cmd)
-		case "json.del":
-			handleJSONDel(conn, db, cmd)
-		case "json.type":
-			handleJSONType(conn, db, cmd)
-		case "json.arrappend":
-			handleJSONArrAppend(conn, db, cmd)
-		case "json.arrindex":
-			handleJSONArrIndex(conn, db, cmd)
-		case "json.arrlen":
-			handleJSONArrLen(conn, db, cmd)
-		case "json.numincrby":
-			handleJSONNumIncrBy(conn, db, cmd)
-		case "json.nummultby":
-			handleJSONNumMultBy(conn, db, cmd)
-		case "json.objkeys":
-			handleJSONObjKeys(conn, db, cmd)
-		case "json.objlen":
-			handleJSONObjLen(conn, db, cmd)
-		case "json.strappend":
-			handleJSONStrAppend(conn, db, cmd)
-		case "json.strlen":
-			handleJSONStrLen(conn, db, cmd)
-		case "json.mget":
-			handleJSONMGet(conn, db, cmd)
-		case "json.resp":
-			handleJSONResp(conn, db, cmd)
-		case "json.clear":
-			handleJSONClear(conn, db, cmd)
-		case "json.arrpop":
-			handleJSONArrPop(conn, db, cmd)
-		case "json.arrtrim":
-			handleJSONArrTrim(conn, db, cmd)
-		case "json.arrinsert":
-			handleJSONArrInsert(conn, db, cmd)
-		case "publish":
-			if !checkExactArgs(conn, cmd, 3) {
-				return
-			}
-			conn.WriteInt(ps.Publish(string(cmd.Args[1]), string(cmd.Args[2])))
+			case "json.set":
+				handleJSONSet(conn, db, cmd)
+			case "json.get":
+				handleJSONGet(conn, db, cmd)
+			case "json.del":
+				handleJSONDel(conn, db, cmd)
+			case "json.type":
+				handleJSONType(conn, db, cmd)
+			case "json.arrappend":
+				handleJSONArrAppend(conn, db, cmd)
+			case "json.arrindex":
+				handleJSONArrIndex(conn, db, cmd)
+			case "json.arrlen":
+				handleJSONArrLen(conn, db, cmd)
+			case "json.numincrby":
+				handleJSONNumIncrBy(conn, db, cmd)
+			case "json.nummultby":
+				handleJSONNumMultBy(conn, db, cmd)
+			case "json.objkeys":
+				handleJSONObjKeys(conn, db, cmd)
+			case "json.objlen":
+				handleJSONObjLen(conn, db, cmd)
+			case "json.strappend":
+				handleJSONStrAppend(conn, db, cmd)
+			case "json.strlen":
+				handleJSONStrLen(conn, db, cmd)
+			case "json.mget":
+				handleJSONMGet(conn, db, cmd)
+			case "json.resp":
+				handleJSONResp(conn, db, cmd)
+			case "json.clear":
+				handleJSONClear(conn, db, cmd)
+			case "json.arrpop":
+				handleJSONArrPop(conn, db, cmd)
+			case "json.arrtrim":
+				handleJSONArrTrim(conn, db, cmd)
+			case "json.arrinsert":
+				handleJSONArrInsert(conn, db, cmd)
+			case "publish":
+				if !checkExactArgs(conn, cmd, 3) {
+					return
+				}
+				conn.WriteInt(ps.Publish(string(cmd.Args[1]), string(cmd.Args[2])))
 			case "subscribe", "psubscribe":
 				if !checkMinArgs(conn, cmd, 2) {
 					return

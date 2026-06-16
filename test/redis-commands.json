@@ -357,6 +357,22 @@
     "description": "Background save (no-op in kv)"
   },
   {
+    "name": "LOLWUT",
+    "command": ["LOLWUT"],
+    "expected": "Invar version:",
+    "type": "bulk_string_startswith",
+    "version": "1.0.0",
+    "description": "LOLWUT returns version info"
+  },
+  {
+    "name": "TIME",
+    "command": ["TIME"],
+    "expected": 2,
+    "type": "array_length",
+    "version": "1.0.0",
+    "description": "TIME returns current server time as [seconds, microseconds]"
+  },
+  {
     "name": "PUBLISH",
     "command": ["PUBLISH", "testchannel", "testmessage"],
     "expected": 0,

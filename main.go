@@ -37,6 +37,7 @@ func main() {
 	opts := badger.DefaultOptions("/tmp/badger")
 	opts.Logger = adapter
 	db, err := badger.Open(opts)
+
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to open badger database")
 	}
@@ -82,19 +83,14 @@ func main() {
 		return nil
 	})
 
-	g.Go(func() error {
+	go func() {
 		for {
-			select {
-			case <-groupCtx.Done():
-				return groupCtx.Err()
-			default:
-				lsm, vlog := db.Size()
-				lsmGauge.Set(float64(lsm))
-				vlogGauge.Set(float64(vlog))
-				time.Sleep(60 * time.Second)
-			}
+			lsm, vlog := db.Size()
+			lsmGauge.Set(float64(lsm))
+			vlogGauge.Set(float64(vlog))
+			time.Sleep(60 * time.Second)
 		}
-	})
+	}()
 
 	g.Go(func() error {
 		return redis.Serve(groupCtx, db)

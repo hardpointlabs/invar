@@ -287,7 +287,7 @@ in this implementation.
 | LATENCY HISTORY | 🚫 | |
 | LATENCY LATEST | 🚫 | |
 | LATENCY RESET | 🚫 | |
-| LOLWUT | 🚫 | |
+| LOLWUT | ✅ | Returns version info instead of ASCII art |
 | MEMORY DOCTOR | 🚫 | |
 | MEMORY MALLOC-STATS | 🚫 | |
 | MEMORY PURGE | 🚫 | |
@@ -310,8 +310,8 @@ in this implementation.
 | SLOWLOG LEN | 🚫 | |
 | SLOWLOG RESET | 🚫 | |
 | SWAPDB | 🚫 | |
-| SYNC | ✅ | No-op |
-| TIME | 🚫 | |
+| SYNC | ✅ | |
+| TIME | ✅ | |
 
 ---
 

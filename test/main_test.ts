@@ -45,6 +45,8 @@ function compareResult(actual: unknown, expected: unknown, type: string): boolea
       return actual === null;
     case "null_or_bulk":
       return actual === null || actual === expected;
+    case "array_length":
+      return Array.isArray(actual) && actual.length === Number(expected);
     case "array":
       if (!Array.isArray(expected) || !Array.isArray(actual)) return false;
       if (expected.length !== actual.length) return false;
