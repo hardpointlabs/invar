@@ -293,7 +293,7 @@ in this implementation.
 | MEMORY PURGE | 🚫 | |
 | MEMORY STATS | 🚫 | |
 | MEMORY USAGE | 🚫 | |
-| MODULE LIST | 🚫 | |
+| MODULE LIST | ✅ | |
 | MODULE LOAD | 🚫 | |
 | MODULE LOADEX | 🚫 | |
 | MODULE UNLOAD | 🚫 | |
@@ -331,7 +331,7 @@ in this implementation.
 | MOVE | ✅ | |
 | OBJECT ENCODING | 🚫 | |
 | OBJECT FREQ | 🚫 | |
-| OBJECT IDLETIME | 🚫 | |
+| OBJECT IDLETIME | ✅ | No-op, returns nil |
 | OBJECT REFCOUNT | 🚫 | |
 | PERSIST | 🚫 | |
 | PEXPIRE | 🚫 | |
@@ -348,8 +348,8 @@ in this implementation.
 | TOUCH | 🚫 | |
 | TTL | ✅ | |
 | TYPE | ✅ | |
-| UNLINK | 🚫 | |
-| WAIT | 🚫 | |
+| UNLINK | ✅ | Equivalant behavior to `DEL` |
+| WAIT | ✅ | No-op |
 
 ---
 

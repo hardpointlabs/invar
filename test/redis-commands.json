@@ -50,6 +50,23 @@
     "description": "Delete a non-existing key"
   },
   {
+    "name": "UNLINK existing key",
+    "command": ["UNLINK", "testkey_unlink"],
+    "expected": 1,
+    "type": "integer",
+    "version": "4.0.0",
+    "description": "Unlink an existing key (functionally equivalent to DEL)",
+    "setup": [["SET", "testkey_unlink", "todelete"]]
+  },
+  {
+    "name": "UNLINK non-existing key",
+    "command": ["UNLINK", "nonexistent_unlink"],
+    "expected": 0,
+    "type": "integer",
+    "version": "4.0.0",
+    "description": "Unlink a non-existing key"
+  },
+  {
     "name": "EXISTS existing key",
     "command": ["EXISTS", "testkey1"],
     "expected": 1,
@@ -316,6 +333,14 @@
     "setup": [["SET", "exptest", "value"]]
   },
   {
+    "name": "OBJECT IDLETIME returns nil",
+    "command": ["OBJECT", "IDLETIME", "anykey"],
+    "expected": null,
+    "type": "null",
+    "version": "2.2.3",
+    "description": "OBJECT IDLETIME returns nil (not implemented)"
+  },
+  {
     "name": "MOVE",
     "command": ["MOVE", "movekey", "1"],
     "expected": 1,
@@ -363,6 +388,14 @@
     "type": "bulk_string_startswith",
     "version": "1.0.0",
     "description": "LOLWUT returns version info"
+  },
+  {
+    "name": "MODULE LIST returns empty array",
+    "command": ["MODULE", "LIST"],
+    "expected": [],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "MODULE LIST returns an empty array"
   },
   {
     "name": "TIME",
