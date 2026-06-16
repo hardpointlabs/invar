@@ -1,3 +1,10 @@
+## [1.0.4](https://github.com/hardpointlabs/invar/compare/v1.0.3...v1.0.4) (2026-06-16)
+
+
+### Bug Fixes
+
+* implement SAVE as badgerdb sync ([2ed3fb3](https://github.com/hardpointlabs/invar/commit/2ed3fb3da31f5d50f4dc4ede4d37d6f9a56d618e))
+
 ## [1.0.3](https://github.com/hardpointlabs/invar/compare/v1.0.2...v1.0.3) (2026-06-11)
 
 
