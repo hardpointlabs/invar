@@ -250,6 +250,16 @@ func Serve(ctx context.Context, db *badger.DB) error {
 			case "bgsave":
 				go db.Sync()
 				conn.WriteString("OK")
+			case "module":
+				if len(cmd.Args) < 2 {
+					conn.WriteError("ERR wrong number of arguments for 'module' command")
+					return
+				}
+				if strings.ToLower(string(cmd.Args[1])) == "list" {
+					conn.WriteArray(0)
+				} else {
+					conn.WriteError("ERR unknown subcommand")
+				}
 			case "save":
 				if err := db.Sync(); err != nil {
 					conn.WriteError("ERR " + err.Error())
@@ -259,6 +269,8 @@ func Serve(ctx context.Context, db *badger.DB) error {
 			case "sync", "psync":
 				// since Invar only runs in a single process, 'replication' is meaningless, however
 				// we're implementing to avoid breaking callers who expect these commands
+				conn.WriteString("OK")
+			case "wait":
 				conn.WriteString("OK")
 			case "lolwut":
 				conn.WriteBulkString(fmt.Sprintf("Invar version: %s, commit: %s\n", config.Version, config.Commit))
@@ -288,6 +300,7 @@ func Serve(ctx context.Context, db *badger.DB) error {
 				// Do not use this routinely in production!
 				db.View(func(txn *badger.Txn) error {
 					opts := badger.DefaultIteratorOptions
+					opts.PrefetchValues = false
 					opts.PrefetchSize = 100
 					opts.Prefix = currentDbPrefix(conn)
 					it := txn.NewIterator(opts)
@@ -376,6 +389,16 @@ func Serve(ctx context.Context, db *badger.DB) error {
 					return
 				}
 				renameNXKey(conn, db, cmd.Args[1], cmd.Args[2])
+			case "object":
+				if !checkMinArgs(conn, cmd, 2) {
+					return
+				}
+				switch strings.ToLower(string(cmd.Args[1])) {
+				case "idletime":
+					conn.WriteNull()
+				default:
+					conn.WriteError("ERR unknown subcommand")
+				}
 			case "setnx":
 				if !checkExactArgs(conn, cmd, 3) {
 					return
@@ -495,7 +518,7 @@ func Serve(ctx context.Context, db *badger.DB) error {
 					return
 				}
 				typeOfKey(conn, db, cmd.Args[1])
-			case "del":
+			case "del", "unlink":
 				if !checkMinArgs(conn, cmd, 2) {
 					return
 				}
