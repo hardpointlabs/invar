@@ -23,13 +23,13 @@
  */
 
 import { assertEquals, assertRejects } from "@std/assert";
-import { MongoClient } from "mongodb";
+import { MongoClient } from "jsr:@db/mongo";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-const MONGO_URL = Deno.env.get("MONGO_TEST_URL") ?? "mongodb://127.0.0.1:27017";
+const MONGO_URL = "mongodb://127.0.0.1:27017";
 const MONGO_HOST = "127.0.0.1";
 const MONGO_PORT = 27017;
 
@@ -89,11 +89,11 @@ async function readWithTimeout(conn: Deno.TcpConn, n: number): Promise<Uint8Arra
  *    Spec refs: wire-protocol-messages.md §2; 04-connection-handshake.md
  */
 Deno.test("MsgHeader: driver connects and ping succeeds", async () => {
-  const client = new MongoClient(MONGO_URL);
+  const client = new MongoClient();
   try {
-    await client.connect();
-    const admin = client.db("admin");
-    const result = await admin.command({ ping: 1 });
+    await client.connect(MONGO_URL);
+    const admin = client.database("admin");
+    const result = await admin.runCommand({ ping: 1 });
     // The driver only returns a result object if ok==1 was received in a
     // properly-framed message, proving header encoding/decoding is correct.
     assertEquals(result.ok, 1);
@@ -111,10 +111,10 @@ Deno.test("MsgHeader: driver connects and ping succeeds", async () => {
  *    Spec ref: wire-protocol-messages.md §2.1, §9.3
  */
 Deno.test("MsgHeader: MessageLength is correctly set (buildInfo round-trip)", async () => {
-  const client = new MongoClient(MONGO_URL);
+  const client = new MongoClient();
   try {
-    await client.connect();
-    const result = await client.db("admin").command({ buildInfo: 1 });
+    await client.connect(MONGO_URL);
+    const result = await client.database("admin").runCommand({ buildInfo: 1 });
     assertEquals(result.ok, 1);
     // version field present proves a full document was received without
     // framing corruption.
@@ -132,13 +132,13 @@ Deno.test("MsgHeader: MessageLength is correctly set (buildInfo round-trip)", as
  *    Spec ref: wire-protocol-messages.md §2.1 ("responseTo echoes requestID")
  */
 Deno.test("MsgHeader: ResponseTo is echoed correctly (concurrent commands)", async () => {
-  const client = new MongoClient(MONGO_URL);
+  const client = new MongoClient();
   try {
-    await client.connect();
-    const db = client.db("admin");
+    await client.connect(MONGO_URL);
+    const db = client.database("admin");
     const [r1, r2] = await Promise.all([
-      db.command({ ping: 1 }),
-      db.command({ ping: 1 }),
+      db.runCommand({ ping: 1 }),
+      db.runCommand({ ping: 1 }),
     ]);
     assertEquals(r1.ok, 1);
     assertEquals(r2.ok, 1);

@@ -1,19 +1,41 @@
 {
   "version": "5",
   "specifiers": {
+    "jsr:@db/mongo@*": "0.34.0",
+    "jsr:@db/mongo@0.34": "0.34.0",
+    "jsr:@lucsoft/web-bson@0.4": "0.4.0",
     "jsr:@std/assert@*": "1.0.16",
     "jsr:@std/assert@^1.0.16": "1.0.16",
+    "jsr:@std/crypto@^1.0.3": "1.1.0",
+    "jsr:@std/encoding@^1.0.5": "1.0.10",
     "jsr:@std/internal@^1.0.12": "1.0.12",
     "npm:redis@*": "4.7.1_@redis+client@1.6.1",
     "npm:redis@^4.5.0": "4.7.1_@redis+client@1.6.1",
     "npm:redis@^4.7.1": "4.7.1_@redis+client@1.6.1"
   },
   "jsr": {
+    "@db/mongo@0.34.0": {
+      "integrity": "48960c99392e9899579b1e23ca87c7a3b42fb5788bcc6fa72b2f2a0090f52a6e",
+      "dependencies": [
+        "jsr:@lucsoft/web-bson",
+        "jsr:@std/crypto",
+        "jsr:@std/encoding"
+      ]
+    },
+    "@lucsoft/web-bson@0.4.0": {
+      "integrity": "8ede9f3c223dd6095869fae84e99dcf0f12da52f37426e22d57181ecc5524308"
+    },
     "@std/assert@1.0.16": {
       "integrity": "6a7272ed1eaa77defe76e5ff63ca705d9c495077e2d5fd0126d2b53fc5bd6532",
       "dependencies": [
         "jsr:@std/internal"
       ]
+    },
+    "@std/crypto@1.1.0": {
+      "integrity": "b8d6d0a6377a32b213af2661ed7bf1062d94feac0c57def5526a8e74a95c3ec8"
+    },
+    "@std/encoding@1.0.10": {
+      "integrity": "8783c6384a2d13abd5e9e87a7ae0520a30e9f56aeeaa3bdf910a3eaaf5c811a1"
     },
     "@std/internal@1.0.12": {
       "integrity": "972a634fd5bc34b242024402972cd5143eac68d8dffaca5eaa4dba30ce17b027"
@@ -81,6 +103,7 @@
   },
   "workspace": {
     "dependencies": [
+      "jsr:@db/mongo@0.34",
       "jsr:@std/assert@^1.0.16",
       "npm:redis@^4.7.1"
     ]
