@@ -35,7 +35,7 @@ echo "Running unit & linearizability tests..."
 go test ./...
 
 echo "Starting invar daemon on port $PORT..."
-./invar > "$LOG_FILE" 2>&1 &
+./invar redis > "$LOG_FILE" 2>&1 &
 echo $! > "$PID_FILE"
 
 echo "Waiting for daemon to be ready..."
