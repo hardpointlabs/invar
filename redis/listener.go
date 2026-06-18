@@ -185,20 +185,23 @@ func moveKey(conn redcon.Conn, db *badger.DB, key []byte, targetDb int) {
 	})
 }
 
-func Serve(ctx context.Context, db *badger.DB) error {
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return err
-	}
+// RedisListener implements the main.Listener interface for the Redis wire protocol.
+type RedisListener struct {
+	Ln net.Listener
+}
 
+func (l *RedisListener) Serve(ctx context.Context, db *badger.DB) error {
 	go func() {
 		<-ctx.Done()
-		ln.Close()
+		l.Ln.Close()
 	}()
+	return serve(l.Ln, db)
+}
 
+func serve(ln net.Listener, db *badger.DB) error {
 	var ps redcon.PubSub
-	go log.Info().Msgf("started redis listener at %s", addr)
-	err = redcon.Serve(ln,
+	log.Info().Msgf("started redis listener at %s", addr)
+	err := redcon.Serve(ln,
 		func(conn redcon.Conn, cmd redcon.Command) {
 			setContext(conn)
 
@@ -2409,13 +2412,5 @@ func Serve(ctx context.Context, db *badger.DB) error {
 			// log.Printf("closed: %s, err: %v", conn.RemoteAddr(), err)
 		},
 	)
-	if err != nil {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-			return err
-		}
-	}
-	return nil
+	return err
 }
