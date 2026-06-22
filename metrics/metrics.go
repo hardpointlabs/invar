@@ -12,6 +12,7 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// ---- Prometheus gauges ----
 var (
 	lsmGauge = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "badger_lsm_size_bytes",

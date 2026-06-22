@@ -87,8 +87,6 @@ type args struct {
 
 func (args) Description() string { return "Invar - a lightweight, durable document store" }
 
-// ---- Prometheus gauges ----
-
 func main() {
 	var a args
 	p := arg.MustParse(&a)
