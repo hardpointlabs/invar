@@ -64,16 +64,24 @@ function concat(...arrays: Uint8Array[]): Uint8Array {
 /**
  * Read up to `n` bytes from `conn` with a 2-second deadline.
  * Returns the bytes actually read (may be fewer than n if the server
- * closed the connection).
+ * closed the connection or reset it).
  */
 async function readWithTimeout(conn: Deno.TcpConn, n: number): Promise<Uint8Array> {
   const buf = new Uint8Array(n);
-  const deadline = new Promise<null>((resolve) => setTimeout(() => resolve(null), 2000));
-  const readProm = conn.read(buf);
-  const result = await Promise.race([readProm, deadline]);
-  if (result === null) return new Uint8Array(0);
-  if (result === 0) return new Uint8Array(0);
-  return buf.subarray(0, result as number);
+  let timerId: number | undefined;
+  const deadline = new Promise<null>((resolve) => {
+    timerId = setTimeout(() => resolve(null), 2000);
+  });
+  try {
+    const result = await Promise.race([conn.read(buf), deadline]);
+    if (result === null || result === 0) return new Uint8Array(0);
+    return buf.subarray(0, result as number);
+  } catch (_e) {
+    // Connection reset by peer counts as EOF for our purposes.
+    return new Uint8Array(0);
+  } finally {
+    clearTimeout(timerId);
+  }
 }
 
 // ---------------------------------------------------------------------------

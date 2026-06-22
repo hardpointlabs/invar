@@ -15,12 +15,11 @@ type MongoListener struct {
 }
 
 func (l *MongoListener) Serve(ctx context.Context, db *badger.DB) error {
-	log.Info().Msgf("started mongo listener at %s (not yet implemented)", l.Ln.Addr())
+	log.Info().Msgf("started mongo listener at %s", l.Ln.Addr())
 	go func() {
 		<-ctx.Done()
 		l.Ln.Close()
 	}()
-	// Accept and immediately close connections until the protocol is implemented.
 	for {
 		conn, err := l.Ln.Accept()
 		if err != nil {
@@ -32,6 +31,6 @@ func (l *MongoListener) Serve(ctx context.Context, db *badger.DB) error {
 				return err
 			}
 		}
-		conn.Close()
+		go serveConn(conn)
 	}
 }

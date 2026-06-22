@@ -1,0 +1,1092 @@
+No.     Time           Source                Destination           Protocol Length Info
+     49 18.657432      127.0.0.1             127.0.0.1             MONGO    382    Request : Query
+
+Frame 49: Packet, 382 bytes on wire (3056 bits), 382 bytes captured (3056 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 53109, Dst Port: 27017, Seq: 1, Ack: 1, Len: 326
+Mongo Wire Protocol
+    Message Length: 326
+    Request ID: 0x00000001 (1)
+    Response To: 0x00000000 (0)
+    OpCode: Query (2004)
+    Query Flags
+    fullCollectionName: admin.$cmd
+    Number To Skip: 0
+    Number to Return: -1
+    Query
+        Document length: 287
+        Elements
+            Element: ismaster
+            Element: helloOk
+            Element: client
+            Element: compression
+
+No.     Time           Source                Destination           Protocol Length Info
+     51 18.660650      127.0.0.1             127.0.0.1             MONGO    323    Response : Reply
+
+Frame 51: Packet, 323 bytes on wire (2584 bits), 323 bytes captured (2584 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 27017, Dst Port: 53109, Seq: 1, Ack: 327, Len: 267
+Mongo Wire Protocol
+    Message Length: 267
+    Request ID: 0x00000032 (50)
+    Response To: 0x00000001 (1)
+    OpCode: Reply (1)
+    Reply Flags
+    Cursor ID: 0
+    Starting From: 0
+    Number Returned: 1
+    Document
+        Document length: 231
+        Elements
+            Element: ismaster
+            Element: helloOk
+            Element: maxBsonObjectSize
+            Element: maxMessageSizeBytes
+            Element: maxWriteBatchSize
+            Element: localTime
+            Element: logicalSessionTimeoutMinutes
+            Element: connectionId
+            Element: minWireVersion
+            Element: maxWireVersion
+            Element: readOnly
+            Element: ok
+
+No.     Time           Source                Destination           Protocol Length Info
+     57 18.663114      127.0.0.1             127.0.0.1             MONGO    382    Request : Query
+
+Frame 57: Packet, 382 bytes on wire (3056 bits), 382 bytes captured (3056 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 53110, Dst Port: 27017, Seq: 1, Ack: 1, Len: 326
+Mongo Wire Protocol
+    Message Length: 326
+    Request ID: 0x00000002 (2)
+    Response To: 0x00000000 (0)
+    OpCode: Query (2004)
+    Query Flags
+    fullCollectionName: admin.$cmd
+    Number To Skip: 0
+    Number to Return: -1
+    Query
+        Document length: 287
+        Elements
+            Element: ismaster
+            Element: helloOk
+            Element: client
+            Element: compression
+
+No.     Time           Source                Destination           Protocol Length Info
+     59 18.667432      127.0.0.1             127.0.0.1             MONGO    323    Response : Reply
+
+Frame 59: Packet, 323 bytes on wire (2584 bits), 323 bytes captured (2584 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 27017, Dst Port: 53110, Seq: 1, Ack: 327, Len: 267
+Mongo Wire Protocol
+    Message Length: 267
+    Request ID: 0x00000033 (51)
+    Response To: 0x00000002 (2)
+    OpCode: Reply (1)
+    Reply Flags
+    Cursor ID: 0
+    Starting From: 0
+    Number Returned: 1
+    Document
+        Document length: 231
+        Elements
+            Element: ismaster
+            Element: helloOk
+            Element: maxBsonObjectSize
+            Element: maxMessageSizeBytes
+            Element: maxWriteBatchSize
+            Element: localTime
+            Element: logicalSessionTimeoutMinutes
+            Element: connectionId
+            Element: minWireVersion
+            Element: maxWireVersion
+            Element: readOnly
+            Element: ok
+
+No.     Time           Source                Destination           Protocol Length Info
+     61 18.671046      127.0.0.1             127.0.0.1             MONGO    172    Request : Extensible Message Format
+
+Frame 61: Packet, 172 bytes on wire (1376 bits), 172 bytes captured (1376 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 53110, Dst Port: 27017, Seq: 327, Ack: 268, Len: 116
+Mongo Wire Protocol
+    Message Length: 116
+    Request ID: 0x00000003 (3)
+    Response To: 0x00000000 (0)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 95
+            Elements
+                Element: connectionStatus
+                Element: showPrivileges
+                Element: lsid
+                Element: $db
+
+No.     Time           Source                Destination           Protocol Length Info
+     71 18.671437      127.0.0.1             127.0.0.1             MONGO    382    Request : Query
+
+Frame 71: Packet, 382 bytes on wire (3056 bits), 382 bytes captured (3056 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 53111, Dst Port: 27017, Seq: 1, Ack: 1, Len: 326
+Mongo Wire Protocol
+    Message Length: 326
+    Request ID: 0x00000004 (4)
+    Response To: 0x00000000 (0)
+    OpCode: Query (2004)
+    Query Flags
+    fullCollectionName: admin.$cmd
+    Number To Skip: 0
+    Number to Return: -1
+    Query
+        Document length: 287
+        Elements
+            Element: ismaster
+            Element: helloOk
+            Element: client
+            Element: compression
+
+No.     Time           Source                Destination           Protocol Length Info
+     73 18.671601      127.0.0.1             127.0.0.1             MONGO    197    Response : Extensible Message Format
+
+Frame 73: Packet, 197 bytes on wire (1576 bits), 197 bytes captured (1576 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 27017, Dst Port: 53110, Seq: 268, Ack: 443, Len: 141
+Mongo Wire Protocol
+    Message Length: 141
+    Request ID: 0x00000034 (52)
+    Response To: 0x00000003 (3)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 120
+            Elements
+                Element: authInfo
+                Element: ok
+
+No.     Time           Source                Destination           Protocol Length Info
+     74 18.671613      127.0.0.1             127.0.0.1             MONGO    382    Request : Query
+
+Frame 74: Packet, 382 bytes on wire (3056 bits), 382 bytes captured (3056 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 53112, Dst Port: 27017, Seq: 1, Ack: 1, Len: 326
+Mongo Wire Protocol
+    Message Length: 326
+    Request ID: 0x00000005 (5)
+    Response To: 0x00000000 (0)
+    OpCode: Query (2004)
+    Query Flags
+    fullCollectionName: admin.$cmd
+    Number To Skip: 0
+    Number to Return: -1
+    Query
+        Document length: 287
+        Elements
+            Element: ismaster
+            Element: helloOk
+            Element: client
+            Element: compression
+
+No.     Time           Source                Destination           Protocol Length Info
+     77 18.672153      127.0.0.1             127.0.0.1             MONGO    184    Request : Extensible Message Format
+
+Frame 77: Packet, 184 bytes on wire (1472 bits), 184 bytes captured (1472 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 53110, Dst Port: 27017, Seq: 443, Ack: 409, Len: 128
+Mongo Wire Protocol
+    Message Length: 128
+    Request ID: 0x00000006 (6)
+    Response To: 0x00000000 (0)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 107
+            Elements
+                Element: getParameter
+                Element: featureCompatibilityVersion
+                Element: lsid
+                Element: $db
+
+No.     Time           Source                Destination           Protocol Length Info
+     79 18.672197      127.0.0.1             127.0.0.1             MONGO    323    Response : Reply
+
+Frame 79: Packet, 323 bytes on wire (2584 bits), 323 bytes captured (2584 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 27017, Dst Port: 53112, Seq: 1, Ack: 327, Len: 267
+Mongo Wire Protocol
+    Message Length: 267
+    Request ID: 0x00000035 (53)
+    Response To: 0x00000005 (5)
+    OpCode: Reply (1)
+    Reply Flags
+    Cursor ID: 0
+    Starting From: 0
+    Number Returned: 1
+    Document
+        Document length: 231
+        Elements
+            Element: ismaster
+            Element: helloOk
+            Element: maxBsonObjectSize
+            Element: maxMessageSizeBytes
+            Element: maxWriteBatchSize
+            Element: localTime
+            Element: logicalSessionTimeoutMinutes
+            Element: connectionId
+            Element: minWireVersion
+            Element: maxWireVersion
+            Element: readOnly
+            Element: ok
+
+No.     Time           Source                Destination           Protocol Length Info
+     81 18.672271      127.0.0.1             127.0.0.1             MONGO    323    Response : Reply
+
+Frame 81: Packet, 323 bytes on wire (2584 bits), 323 bytes captured (2584 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 27017, Dst Port: 53111, Seq: 1, Ack: 327, Len: 267
+Mongo Wire Protocol
+    Message Length: 267
+    Request ID: 0x00000036 (54)
+    Response To: 0x00000004 (4)
+    OpCode: Reply (1)
+    Reply Flags
+    Cursor ID: 0
+    Starting From: 0
+    Number Returned: 1
+    Document
+        Document length: 231
+        Elements
+            Element: ismaster
+            Element: helloOk
+            Element: maxBsonObjectSize
+            Element: maxMessageSizeBytes
+            Element: maxWriteBatchSize
+            Element: localTime
+            Element: logicalSessionTimeoutMinutes
+            Element: connectionId
+            Element: minWireVersion
+            Element: maxWireVersion
+            Element: readOnly
+            Element: ok
+
+No.     Time           Source                Destination           Protocol Length Info
+     83 18.672429      127.0.0.1             127.0.0.1             MONGO    145    Response : Extensible Message Format
+
+Frame 83: Packet, 145 bytes on wire (1160 bits), 145 bytes captured (1160 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 27017, Dst Port: 53110, Seq: 409, Ack: 571, Len: 89
+Mongo Wire Protocol
+    Message Length: 89
+    Request ID: 0x00000037 (55)
+    Response To: 0x00000006 (6)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 68
+            Elements
+                Element: featureCompatibilityVersion
+                Element: ok
+
+No.     Time           Source                Destination           Protocol Length Info
+     85 18.672584      127.0.0.1             127.0.0.1             MONGO    147    Request : Extensible Message Format
+
+Frame 85: Packet, 147 bytes on wire (1176 bits), 147 bytes captured (1176 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 53112, Dst Port: 27017, Seq: 327, Ack: 268, Len: 91
+Mongo Wire Protocol
+    Message Length: 91
+    Request ID: 0x00000007 (7)
+    Response To: 0x00000000 (0)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 70
+            Elements
+                Element: hostInfo
+                Element: lsid
+                Element: $db
+
+No.     Time           Source                Destination           Protocol Length Info
+     87 18.672800      127.0.0.1             127.0.0.1             MONGO    1610   Response : Extensible Message Format
+
+Frame 87: Packet, 1610 bytes on wire (12880 bits), 1610 bytes captured (12880 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 27017, Dst Port: 53112, Seq: 268, Ack: 418, Len: 1554
+Mongo Wire Protocol
+    Message Length: 1554
+    Request ID: 0x00000038 (56)
+    Response To: 0x00000007 (7)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 1533
+            Elements
+                Element: system
+                Element: os
+                Element: extra
+                Element: ok
+
+No.     Time           Source                Destination           Protocol Length Info
+     89 18.672889      127.0.0.1             127.0.0.1             MONGO    148    Request : Extensible Message Format
+
+Frame 89: Packet, 148 bytes on wire (1184 bits), 148 bytes captured (1184 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 53111, Dst Port: 27017, Seq: 327, Ack: 268, Len: 92
+Mongo Wire Protocol
+    Message Length: 92
+    Request ID: 0x00000008 (8)
+    Response To: 0x00000000 (0)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 71
+            Elements
+                Element: buildInfo
+                Element: lsid
+                Element: $db
+
+No.     Time           Source                Destination           Protocol Length Info
+     91 18.673086      127.0.0.1             127.0.0.1             MONGO    148    Request : Extensible Message Format
+
+Frame 91: Packet, 148 bytes on wire (1184 bits), 148 bytes captured (1184 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 53110, Dst Port: 27017, Seq: 571, Ack: 498, Len: 92
+Mongo Wire Protocol
+    Message Length: 92
+    Request ID: 0x00000009 (9)
+    Response To: 0x00000000 (0)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 71
+            Elements
+                Element: buildInfo
+                Element: lsid
+                Element: $db
+
+No.     Time           Source                Destination           Protocol Length Info
+    101 18.673593      127.0.0.1             127.0.0.1             MONGO    155    Request : Extensible Message Format
+
+Frame 101: Packet, 155 bytes on wire (1240 bits), 155 bytes captured (1240 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 53112, Dst Port: 27017, Seq: 418, Ack: 1822, Len: 99
+Mongo Wire Protocol
+    Message Length: 99
+    Request ID: 0x0000000a (10)
+    Response To: 0x00000000 (0)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 78
+            Elements
+                Element: getParameter
+                Element: lsid
+                Element: $db
+
+No.     Time           Source                Destination           Protocol Length Info
+    103 18.673779      127.0.0.1             127.0.0.1             MONGO    1475   Response : Extensible Message Format
+
+Frame 103: Packet, 1475 bytes on wire (11800 bits), 1475 bytes captured (11800 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 27017, Dst Port: 53111, Seq: 268, Ack: 419, Len: 1419
+Mongo Wire Protocol
+    Message Length: 1419
+    Request ID: 0x00000039 (57)
+    Response To: 0x00000008 (8)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 1398
+            Elements
+                Element: version
+                Element: gitVersion
+                Element: modules
+                Element: allocator
+                Element: javascriptEngine
+                Element: sysInfo
+                Element: versionArray
+                Element: openssl
+                Element: buildEnvironment
+                Element: bits
+                Element: debug
+                Element: maxBsonObjectSize
+                Element: storageEngines
+                Element: ok
+
+No.     Time           Source                Destination           Protocol Length Info
+    105 18.673814      127.0.0.1             127.0.0.1             MONGO    382    Request : Query
+
+Frame 105: Packet, 382 bytes on wire (3056 bits), 382 bytes captured (3056 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 53113, Dst Port: 27017, Seq: 1, Ack: 1, Len: 326
+Mongo Wire Protocol
+    Message Length: 326
+    Request ID: 0x0000000b (11)
+    Response To: 0x00000000 (0)
+    OpCode: Query (2004)
+    Query Flags
+    fullCollectionName: admin.$cmd
+    Number To Skip: 0
+    Number to Return: -1
+    Query
+        Document length: 287
+        Elements
+            Element: ismaster
+            Element: helloOk
+            Element: client
+            Element: compression
+
+No.     Time           Source                Destination           Protocol Length Info
+    107 18.673945      127.0.0.1             127.0.0.1             MONGO    382    Request : Query
+
+Frame 107: Packet, 382 bytes on wire (3056 bits), 382 bytes captured (3056 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 53114, Dst Port: 27017, Seq: 1, Ack: 1, Len: 326
+Mongo Wire Protocol
+    Message Length: 326
+    Request ID: 0x0000000c (12)
+    Response To: 0x00000000 (0)
+    OpCode: Query (2004)
+    Query Flags
+    fullCollectionName: admin.$cmd
+    Number To Skip: 0
+    Number to Return: -1
+    Query
+        Document length: 287
+        Elements
+            Element: ismaster
+            Element: helloOk
+            Element: client
+            Element: compression
+
+No.     Time           Source                Destination           Protocol Length Info
+    108 18.673949      127.0.0.1             127.0.0.1             MONGO    1475   Response : Extensible Message Format
+
+Frame 108: Packet, 1475 bytes on wire (11800 bits), 1475 bytes captured (11800 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 27017, Dst Port: 53110, Seq: 498, Ack: 663, Len: 1419
+Mongo Wire Protocol
+    Message Length: 1419
+    Request ID: 0x0000003a (58)
+    Response To: 0x00000009 (9)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 1398
+            Elements
+                Element: version
+                Element: gitVersion
+                Element: modules
+                Element: allocator
+                Element: javascriptEngine
+                Element: sysInfo
+                Element: versionArray
+                Element: openssl
+                Element: buildEnvironment
+                Element: bits
+                Element: debug
+                Element: maxBsonObjectSize
+                Element: storageEngines
+                Element: ok
+
+No.     Time           Source                Destination           Protocol Length Info
+    111 18.674559      127.0.0.1             127.0.0.1             MONGO    323    Response : Reply
+
+Frame 111: Packet, 323 bytes on wire (2584 bits), 323 bytes captured (2584 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 27017, Dst Port: 53113, Seq: 1, Ack: 327, Len: 267
+Mongo Wire Protocol
+    Message Length: 267
+    Request ID: 0x0000003c (60)
+    Response To: 0x0000000b (11)
+    OpCode: Reply (1)
+    Reply Flags
+    Cursor ID: 0
+    Starting From: 0
+    Number Returned: 1
+    Document
+        Document length: 231
+        Elements
+            Element: ismaster
+            Element: helloOk
+            Element: maxBsonObjectSize
+            Element: maxMessageSizeBytes
+            Element: maxWriteBatchSize
+            Element: localTime
+            Element: logicalSessionTimeoutMinutes
+            Element: connectionId
+            Element: minWireVersion
+            Element: maxWireVersion
+            Element: readOnly
+            Element: ok
+
+No.     Time           Source                Destination           Protocol Length Info
+    112 18.674572      127.0.0.1             127.0.0.1             MONGO    129    Response : Extensible Message Format
+
+Frame 112: Packet, 129 bytes on wire (1032 bits), 129 bytes captured (1032 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 27017, Dst Port: 53112, Seq: 1822, Ack: 517, Len: 73
+Mongo Wire Protocol
+    Message Length: 73
+    Request ID: 0x0000003b (59)
+    Response To: 0x0000000a (10)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 52
+            Elements
+                Element: ok
+                Element: errmsg
+
+No.     Time           Source                Destination           Protocol Length Info
+    115 18.674612      127.0.0.1             127.0.0.1             MONGO    323    Response : Reply
+
+Frame 115: Packet, 323 bytes on wire (2584 bits), 323 bytes captured (2584 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 27017, Dst Port: 53114, Seq: 1, Ack: 327, Len: 267
+Mongo Wire Protocol
+    Message Length: 267
+    Request ID: 0x0000003d (61)
+    Response To: 0x0000000c (12)
+    OpCode: Reply (1)
+    Reply Flags
+    Cursor ID: 0
+    Starting From: 0
+    Number Returned: 1
+    Document
+        Document length: 231
+        Elements
+            Element: ismaster
+            Element: helloOk
+            Element: maxBsonObjectSize
+            Element: maxMessageSizeBytes
+            Element: maxWriteBatchSize
+            Element: localTime
+            Element: logicalSessionTimeoutMinutes
+            Element: connectionId
+            Element: minWireVersion
+            Element: maxWireVersion
+            Element: readOnly
+            Element: ok
+
+No.     Time           Source                Destination           Protocol Length Info
+    117 18.675113      127.0.0.1             127.0.0.1             MONGO    151    Request : Extensible Message Format
+
+Frame 117: Packet, 151 bytes on wire (1208 bits), 151 bytes captured (1208 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 53113, Dst Port: 27017, Seq: 327, Ack: 268, Len: 95
+Mongo Wire Protocol
+    Message Length: 95
+    Request ID: 0x0000000d (13)
+    Response To: 0x00000000 (0)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 74
+            Elements
+                Element: atlasVersion
+                Element: lsid
+                Element: $db
+
+No.     Time           Source                Destination           Protocol Length Info
+    119 18.675765      127.0.0.1             127.0.0.1             MONGO    302    Request : Extensible Message Format
+
+Frame 119: Packet, 302 bytes on wire (2416 bits), 302 bytes captured (2416 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 53114, Dst Port: 27017, Seq: 327, Ack: 268, Len: 246
+Mongo Wire Protocol
+    Message Length: 246
+    Request ID: 0x0000000e (14)
+    Response To: 0x00000000 (0)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 225
+            Elements
+                Element: aggregate
+                Element: pipeline
+                Element: cursor
+                Element: lsid
+                Element: $db
+
+No.     Time           Source                Destination           Protocol Length Info
+    121 18.676896      127.0.0.1             127.0.0.1             MONGO    178    Response : Extensible Message Format
+
+Frame 121: Packet, 178 bytes on wire (1424 bits), 178 bytes captured (1424 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 27017, Dst Port: 53113, Seq: 268, Ack: 422, Len: 122
+Mongo Wire Protocol
+    Message Length: 122
+    Request ID: 0x0000003e (62)
+    Response To: 0x0000000d (13)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 101
+            Elements
+                Element: ok
+                Element: errmsg
+                Element: code
+                Element: codeName
+
+No.     Time           Source                Destination           Protocol Length Info
+    123 18.677277      127.0.0.1             127.0.0.1             MONGO    159    Response : Extensible Message Format
+
+Frame 123: Packet, 159 bytes on wire (1272 bits), 159 bytes captured (1272 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 27017, Dst Port: 53114, Seq: 268, Ack: 573, Len: 103
+Mongo Wire Protocol
+    Message Length: 103
+    Request ID: 0x0000003f (63)
+    Response To: 0x0000000e (14)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 82
+            Elements
+                Element: cursor
+                Element: ok
+
+No.     Time           Source                Destination           Protocol Length Info
+    125 18.697593      127.0.0.1             127.0.0.1             MONGO    244    Request : Extensible Message Format
+
+Frame 125: Packet, 244 bytes on wire (1952 bits), 244 bytes captured (1952 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 53114, Dst Port: 27017, Seq: 573, Ack: 371, Len: 188
+Mongo Wire Protocol
+    Message Length: 188
+    Request ID: 0x0000000f (15)
+    Response To: 0x00000000 (0)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 167
+            Elements
+                Element: aggregate
+                Element: pipeline
+                Element: cursor
+                Element: lsid
+                Element: $db
+
+No.     Time           Source                Destination           Protocol Length Info
+    126 18.697605      127.0.0.1             127.0.0.1             MONGO    142    Request : Extensible Message Format
+
+Frame 126: Packet, 142 bytes on wire (1136 bits), 142 bytes captured (1136 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 53113, Dst Port: 27017, Seq: 422, Ack: 390, Len: 86
+Mongo Wire Protocol
+    Message Length: 86
+    Request ID: 0x00000010 (16)
+    Response To: 0x00000000 (0)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 65
+            Elements
+                Element: top
+                Element: lsid
+                Element: $db
+
+No.     Time           Source                Destination           Protocol Length Info
+    129 18.697665      127.0.0.1             127.0.0.1             MONGO    163    Request : Extensible Message Format
+
+Frame 129: Packet, 163 bytes on wire (1304 bits), 163 bytes captured (1304 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 53112, Dst Port: 27017, Seq: 517, Ack: 1895, Len: 107
+Mongo Wire Protocol
+    Message Length: 107
+    Request ID: 0x00000011 (17)
+    Response To: 0x00000000 (0)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 86
+            Elements
+                Element: listDatabases
+                Element: nameOnly
+                Element: lsid
+                Element: $db
+
+No.     Time           Source                Destination           Protocol Length Info
+    131 18.698068      127.0.0.1             127.0.0.1             MONGO    2858   Response : Extensible Message Format
+
+Frame 131: Packet, 2858 bytes on wire (22864 bits), 2858 bytes captured (22864 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 27017, Dst Port: 53113, Seq: 390, Ack: 508, Len: 2802
+Mongo Wire Protocol
+    Message Length: 2802
+    Request ID: 0x00000040 (64)
+    Response To: 0x00000010 (16)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 2781
+            Elements
+                Element: totals
+                Element: ok
+
+No.     Time           Source                Destination           Protocol Length Info
+    133 18.698184      127.0.0.1             127.0.0.1             MONGO    183    Response : Extensible Message Format
+
+Frame 133: Packet, 183 bytes on wire (1464 bits), 183 bytes captured (1464 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 27017, Dst Port: 53112, Seq: 1895, Ack: 624, Len: 127
+Mongo Wire Protocol
+    Message Length: 127
+    Request ID: 0x00000041 (65)
+    Response To: 0x00000011 (17)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 106
+            Elements
+                Element: databases
+                Element: ok
+
+No.     Time           Source                Destination           Protocol Length Info
+    135 18.698317      127.0.0.1             127.0.0.1             MONGO    2501   Response : Extensible Message Format
+
+Frame 135: Packet, 2501 bytes on wire (20008 bits), 2501 bytes captured (20008 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 27017, Dst Port: 53114, Seq: 371, Ack: 761, Len: 2445
+Mongo Wire Protocol
+    Message Length: 2445
+    Request ID: 0x00000042 (66)
+    Response To: 0x0000000f (15)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 2424
+            Elements
+                Element: cursor
+                Element: ok
+
+No.     Time           Source                Destination           Protocol Length Info
+    137 18.700544      127.0.0.1             127.0.0.1             MONGO    146    Request : Extensible Message Format
+
+Frame 137: Packet, 146 bytes on wire (1168 bits), 146 bytes captured (1168 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 53112, Dst Port: 27017, Seq: 624, Ack: 2022, Len: 90
+Mongo Wire Protocol
+    Message Length: 90
+    Request ID: 0x00000012 (18)
+    Response To: 0x00000000 (0)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 69
+            Elements
+                Element: dbStats
+                Element: lsid
+                Element: $db
+
+No.     Time           Source                Destination           Protocol Length Info
+    138 18.700553      127.0.0.1             127.0.0.1             MONGO    147    Request : Extensible Message Format
+
+Frame 138: Packet, 147 bytes on wire (1176 bits), 147 bytes captured (1176 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 53113, Dst Port: 27017, Seq: 508, Ack: 3192, Len: 91
+Mongo Wire Protocol
+    Message Length: 91
+    Request ID: 0x00000013 (19)
+    Response To: 0x00000000 (0)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 70
+            Elements
+                Element: dbStats
+                Element: lsid
+                Element: $db
+
+No.     Time           Source                Destination           Protocol Length Info
+    139 18.700563      127.0.0.1             127.0.0.1             MONGO    146    Request : Extensible Message Format
+
+Frame 139: Packet, 146 bytes on wire (1168 bits), 146 bytes captured (1168 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 53110, Dst Port: 27017, Seq: 663, Ack: 1917, Len: 90
+Mongo Wire Protocol
+    Message Length: 90
+    Request ID: 0x00000014 (20)
+    Response To: 0x00000000 (0)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 69
+            Elements
+                Element: dbStats
+                Element: lsid
+                Element: $db
+
+No.     Time           Source                Destination           Protocol Length Info
+    143 18.701175      127.0.0.1             127.0.0.1             MONGO    318    Response : Extensible Message Format
+
+Frame 143: Packet, 318 bytes on wire (2544 bits), 318 bytes captured (2544 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 27017, Dst Port: 53110, Seq: 1917, Ack: 753, Len: 262
+Mongo Wire Protocol
+    Message Length: 262
+    Request ID: 0x00000045 (69)
+    Response To: 0x00000014 (20)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 241
+            Elements
+                Element: db
+                Element: collections
+                Element: views
+                Element: objects
+                Element: avgObjSize
+                Element: dataSize
+                Element: storageSize
+                Element: numExtents
+                Element: indexes
+                Element: indexSize
+                Element: scaleFactor
+                Element: fsUsedSize
+                Element: fsTotalSize
+                Element: ok
+
+No.     Time           Source                Destination           Protocol Length Info
+    144 18.701176      127.0.0.1             127.0.0.1             MONGO    318    Response : Extensible Message Format
+
+Frame 144: Packet, 318 bytes on wire (2544 bits), 318 bytes captured (2544 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 27017, Dst Port: 53112, Seq: 2022, Ack: 714, Len: 262
+Mongo Wire Protocol
+    Message Length: 262
+    Request ID: 0x00000044 (68)
+    Response To: 0x00000012 (18)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 241
+            Elements
+                Element: db
+                Element: collections
+                Element: views
+                Element: objects
+                Element: avgObjSize
+                Element: dataSize
+                Element: storageSize
+                Element: numExtents
+                Element: indexes
+                Element: indexSize
+                Element: scaleFactor
+                Element: fsUsedSize
+                Element: fsTotalSize
+                Element: ok
+
+No.     Time           Source                Destination           Protocol Length Info
+    145 18.701176      127.0.0.1             127.0.0.1             MONGO    319    Response : Extensible Message Format
+
+Frame 145: Packet, 319 bytes on wire (2552 bits), 319 bytes captured (2552 bits) on interface lo0, id 0
+Null/Loopback
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 27017, Dst Port: 53113, Seq: 3192, Ack: 599, Len: 263
+Mongo Wire Protocol
+    Message Length: 263
+    Request ID: 0x00000043 (67)
+    Response To: 0x00000013 (19)
+    OpCode: Extensible Message Format (2013)
+    Message Flags: 0x00000000
+        .... .... .... .... .... .... .... ...0 = ChecksumPresent: No
+        .... .... .... .... .... .... .... ..0. = MoreToCome: No
+        .... .... .... ...0 .... .... .... .... = ExhaustAllowed: No
+    Section
+        Kind: Body (0)
+        BodyDocument
+            Document length: 242
+            Elements
+                Element: db
+                Element: collections
+                Element: views
+                Element: objects
+                Element: avgObjSize
+                Element: dataSize
+                Element: storageSize
+                Element: numExtents
+                Element: indexes
+                Element: indexSize
+                Element: scaleFactor
+                Element: fsUsedSize
+                Element: fsTotalSize
+                Element: ok
