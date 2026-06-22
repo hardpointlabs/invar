@@ -37,6 +37,10 @@ See the [compatibility](./COMPATIBILITY.md) docs for more details.
 
 ### Mongo driver compatibility
 
+We're still working on a stable release with Mongo wire protocol support; please create an [issue](https://github.com/hardpointlabs/invar/issues) if this is something you're interested in.
+
+---
+
 ## Design goals
 
 * Everything is persisted as keys in BadgerDB under the hood (a fast LSM-tree-based, ACID-compliant key store written in pure Go).
