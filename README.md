@@ -1,9 +1,10 @@
 # Invar
 
+![Logo](/logo.png)
+
 ![GitHub Release](https://img.shields.io/github/v/release/hardpointlabs/invar) ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/hardpointlabs/invar/release.yml)
 
-
-![Logo](/logo.png)
+---
 
 Invar is a lightweight durable document database. Its main goals are:
 
