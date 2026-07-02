@@ -3,15 +3,16 @@ module github.com/hardpointlabs/invar
 go 1.25.0
 
 require (
-	github.com/anishathalye/porcupine v1.2.0
+	github.com/alexflint/go-arg v1.6.1
+	github.com/anishathalye/porcupine v1.3.0
 	github.com/dgraph-io/badger/v4 v4.9.2
 	github.com/prometheus/client_golang v1.23.2
 	github.com/rs/zerolog v1.35.1
 	github.com/tidwall/redcon v1.6.2
+	golang.org/x/sync v0.21.0
 )
 
 require (
-	github.com/alexflint/go-arg v1.6.1 // indirect
 	github.com/alexflint/go-scalar v1.2.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -34,7 +35,6 @@ require (
 	go.opentelemetry.io/otel/metric v1.44.0 // indirect
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
-	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
