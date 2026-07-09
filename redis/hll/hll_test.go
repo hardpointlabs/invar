@@ -1,4 +1,4 @@
-package redis
+package hll
 
 import (
 	"testing"

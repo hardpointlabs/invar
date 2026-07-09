@@ -188,6 +188,8 @@ in this implementation.
 
 ## Pub/Sub commands
 
+**Note:** Like Redis, Pub/Sub commands sent to Invar are _not_ persisted and exist in memory only. They should therefore be treated as best-effort.
+
 | Command | Status | Notes |
 |---------|--------|-------|
 | PSUBSCRIBE | ✅ | |

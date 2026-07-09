@@ -158,10 +158,10 @@ func popcount(x byte) byte {
 
 func TestBitPos(t *testing.T) {
 	tests := []struct {
-		name      string
-		data      []byte
-		bit       int
-		want      int
+		name string
+		data []byte
+		bit  int
+		want int
 	}{
 		{"empty find 1", []byte{}, 1, -1},
 		{"all zeros find 0", []byte{0x00}, 0, 0},
@@ -187,10 +187,10 @@ func TestBitPosInRange(t *testing.T) {
 	data := []byte{0xFF, 0x00, 0xFF}
 
 	tests := []struct {
-		name         string
+		name             string
 		startBit, endBit int
-		bit          int
-		want         int
+		bit              int
+		want             int
 	}{
 		{"find 1 in first byte", 0, 7, 1, 0},
 		{"find 0 in first byte", 0, 7, 0, -1},

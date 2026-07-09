@@ -1,24 +1,27 @@
-package redis
+package hll
 
 import (
 	"encoding/binary"
+	"log"
 	"math"
 	"math/bits"
 
-	"github.com/dgraph-io/badger/v4"
+	"github.com/hardpointlabs/invar/kv"
+	"github.com/hardpointlabs/invar/redis/common"
+	"github.com/tidwall/redcon"
 )
 
 const (
-	HLL_P           = 14
-	HLL_Q           = 64 - HLL_P
-	HLL_REGISTERS   = 1 << HLL_P
-	HLL_P_MASK      = HLL_REGISTERS - 1
-	HLL_BITS        = 6
+	HLL_P            = 14
+	HLL_Q            = 64 - HLL_P
+	HLL_REGISTERS    = 1 << HLL_P
+	HLL_P_MASK       = HLL_REGISTERS - 1
+	HLL_BITS         = 6
 	HLL_REGISTER_MAX = (1 << HLL_BITS) - 1
-	HLL_HDR_SIZE    = 16
-	HLL_DENSE_SIZE  = HLL_HDR_SIZE + (HLL_REGISTERS*HLL_BITS+7)/8
-	HLL_DENSE       = 0
-	HLL_ALPHA_INF   = 0.721347520444481703680
+	HLL_HDR_SIZE     = 16
+	HLL_DENSE_SIZE   = HLL_HDR_SIZE + (HLL_REGISTERS*HLL_BITS+7)/8
+	HLL_DENSE        = 0
+	HLL_ALPHA_INF    = 0.721347520444481703680
 )
 
 func createHLL() []byte {
@@ -252,7 +255,7 @@ func hllCount(data []byte) uint64 {
 		z += float64(reghisto[j])
 		z *= 0.5
 	}
-	z += m * hllSigma(float64(reghisto[0]) / m)
+	z += m * hllSigma(float64(reghisto[0])/m)
 	count := uint64(math.Round(HLL_ALPHA_INF * m * m / z))
 
 	hllSetCachedCount(data, count)
@@ -279,114 +282,156 @@ func hllRawToDense(destDense []byte, raw []byte) {
 	hllInvalidateCache(destDense)
 }
 
-func pfadd(txn *badger.Txn, dbSlot int, key []byte, elements ...[]byte) (int, error) {
+func Pfadd(session *common.Session, key []byte, elements ...[]byte) kv.QueuedOp {
+	log.Println("About to call CDB 3")
+	log.Printf("CDB3: %d\n", session.CurrentDB())
+	dbOp := func(tx kv.Tx) (any, error) {
+		log.Println("About to call CDB 4")
 
-	var hllData []byte
-	item, err := txn.Get(rawKeyPrefix(key, dbSlot))
-	if err == badger.ErrKeyNotFound {
-		hllData = createHLL()
-	} else if err != nil {
-		return 0, err
-	} else {
-		hllData, err = copyItemValue(item)
-		if err != nil {
+		log.Printf("CDB4: %d\n", session.CurrentDB())
+		var hllData []byte
+		item, err := tx.Get(session.PublicKey(key))
+		if err == kv.ErrKeyNotFound {
+			hllData = createHLL()
+		} else if err != nil {
 			return 0, err
+		} else {
+			hllData, err = item.Value()
+			if err != nil {
+				return 0, err
+			}
 		}
-	}
 
-	if !isValidHLL(hllData) {
-		return 0, nil
-	}
-
-	registers := hllData[HLL_HDR_SIZE:]
-	updated := 0
-	for _, ele := range elements {
-		if hllDenseAdd(registers, ele) {
-			updated = 1
-		}
-	}
-
-	if updated == 1 {
-		hllInvalidateCache(hllData)
-		entry := badger.NewEntry(rawKeyPrefix(key, dbSlot), hllData).WithMeta(byte(RedisString))
-		if err := txn.SetEntry(entry); err != nil {
-			return 0, err
-		}
-	}
-
-	return updated, nil
-}
-
-func pfcount(txn *badger.Txn, dbSlot int, keys ...[]byte) (uint64, error) {
-
-	if len(keys) == 0 {
-		return 0, nil
-	}
-
-	if len(keys) == 1 {
-		item, err := txn.Get(rawKeyPrefix(keys[0], dbSlot))
-		if err == badger.ErrKeyNotFound {
+		if !isValidHLL(hllData) {
 			return 0, nil
 		}
-		if err != nil {
-			return 0, err
+
+		registers := hllData[HLL_HDR_SIZE:]
+		updated := 0
+		for _, ele := range elements {
+			if hllDenseAdd(registers, ele) {
+				updated = 1
+			}
 		}
-		valCopy, err := copyItemValue(item)
-		if err != nil {
-			return 0, err
+
+		if updated == 1 {
+			hllInvalidateCache(hllData)
+			entry := session.NewPublicEntry(key, hllData).Metadata(byte(common.RedisString))
+			if err := tx.Set(entry); err != nil {
+				return 0, err
+			}
 		}
-		if !isValidHLL(valCopy) {
-			return 0, nil
-		}
-		return hllCount(valCopy), nil
+
+		return updated, nil
+
 	}
 
-	raw := make([]byte, HLL_REGISTERS)
-	for _, key := range keys {
-		item, err := txn.Get(rawKeyPrefix(key, dbSlot))
-		if err == badger.ErrKeyNotFound {
-			continue
-		}
+	wireOp := func(conn redcon.Conn, result any, err error) {
 		if err != nil {
-			return 0, err
+			conn.WriteError("ERR " + err.Error())
+			return
 		}
-		valCopy, err := copyItemValue(item)
-		if err != nil {
-			return 0, err
-		}
-		if !isValidHLL(valCopy) {
-			continue
-		}
-		hllMergeToRaw(raw, valCopy)
+		var added = result.(int)
+		conn.WriteInt(added)
 	}
 
-	dense := createHLL()
-	hllRawToDense(dense, raw)
-	return hllCount(dense), nil
+	return kv.QueuedOp{DbOp: dbOp, WireOp: wireOp, IsMutating: true}
 }
 
-func pfmerge(txn *badger.Txn, dbSlot int, dest []byte, sources ...[]byte) error {
+func Pfcount(session *common.Session, keys ...[]byte) kv.QueuedOp {
+	dbOp := func(tx kv.Tx) (any, error) {
+		if len(keys) == 0 {
+			return 0, nil
+		}
 
-	raw := make([]byte, HLL_REGISTERS)
-	for _, key := range sources {
-		item, err := txn.Get(rawKeyPrefix(key, dbSlot))
-		if err == badger.ErrKeyNotFound {
-			continue
+		if len(keys) == 1 {
+			item, err := tx.Get(session.PublicKey(keys[0]))
+			if err == kv.ErrKeyNotFound {
+				return 0, nil
+			}
+			if err != nil {
+				return 0, err
+			}
+			valCopy, err := item.Value()
+			if err != nil {
+				return 0, err
+			}
+			if !isValidHLL(valCopy) {
+				return 0, nil
+			}
+			return hllCount(valCopy), nil
 		}
-		if err != nil {
-			return err
+
+		raw := make([]byte, HLL_REGISTERS)
+		for _, key := range keys {
+			item, err := tx.Get(session.PublicKey(key))
+			if err == kv.ErrKeyNotFound {
+				continue
+			}
+			if err != nil {
+				return 0, err
+			}
+			valCopy, err := item.Value()
+			if err != nil {
+				return 0, err
+			}
+			if !isValidHLL(valCopy) {
+				continue
+			}
+			hllMergeToRaw(raw, valCopy)
 		}
-		valCopy, err := copyItemValue(item)
-		if err != nil {
-			return err
-		}
-		if !isValidHLL(valCopy) {
-			continue
-		}
-		hllMergeToRaw(raw, valCopy)
+
+		dense := createHLL()
+		hllRawToDense(dense, raw)
+		return hllCount(dense), nil
 	}
 
-	dense := createHLL()
-	hllRawToDense(dense, raw)
-	return txn.SetEntry(badger.NewEntry(rawKeyPrefix(dest, dbSlot), dense).WithMeta(byte(RedisString)))
+	wireOp := func(conn redcon.Conn, result any, err error) {
+		if err != nil {
+			conn.WriteError("ERR " + err.Error())
+			return
+		}
+		count := result.(int64)
+		conn.WriteInt64(count)
+	}
+	return kv.QueuedOp{DbOp: dbOp, WireOp: wireOp, IsMutating: false}
+}
+
+func Pfmerge(session *common.Session, dest []byte, sources ...[]byte) kv.QueuedOp {
+	dbOp := func(tx kv.Tx) (any, error) {
+		raw := make([]byte, HLL_REGISTERS)
+		for _, key := range sources {
+			item, err := tx.Get(key)
+			if err == kv.ErrKeyNotFound {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			valCopy, err := item.Value()
+			if err != nil {
+				return nil, err
+			}
+			if !isValidHLL(valCopy) {
+				continue
+			}
+			hllMergeToRaw(raw, valCopy)
+		}
+
+		dense := createHLL()
+		hllRawToDense(dense, raw)
+		tx.Set(session.NewPublicEntry(dest, dense).Metadata(byte(common.RedisString)))
+		// No value to return from PFMERGE
+		return nil, nil
+	}
+
+	wireOp := func(conn redcon.Conn, val any, err error) {
+		if err != nil {
+			conn.WriteError("ERR " + err.Error())
+			return
+		}
+		conn.WriteString("OK")
+	}
+
+	return kv.QueuedOp{DbOp: dbOp, WireOp: wireOp}
 }

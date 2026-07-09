@@ -8,6 +8,59 @@ import (
 	"github.com/tidwall/redcon"
 )
 
+func getKeys(conn redcon.Conn, db *badger.DB, keys ...[]byte) {
+	conn.WriteArray(len(keys))
+	_ = db.View(func(txn *badger.Txn) error {
+		for _, key := range keys {
+			item, err := txn.Get(rawKeyPrefix(key, currentDb(conn)))
+			if err != nil {
+				conn.WriteNull()
+				continue
+			}
+			valCopy, err := copyItemValue(item)
+			if err != nil {
+				conn.WriteError("ERR " + err.Error())
+				return err
+			}
+			conn.WriteBulk(valCopy)
+		}
+		return nil
+	})
+}
+
+func moveKey(conn redcon.Conn, db *badger.DB, key []byte, targetDb int) {
+	_ = db.Update(func(txn *badger.Txn) error {
+		item, err := txn.Get(rawKeyPrefix(key, currentDb(conn)))
+		if err != nil {
+			conn.WriteInt(0)
+			return nil
+		}
+		valCopy, err := copyItemValue(item)
+		if err != nil {
+			conn.WriteError("ERR " + err.Error())
+			return err
+		}
+
+		// Set the new key
+		e := badger.NewEntry(rawKeyPrefix(key, targetDb), valCopy).WithMeta(item.UserMeta())
+		err = txn.SetEntry(e)
+		if err != nil {
+			conn.WriteError("ERR " + err.Error())
+			return err
+		}
+
+		// Delete the old key
+		err = txn.Delete(rawKeyPrefix(key, currentDb(conn)))
+		if err != nil {
+			conn.WriteError("ERR " + err.Error())
+			return err
+		}
+
+		conn.WriteInt(1)
+		return nil
+	})
+}
+
 func existsKeys(conn redcon.Conn, db *badger.DB, keys ...[]byte) {
 	var count = 0
 	err := db.View(func(txn *badger.Txn) error {
@@ -246,4 +299,3 @@ func renameNXKey(conn redcon.Conn, db *badger.DB, oldKey, newKey []byte) {
 		return nil
 	})
 }
-
