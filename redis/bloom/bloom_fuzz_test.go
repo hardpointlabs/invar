@@ -1,10 +1,10 @@
-package redis
+package bloom
 
 import (
 	"testing"
 	"testing/quick"
 
-	"github.com/dgraph-io/badger/v4"
+	"github.com/hardpointlabs/invar/kv"
 )
 
 // ---------------------------------------------------------------------------
@@ -53,24 +53,23 @@ func TestBloomAddExistsNoFalseNegative(t *testing.T) {
 		if len(item) == 0 {
 			return true
 		}
-		db := inMemDB(t)
-		defer db.Close()
+		session, kvs := newTestSession(t)
 
-		err := db.Update(func(txn *badger.Txn) error {
-			_, err := bfadd(txn, 0, []byte("bf"), []byte(item))
+		err := kvs.Update(func(tx kv.Tx) error {
+			_, err := Bfadd(session, []byte("bf"), []byte(item)).DbOp(tx)
 			return err
 		})
 		if err != nil {
 			return false
 		}
 
-		var exists bool
-		db.View(func(txn *badger.Txn) error {
-			var err error
-			exists, err = bfexists(txn, 0, []byte("bf"), []byte(item))
-			return err
+		val, err := kvs.Read(func(tx kv.Tx) (any, error) {
+			return Bfexists(session, []byte("bf"), []byte(item)).DbOp(tx)
 		})
-		return exists
+		if err != nil {
+			return false
+		}
+		return val.(bool)
 	}
 	if err := quick.Check(f, nil); err != nil {
 		t.Error(err)
@@ -87,18 +86,22 @@ func TestBloomAddDuplicateReturnsZero(t *testing.T) {
 		if len(item) == 0 {
 			return true
 		}
-		db := inMemDB(t)
-		defer db.Close()
+		session, kvs := newTestSession(t)
 
 		var r1, r2 int
-		err := db.Update(func(txn *badger.Txn) error {
-			var err error
-			r1, err = bfadd(txn, 0, []byte("bf"), []byte(item))
+		err := kvs.Update(func(tx kv.Tx) error {
+			val, err := Bfadd(session, []byte("bf"), []byte(item)).DbOp(tx)
 			if err != nil {
 				return err
 			}
-			r2, err = bfadd(txn, 0, []byte("bf"), []byte(item))
-			return err
+			r1 = val.(int)
+
+			val, err = Bfadd(session, []byte("bf"), []byte(item)).DbOp(tx)
+			if err != nil {
+				return err
+			}
+			r2 = val.(int)
+			return nil
 		})
 		if err != nil {
 			return false
@@ -119,8 +122,7 @@ func TestBloomMAddMExistsConsistency(t *testing.T) {
 		if len(items) == 0 {
 			return true
 		}
-		db := inMemDB(t)
-		defer db.Close()
+		session, kvs := newTestSession(t)
 
 		byteItems := make([][]byte, len(items))
 		for i, item := range items {
@@ -128,10 +130,13 @@ func TestBloomMAddMExistsConsistency(t *testing.T) {
 		}
 
 		var addResults []int
-		err := db.Update(func(txn *badger.Txn) error {
-			var err error
-			addResults, err = bfmadd(txn, 0, []byte("bf"), byteItems)
-			return err
+		err := kvs.Update(func(tx kv.Tx) error {
+			val, err := Bfmadd(session, []byte("bf"), byteItems).DbOp(tx)
+			if err != nil {
+				return err
+			}
+			addResults = val.([]int)
+			return nil
 		})
 		if err != nil {
 			return false
@@ -143,12 +148,13 @@ func TestBloomMAddMExistsConsistency(t *testing.T) {
 			}
 		}
 
-		var existsResults []int
-		db.View(func(txn *badger.Txn) error {
-			var err error
-			existsResults, err = bfmexists(txn, 0, []byte("bf"), byteItems)
-			return err
+		val, err := kvs.Read(func(tx kv.Tx) (any, error) {
+			return Bfmexists(session, []byte("bf"), byteItems).DbOp(tx)
 		})
+		if err != nil {
+			return false
+		}
+		existsResults := val.([]int)
 
 		for _, r := range existsResults {
 			if r != 1 {

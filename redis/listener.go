@@ -12,6 +12,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/hardpointlabs/invar/config"
 	"github.com/hardpointlabs/invar/kv"
+	"github.com/hardpointlabs/invar/redis/bloom"
 	"github.com/hardpointlabs/invar/redis/common"
 	"github.com/hardpointlabs/invar/redis/hll"
 	"github.com/rs/zerolog/log"
@@ -2091,89 +2092,32 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 				nonScaling = true
 			}
 		}
-		err := db.Update(func(txn *badger.Txn) error {
-			return bfreserve(txn, currentDb(conn), cmd.Args[1], errRate, uint64(capacity), expansion, nonScaling)
-		})
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return
-		}
-		conn.WriteString("OK")
+		session.EnqueueOp(bloom.Bfreserve(session, cmd.Args[1], errRate, uint64(capacity), expansion, nonScaling))
 	case "bf.add":
 		if !checkExactArgs(conn, cmd, 3) {
 			return
 		}
-		var added int
-		err := db.Update(func(txn *badger.Txn) error {
-			var err error
-			added, err = bfadd(txn, currentDb(conn), cmd.Args[1], cmd.Args[2])
-			return err
-		})
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return
-		}
-		conn.WriteInt(added)
+		session.EnqueueOp(bloom.Bfadd(session, cmd.Args[1], cmd.Args[2]))
 	case "bf.exists":
 		if !checkExactArgs(conn, cmd, 3) {
 			return
 		}
-		var exists bool
-		err := db.View(func(txn *badger.Txn) error {
-			var err error
-			exists, err = bfexists(txn, currentDb(conn), cmd.Args[1], cmd.Args[2])
-			return err
-		})
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return
-		}
-		if exists {
-			conn.WriteInt(1)
-		} else {
-			conn.WriteInt(0)
-		}
+		session.EnqueueOp(bloom.Bfexists(session, cmd.Args[1], cmd.Args[2]))
 	case "bf.madd":
 		if !checkMinArgs(conn, cmd, 3) {
 			return
 		}
-		var results []int
-		err := db.Update(func(txn *badger.Txn) error {
-			var err error
-			results, err = bfmadd(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:])
-			return err
-		})
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return
-		}
-		conn.WriteArray(len(results))
-		for _, r := range results {
-			conn.WriteInt(r)
-		}
+		session.EnqueueOp(bloom.Bfmadd(session, cmd.Args[1], cmd.Args[2:]))
 	case "bf.mexists":
 		if !checkMinArgs(conn, cmd, 3) {
 			return
 		}
-		var results []int
-		err := db.View(func(txn *badger.Txn) error {
-			var err error
-			results, err = bfmexists(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:])
-			return err
-		})
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return
-		}
-		conn.WriteArray(len(results))
-		for _, r := range results {
-			conn.WriteInt(r)
-		}
+		session.EnqueueOp(bloom.Bfmexists(session, cmd.Args[1], cmd.Args[2:]))
 	case "bf.insert":
 		if !checkMinArgs(conn, cmd, 3) {
 			return
 		}
-		info := &bfInsertInfo{}
+		info := &bloom.InsertInfo{}
 		i := 2
 		for i < len(cmd.Args) {
 			arg := strings.ToLower(string(cmd.Args[i]))
@@ -2216,44 +2160,12 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 			conn.WriteError("ERR ITEMS argument required")
 			return
 		}
-		var results []int
-		err := db.Update(func(txn *badger.Txn) error {
-			var err error
-			results, err = bfinsert(txn, currentDb(conn), cmd.Args[1], info)
-			return err
-		})
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return
-		}
-		conn.WriteArray(len(results))
-		for _, r := range results {
-			conn.WriteInt(r)
-		}
+		session.EnqueueOp(bloom.Bfinsert(session, cmd.Args[1], info))
 	case "bf.info":
 		if !checkExactArgs(conn, cmd, 2) {
 			return
 		}
-		db.View(func(txn *badger.Txn) error {
-			info, err := bfinfo(txn, currentDb(conn), cmd.Args[1])
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			conn.WriteArray(len(info) * 2)
-			for k, v := range info {
-				conn.WriteBulkString(k)
-				switch val := v.(type) {
-				case int:
-					conn.WriteInt64(int64(val))
-				case uint64:
-					conn.WriteInt64(int64(val))
-				default:
-					conn.WriteString(fmt.Sprintf("%v", val))
-				}
-			}
-			return nil
-		})
+		session.EnqueueOp(bloom.Bfinfo(session, cmd.Args[1]))
 	case "json.set":
 		handleJSONSet(conn, db, cmd)
 	case "json.get":

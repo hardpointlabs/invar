@@ -146,6 +146,10 @@ func (s *Session) NewPublicEntry(key []byte, value []byte) kv.Entry {
 	return s.kvs.NewEntry(s.PublicKey(key), value)
 }
 
+func (s *Session) NewPrivateEntry(key []byte, value []byte) kv.Entry {
+	return s.kvs.NewEntry(s.PrivateKey(key), value)
+}
+
 func (s *Session) currentDbPrefix() []byte {
 	return []byte(strconv.Itoa(s.CurrentDB()) + prefixSeparator)
 }
