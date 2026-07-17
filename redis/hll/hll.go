@@ -2,7 +2,6 @@ package hll
 
 import (
 	"encoding/binary"
-	"log"
 	"math"
 	"math/bits"
 
@@ -283,12 +282,7 @@ func hllRawToDense(destDense []byte, raw []byte) {
 }
 
 func Pfadd(session *common.Session, key []byte, elements ...[]byte) kv.QueuedOp {
-	log.Println("About to call CDB 3")
-	log.Printf("CDB3: %d\n", session.CurrentDB())
 	dbOp := func(tx kv.Tx) (any, error) {
-		log.Println("About to call CDB 4")
-
-		log.Printf("CDB4: %d\n", session.CurrentDB())
 		var hllData []byte
 		item, err := tx.Get(session.PublicKey(key))
 		if err == kv.ErrKeyNotFound {
@@ -341,23 +335,23 @@ func Pfadd(session *common.Session, key []byte, elements ...[]byte) kv.QueuedOp 
 func Pfcount(session *common.Session, keys ...[]byte) kv.QueuedOp {
 	dbOp := func(tx kv.Tx) (any, error) {
 		if len(keys) == 0 {
-			return 0, nil
+			return uint64(0), nil
 		}
 
 		if len(keys) == 1 {
 			item, err := tx.Get(session.PublicKey(keys[0]))
 			if err == kv.ErrKeyNotFound {
-				return 0, nil
+				return uint64(0), nil
 			}
 			if err != nil {
-				return 0, err
+				return uint64(0), err
 			}
 			valCopy, err := item.Value()
 			if err != nil {
-				return 0, err
+				return uint64(0), err
 			}
 			if !isValidHLL(valCopy) {
-				return 0, nil
+				return uint64(0), nil
 			}
 			return hllCount(valCopy), nil
 		}
@@ -369,11 +363,11 @@ func Pfcount(session *common.Session, keys ...[]byte) kv.QueuedOp {
 				continue
 			}
 			if err != nil {
-				return 0, err
+				return uint64(0), err
 			}
 			valCopy, err := item.Value()
 			if err != nil {
-				return 0, err
+				return uint64(0), err
 			}
 			if !isValidHLL(valCopy) {
 				continue
@@ -391,8 +385,8 @@ func Pfcount(session *common.Session, keys ...[]byte) kv.QueuedOp {
 			conn.WriteError("ERR " + err.Error())
 			return
 		}
-		count := result.(int64)
-		conn.WriteInt64(count)
+		count := result.(uint64)
+		conn.WriteInt64(int64(count))
 	}
 	return kv.QueuedOp{DbOp: dbOp, WireOp: wireOp, IsMutating: false}
 }
@@ -401,7 +395,7 @@ func Pfmerge(session *common.Session, dest []byte, sources ...[]byte) kv.QueuedO
 	dbOp := func(tx kv.Tx) (any, error) {
 		raw := make([]byte, HLL_REGISTERS)
 		for _, key := range sources {
-			item, err := tx.Get(key)
+			item, err := tx.Get(session.PublicKey(key))
 			if err == kv.ErrKeyNotFound {
 				continue
 			}
@@ -433,5 +427,5 @@ func Pfmerge(session *common.Session, dest []byte, sources ...[]byte) kv.QueuedO
 		conn.WriteString("OK")
 	}
 
-	return kv.QueuedOp{DbOp: dbOp, WireOp: wireOp}
+	return kv.QueuedOp{DbOp: dbOp, WireOp: wireOp, IsMutating: true}
 }

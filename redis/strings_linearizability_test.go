@@ -29,12 +29,12 @@ import (
 	"net"
 	"sort"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/anishathalye/porcupine"
 	"github.com/dgraph-io/badger/v4"
+	"github.com/hardpointlabs/invar/redis/common"
 	"github.com/tidwall/redcon"
 )
 
@@ -54,14 +54,8 @@ type mockConn struct {
 
 func newMockConn() *mockConn {
 	c := &mockConn{}
-	c.ctx = &ClientInfo{Id: uniqueID()}
+	c.ctx = common.NewSession(nil)
 	return c
-}
-
-var connIDCounter uint64
-
-func uniqueID() uint64 {
-	return atomic.AddUint64(&connIDCounter, 1)
 }
 
 func (c *mockConn) result() (value string, isNull bool, isErr bool) {

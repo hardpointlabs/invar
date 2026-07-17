@@ -11,6 +11,7 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/hardpointlabs/invar/config"
+	"github.com/hardpointlabs/invar/kv"
 	"github.com/hardpointlabs/invar/redis/common"
 	"github.com/hardpointlabs/invar/redis/hll"
 	"github.com/rs/zerolog/log"
@@ -102,11 +103,11 @@ func writeBulkArray(conn redcon.Conn, items [][]byte) {
 	}
 }
 
-func upsertSession(conn redcon.Conn) *common.Session {
+func upsertSession(conn redcon.Conn, kvs kv.KeyValueStore) *common.Session {
 	if ctx := conn.Context(); ctx != nil {
 		return ctx.(*common.Session)
 	}
-	session := common.NewSession()
+	session := common.NewSession(kvs)
 	conn.SetContext(session)
 	return session
 }
@@ -2314,10 +2315,11 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 
 func serve(ln net.Listener, db *badger.DB) error {
 	var ps redcon.PubSub
+	kvs := kv.WrapBadger(db)
 	log.Info().Msgf("started RESP protocol listener at %s", addr)
 	err := redcon.Serve(ln,
 		func(conn redcon.Conn, cmd redcon.Command) {
-			session := upsertSession(conn)
+			session := upsertSession(conn, kvs)
 			dispatchCommand(session, conn, cmd, db, &ps)
 		},
 		func(conn redcon.Conn) bool {

@@ -1,7 +1,6 @@
 package hll
 
 import (
-	"log"
 	"testing"
 	"testing/quick"
 
@@ -96,15 +95,11 @@ func FuzzHLLCount(f *testing.F) {
 	})
 }
 
-func DBTestEnvironment(t *testing.T, fn func(session *common.Session, kvs kv.KeyValueStore)) {
-	var session *common.Session
-	session = common.NewSession()
+func newTestSession(t *testing.T) (*common.Session, kv.KeyValueStore) {
 	kvs := kv.InMemoryBadger(t)
-	defer kvs.Close()
-
-	log.Printf("CDB: %d\n", session.CurrentDB())
-
-	fn(session, kvs)
+	t.Cleanup(func() { kvs.Close() })
+	session := common.NewSession(kvs)
+	return session, kvs
 }
 
 // ---------------------------------------------------------------------------
@@ -112,53 +107,47 @@ func DBTestEnvironment(t *testing.T, fn func(session *common.Session, kvs kv.Key
 // ---------------------------------------------------------------------------
 
 func TestHLLPFAddPFCountSanity(t *testing.T) {
-	DBTestEnvironment(t, func(session *common.Session, kvs kv.KeyValueStore) {
-		log.Printf("CDB: %d\n", session.CurrentDB())
-		f := func(items []string) bool {
-			if len(items) == 0 {
-				return true
-			}
-			kvs := kv.InMemoryBadger(t)
-			defer kvs.Close()
-
-			err := kvs.Update(func(tx kv.Tx) error {
-				for _, item := range items {
-					op := Pfadd(nil, []byte("hll"), []byte(item)).DbOp
-					r, err := op(tx)
-					if err != nil {
-						return err
-					}
-					if r != 0 && r != 1 {
-						return nil
-					}
-				}
-				return nil
-			})
-			if err != nil {
-				return false
-			}
-
-			val, err := kvs.Read(func(tx kv.Tx) (any, error) {
-				op := Pfcount(session, []byte("hll")).DbOp
-				count, err := op(tx)
+	f := func(items []string) bool {
+		if len(items) == 0 {
+			return true
+		}
+		session, kvs := newTestSession(t)
+		err := kvs.Update(func(tx kv.Tx) error {
+			for _, item := range items {
+				op := Pfadd(session, []byte("hll"), []byte(item)).DbOp
+				r, err := op(tx)
 				if err != nil {
-					return nil, err
+					return err
 				}
-				return count, nil
-			})
-
-			if err != nil {
-				return false
+				if r != 0 && r != 1 {
+					return nil
+				}
 			}
-
-			count := val.(uint64)
-			return count <= uint64(len(items))*2+100
-		}
-		if err := quick.Check(f, nil); err != nil {
-			t.Error(err)
+			return nil
+		})
+		if err != nil {
+			return false
 		}
 
-	})
+		val, err := kvs.Read(func(tx kv.Tx) (any, error) {
+			op := Pfcount(session, []byte("hll")).DbOp
+			count, err := op(tx)
+			if err != nil {
+				return nil, err
+			}
+			return count, nil
+		})
+
+		if err != nil {
+			return false
+		}
+
+		count := val.(uint64)
+		return count <= uint64(len(items))*2+100
+	}
+	if err := quick.Check(f, nil); err != nil {
+		t.Error(err)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -166,39 +155,38 @@ func TestHLLPFAddPFCountSanity(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHLLPFAddDuplicate(t *testing.T) {
-	DBTestEnvironment(t, func(session *common.Session, kvs kv.KeyValueStore) {
-		f := func(item string) bool {
-			if len(item) == 0 {
-				return true
-			}
+	f := func(item string) bool {
+		if len(item) == 0 {
+			return true
+		}
+		session, kvs := newTestSession(t)
 
-			var r1, r2 int
-			err := kvs.Update(func(tx kv.Tx) error {
-				var err error
-				op1 := Pfadd(session, []byte("hll"), []byte(item)).DbOp
-				val, err := op1(tx)
-				if err != nil {
-					return err
-				}
-				r1 = val.(int)
-
-				op2 := Pfadd(session, []byte("hll"), []byte(item)).DbOp
-				val, err = op2(tx)
-				if err != nil {
-					return err
-				}
-				r2 = val.(int)
-				return err
-			})
+		var r1, r2 int
+		err := kvs.Update(func(tx kv.Tx) error {
+			var err error
+			op1 := Pfadd(session, []byte("hll"), []byte(item)).DbOp
+			val, err := op1(tx)
 			if err != nil {
-				return false
+				return err
 			}
-			return r1 == 1 && r2 == 0
+			r1 = val.(int)
+
+			op2 := Pfadd(session, []byte("hll"), []byte(item)).DbOp
+			val, err = op2(tx)
+			if err != nil {
+				return err
+			}
+			r2 = val.(int)
+			return err
+		})
+		if err != nil {
+			return false
 		}
-		if err := quick.Check(f, nil); err != nil {
-			t.Error(err)
-		}
-	})
+		return r1 == 1 && r2 == 0
+	}
+	if err := quick.Check(f, nil); err != nil {
+		t.Error(err)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -206,58 +194,62 @@ func TestHLLPFAddDuplicate(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHLLMergeGreaterOrEqual(t *testing.T) {
-	DBTestEnvironment(t, func(session *common.Session, kvs kv.KeyValueStore) {
-		f := func(aItems, bItems []string) bool {
-			if len(aItems) == 0 || len(bItems) == 0 {
-				return true
-			}
-
-			kvs.Update(func(tx kv.Tx) error {
-				for _, item := range aItems {
-					Pfadd(session, []byte("hll_a"), []byte(item))
-				}
-				for _, item := range bItems {
-					Pfadd(session, []byte("hll_b"), []byte(item))
-				}
-				return nil
-			})
-
-			var countA, countB uint64
-			kvs.Read(func(tx kv.Tx) (any, error) {
-				var err error
-				opA := Pfcount(session, []byte("hll_a")).DbOp
-				val, err := opA(tx)
-				countA = val.(uint64)
-				if err != nil {
-					return nil, err
-				}
-				opB := Pfcount(session, []byte("hll_b")).DbOp
-				val, err = opB(tx)
-				countB = val.(uint64)
-				return nil, err
-			})
-
-			kvs.Update(func(tx kv.Tx) error {
-				op := Pfmerge(session, []byte("hll_merged"), []byte("hll_a"), []byte("hll_b")).DbOp
-				_, err := op(tx)
-				return err
-			})
-
-			var countMerged uint64
-			kvs.Read(func(tx kv.Tx) (any, error) {
-				op := Pfcount(session, []byte("hll_merged")).DbOp
-				_, err := op(tx)
-				return nil, err
-			})
-
-			maxCount := countA
-			if countB > maxCount {
-				maxCount = countB
-			}
-			return countMerged >= maxCount
+	f := func(aItems, bItems []string) bool {
+		if len(aItems) == 0 || len(bItems) == 0 {
+			return true
 		}
-		if err := quick.Check(f, nil); err != nil {
-			t.Error(err)
+		session, kvs := newTestSession(t)
+
+		kvs.Update(func(tx kv.Tx) error {
+			for _, item := range aItems {
+				if _, err := Pfadd(session, []byte("hll_a"), []byte(item)).DbOp(tx); err != nil {
+					return err
+				}
+			}
+			for _, item := range bItems {
+				if _, err := Pfadd(session, []byte("hll_b"), []byte(item)).DbOp(tx); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+
+		var countA, countB uint64
+		kvs.Read(func(tx kv.Tx) (any, error) {
+			var err error
+			opA := Pfcount(session, []byte("hll_a")).DbOp
+			val, err := opA(tx)
+			countA = val.(uint64)
+			if err != nil {
+				return nil, err
+			}
+			opB := Pfcount(session, []byte("hll_b")).DbOp
+			val, err = opB(tx)
+			countB = val.(uint64)
+			return nil, err
+		})
+
+		kvs.Update(func(tx kv.Tx) error {
+			op := Pfmerge(session, []byte("hll_merged"), []byte("hll_a"), []byte("hll_b")).DbOp
+			_, err := op(tx)
+			return err
+		})
+
+		var countMerged uint64
+		kvs.Read(func(tx kv.Tx) (any, error) {
+			op := Pfcount(session, []byte("hll_merged")).DbOp
+			val, err := op(tx)
+			countMerged = val.(uint64)
+			return nil, err
+		})
+
+		maxCount := countA
+		if countB > maxCount {
+			maxCount = countB
 		}
-	})
+		return countMerged >= maxCount
+	}
+	if err := quick.Check(f, nil); err != nil {
+		t.Error(err)
+	}
 }

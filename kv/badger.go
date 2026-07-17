@@ -21,28 +21,29 @@ type badgerKvImpl struct {
 	db *badger.DB
 }
 
-func (b badgerKvImpl) NewEntry() Entry {
-	return nil
+func (b badgerKvImpl) NewEntry(key []byte, value []byte) Entry {
+	return &badgerEntry{e: badger.NewEntry(key, value), key: key, val: value}
 }
 
 func (b badgerKvImpl) Begin(mutating bool) Tx {
-	return nil
+	return &badgerTx{tx: b.db.NewTransaction(mutating)}
 }
 
 func (b badgerKvImpl) Update(fn func(tx Tx) error) error {
-	b.db.Update(func(txn *badger.Txn) error {
+	return b.db.Update(func(txn *badger.Txn) error {
 		return fn(&badgerTx{tx: txn})
 	})
-	return nil
 }
 
 func (b badgerKvImpl) Read(fn func(tx Tx) (any, error)) (any, error) {
+	var result any
 	err := b.db.View(func(txn *badger.Txn) error {
 		badgerTx := &badgerTx{tx: txn}
-		_, err := fn(badgerTx)
+		val, err := fn(badgerTx)
+		result = val
 		return err
 	})
-	return nil, err
+	return result, err
 }
 
 func (b badgerKvImpl) Badger() *badger.DB {
@@ -86,16 +87,18 @@ type badgerEntry struct {
 	val []byte
 }
 
-func (e badgerEntry) Key() []byte {
+func (e *badgerEntry) Key() []byte {
 	return e.key
 }
 
-func (e badgerEntry) Metadata(data byte) Entry {
-	return nil
+func (e *badgerEntry) Metadata(data byte) Entry {
+	e.e = e.e.WithMeta(data)
+	return e
 }
 
-func (e badgerEntry) TTL(duration time.Duration) Entry {
-	return nil
+func (e *badgerEntry) TTL(duration time.Duration) Entry {
+	e.e = e.e.WithTTL(duration)
+	return e
 }
 
 type badgerItem struct {
@@ -158,7 +161,7 @@ func (t badgerTx) NewIterator(prefix []byte) *KeyValueIterator {
 }
 
 func (t badgerTx) Commit() error {
-	return nil
+	return t.tx.Commit()
 }
 
 func (t badgerTx) Discard() {
@@ -186,5 +189,9 @@ func InMemoryBadger(t *testing.T) KeyValueStore {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return badgerKvImpl{db: db}
+}
+
+func WrapBadger(db *badger.DB) KeyValueStore {
 	return badgerKvImpl{db: db}
 }

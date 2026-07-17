@@ -1,7 +1,6 @@
 package common
 
 import (
-	"log"
 	"strconv"
 	"sync/atomic"
 
@@ -38,10 +37,11 @@ type Session struct {
 	inMulti   bool
 }
 
-func NewSession() *Session {
+func NewSession(kvs kv.KeyValueStore) *Session {
 	var s = &Session{}
 	s.Id = globalSessionCounter.Add(1)
 	s.currentDB = 0
+	s.kvs = kvs
 	return s
 }
 
@@ -78,7 +78,8 @@ func (s *Session) DispatchPendingOps(conn redcon.Conn) {
 	// scenario B: we're not inside a MULTI block (either we never were or we just left one),
 	// so we acquire a transaction and apply straight away
 	if s.queue == nil {
-		panic("Transaction queue should not be nil when dispatch is called")
+		// No ops were enqueued — command was handled directly (e.g. strings, lists, JSON).
+		return
 	}
 
 	tx := s.kvs.Begin(s.needsWritableTx())
@@ -105,6 +106,7 @@ func (s *Session) DispatchPendingOps(conn redcon.Conn) {
 		fn := s.queue[i].WireOp
 		fn(conn, results[i], nil)
 	}
+	s.queue = nil
 }
 
 // check if any of the queued ops are mutating
@@ -141,11 +143,9 @@ func (s *Session) PrivateKey(key []byte) []byte {
 }
 
 func (s *Session) NewPublicEntry(key []byte, value []byte) kv.Entry {
-	return nil
+	return s.kvs.NewEntry(s.PublicKey(key), value)
 }
 
 func (s *Session) currentDbPrefix() []byte {
-	log.Println("HALLO!")
-	log.Printf("CURRENT DB: %d", s.currentDB)
 	return []byte(strconv.Itoa(s.CurrentDB()) + prefixSeparator)
 }
