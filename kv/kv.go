@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
-	"github.com/tidwall/redcon"
 )
 
 var (
@@ -28,6 +27,16 @@ type KeyValueStore interface {
 	// DEPRECATED! This accessor is purely for smoothing transition
 	// to the KeyValueStore interface
 	Badger() *badger.DB
+	// Merge appends a commutative delta to key using the store's globally
+	// registered MergeFunc (see Options.MergeFunc). This is a blind write:
+	// it never conflicts with concurrent Merge calls on the same key, and
+	// does NOT participate in any Tx's atomicity, snapshot isolation, or
+	// conflict tracking. A series of Merge calls across multiple keys is
+	// NOT atomic as a group — a failure partway through leaves earlier
+	// keys already updated. Reading a merge-written key back via Tx.Get()
+	// is [transparent / not supported, returns ErrRequiresMergeHandle —
+	// confirm and delete one] on both backends.
+	Merge(key []byte, operand []byte, opts ...MergeOption) (WriteHandle, error)
 }
 
 // Generic transaction object
@@ -38,6 +47,16 @@ type Tx interface {
 	NewIterator(prefix []byte) *KeyValueIterator
 	Commit() error
 	Discard()
+}
+
+// TODO make this work 💩
+type MergeOption struct{}
+
+// func WithMergeTTL(d time.Duration) MergeOption // maps to SlateDB's MergeOptions.TTL
+// func WithAwaitDurable(await bool) MergeOption  // maps to SlateDB's WriteOptions.AwaitDurable
+
+type WriteHandle interface {
+	Wait() error // blocks until applied, and durable if WithAwaitDurable was set
 }
 
 // Key-value pair, with optional TTL and Metadata, to write to the store
@@ -58,17 +77,4 @@ type Item interface {
 // Generic ordered iterator of keys in the store (not complete)
 type KeyValueIterator interface {
 	Close() error
-}
-
-// A QueuedOp separates operations on the KeyValueStore from subsequent wire operations
-// They're declared lazily so they can be either executed straight away, or enqueued
-// and run in a batch if required by the caller. The lifecycle of the Tx instance is
-// managed outside of the QueuedOp.
-type QueuedOp struct {
-	// The DB side: runs inside the transaction, returns an opaque result or error
-	DbOp func(tx Tx) (any, error)
-	// The wire side: runs after commit, consumes the result
-	WireOp func(conn redcon.Conn, result any, err error)
-	// Flags whether this op needs to run in a write transaction
-	IsMutating bool
 }

@@ -31,9 +31,9 @@ const (
 
 type Session struct {
 	kvs       kv.KeyValueStore
-	Id        uint64        // Redis connection ID
-	currentDB int32         // Current Redis DB this connection is operating on
-	queue     []kv.QueuedOp // nil when not in MULTI
+	Id        uint64     // Redis connection ID
+	currentDB int32      // Current Redis DB this connection is operating on
+	queue     []QueuedOp // nil when not in MULTI
 	inMulti   bool
 }
 
@@ -60,9 +60,9 @@ func (s *Session) ExitMulti(discard bool) {
 }
 
 // Enqueue an operation for later execution within a database transaction
-func (s *Session) EnqueueOp(op kv.QueuedOp) {
+func (s *Session) EnqueueOp(op QueuedOp) {
 	if s.queue == nil {
-		s.queue = []kv.QueuedOp{op}
+		s.queue = []QueuedOp{op}
 	} else {
 		s.queue = append(s.queue, op)
 	}
@@ -148,4 +148,17 @@ func (s *Session) NewPublicEntry(key []byte, value []byte) kv.Entry {
 
 func (s *Session) currentDbPrefix() []byte {
 	return []byte(strconv.Itoa(s.CurrentDB()) + prefixSeparator)
+}
+
+// A QueuedOp separates operations on the KeyValueStore from subsequent wire operations
+// They're declared lazily so they can be either executed straight away, or enqueued
+// and run in a batch if required by the caller. The lifecycle of the Tx instance is
+// managed outside of the QueuedOp.
+type QueuedOp struct {
+	// The DB side: runs inside the transaction, returns an opaque result or error
+	DbOp func(tx kv.Tx) (any, error)
+	// The wire side: runs after commit, consumes the result
+	WireOp func(conn redcon.Conn, result any, err error)
+	// Flags whether this op needs to run in a write transaction
+	IsMutating bool
 }

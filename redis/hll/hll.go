@@ -281,7 +281,7 @@ func hllRawToDense(destDense []byte, raw []byte) {
 	hllInvalidateCache(destDense)
 }
 
-func Pfadd(session *common.Session, key []byte, elements ...[]byte) kv.QueuedOp {
+func Pfadd(session *common.Session, key []byte, elements ...[]byte) common.QueuedOp {
 	dbOp := func(tx kv.Tx) (any, error) {
 		var hllData []byte
 		item, err := tx.Get(session.PublicKey(key))
@@ -329,10 +329,10 @@ func Pfadd(session *common.Session, key []byte, elements ...[]byte) kv.QueuedOp 
 		conn.WriteInt(added)
 	}
 
-	return kv.QueuedOp{DbOp: dbOp, WireOp: wireOp, IsMutating: true}
+	return common.QueuedOp{DbOp: dbOp, WireOp: wireOp, IsMutating: true}
 }
 
-func Pfcount(session *common.Session, keys ...[]byte) kv.QueuedOp {
+func Pfcount(session *common.Session, keys ...[]byte) common.QueuedOp {
 	dbOp := func(tx kv.Tx) (any, error) {
 		if len(keys) == 0 {
 			return uint64(0), nil
@@ -388,10 +388,10 @@ func Pfcount(session *common.Session, keys ...[]byte) kv.QueuedOp {
 		count := result.(uint64)
 		conn.WriteInt64(int64(count))
 	}
-	return kv.QueuedOp{DbOp: dbOp, WireOp: wireOp, IsMutating: false}
+	return common.QueuedOp{DbOp: dbOp, WireOp: wireOp, IsMutating: false}
 }
 
-func Pfmerge(session *common.Session, dest []byte, sources ...[]byte) kv.QueuedOp {
+func Pfmerge(session *common.Session, dest []byte, sources ...[]byte) common.QueuedOp {
 	dbOp := func(tx kv.Tx) (any, error) {
 		raw := make([]byte, HLL_REGISTERS)
 		for _, key := range sources {
@@ -427,5 +427,5 @@ func Pfmerge(session *common.Session, dest []byte, sources ...[]byte) kv.QueuedO
 		conn.WriteString("OK")
 	}
 
-	return kv.QueuedOp{DbOp: dbOp, WireOp: wireOp, IsMutating: true}
+	return common.QueuedOp{DbOp: dbOp, WireOp: wireOp, IsMutating: true}
 }

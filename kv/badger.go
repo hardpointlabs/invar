@@ -50,6 +50,10 @@ func (b badgerKvImpl) Badger() *badger.DB {
 	return b.db
 }
 
+func (b badgerKvImpl) Merge(key []byte, operand []byte, opts ...MergeOption) (WriteHandle, error) {
+	return nil, nil
+}
+
 func (b badgerKvImpl) Close() error {
 	return b.db.Close()
 }
