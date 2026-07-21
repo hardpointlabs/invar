@@ -5,6 +5,7 @@ import (
 	"testing/quick"
 
 	"github.com/hardpointlabs/invar/kv"
+	"github.com/hardpointlabs/invar/redis/testutil"
 )
 
 // ---------------------------------------------------------------------------
@@ -53,7 +54,7 @@ func TestBloomAddExistsNoFalseNegative(t *testing.T) {
 		if len(item) == 0 {
 			return true
 		}
-		session, kvs := newTestSession(t)
+		session, kvs := testutil.NewTestSession(t)
 
 		err := kvs.Update(func(tx kv.Tx) error {
 			_, err := Bfadd(session, []byte("bf"), []byte(item)).DbOp(tx)
@@ -86,7 +87,7 @@ func TestBloomAddDuplicateReturnsZero(t *testing.T) {
 		if len(item) == 0 {
 			return true
 		}
-		session, kvs := newTestSession(t)
+		session, kvs := testutil.NewTestSession(t)
 
 		var r1, r2 int
 		err := kvs.Update(func(tx kv.Tx) error {
@@ -122,7 +123,7 @@ func TestBloomMAddMExistsConsistency(t *testing.T) {
 		if len(items) == 0 {
 			return true
 		}
-		session, kvs := newTestSession(t)
+		session, kvs := testutil.NewTestSession(t)
 
 		byteItems := make([][]byte, len(items))
 		for i, item := range items {

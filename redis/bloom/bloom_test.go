@@ -5,19 +5,11 @@ import (
 	"testing"
 
 	"github.com/hardpointlabs/invar/kv"
-	"github.com/hardpointlabs/invar/redis/common"
+	"github.com/hardpointlabs/invar/redis/testutil"
 )
 
-func newTestSession(t *testing.T) (*common.Session, kv.KeyValueStore) {
-	t.Helper()
-	kvs := kv.InMemoryBadger(t)
-	t.Cleanup(func() { kvs.Close() })
-	session := common.NewSession(kvs)
-	return session, kvs
-}
-
 func TestBloomReserve(t *testing.T) {
-	session, kvs := newTestSession(t)
+	session, kvs := testutil.NewTestSession(t)
 
 	err := kvs.Update(func(tx kv.Tx) error {
 		_, err := Bfreserve(session, []byte("mybloom"), 0.01, 1000, 2, false).DbOp(tx)
@@ -52,7 +44,7 @@ func TestBloomReserve(t *testing.T) {
 }
 
 func TestBloomReserveKeyExists(t *testing.T) {
-	session, kvs := newTestSession(t)
+	session, kvs := testutil.NewTestSession(t)
 
 	kvs.Update(func(tx kv.Tx) error {
 		_, err := Bfreserve(session, []byte("dupbloom"), 0.01, 100, 2, false).DbOp(tx)
@@ -72,7 +64,7 @@ func TestBloomReserveKeyExists(t *testing.T) {
 }
 
 func TestBloomAddExists(t *testing.T) {
-	session, kvs := newTestSession(t)
+	session, kvs := testutil.NewTestSession(t)
 
 	err := kvs.Update(func(tx kv.Tx) error {
 		_, err := Bfreserve(session, []byte("bf"), 0.01, 1000, 2, false).DbOp(tx)
@@ -109,7 +101,7 @@ func TestBloomAddExists(t *testing.T) {
 }
 
 func TestBloomAddDuplicate(t *testing.T) {
-	session, kvs := newTestSession(t)
+	session, kvs := testutil.NewTestSession(t)
 
 	kvs.Update(func(tx kv.Tx) error {
 		_, err := Bfreserve(session, []byte("bf"), 0.01, 1000, 2, false).DbOp(tx)
@@ -142,7 +134,7 @@ func TestBloomAddDuplicate(t *testing.T) {
 }
 
 func TestBloomExistsNonexistent(t *testing.T) {
-	session, kvs := newTestSession(t)
+	session, kvs := testutil.NewTestSession(t)
 
 	kvs.Update(func(tx kv.Tx) error {
 		_, err := Bfreserve(session, []byte("bf"), 0.01, 1000, 2, false).DbOp(tx)
@@ -161,7 +153,7 @@ func TestBloomExistsNonexistent(t *testing.T) {
 }
 
 func TestBloomExistsNonExistentKey(t *testing.T) {
-	session, kvs := newTestSession(t)
+	session, kvs := testutil.NewTestSession(t)
 
 	val, err := kvs.Read(func(tx kv.Tx) (any, error) {
 		return Bfexists(session, []byte("nokey"), []byte("x")).DbOp(tx)
@@ -175,7 +167,7 @@ func TestBloomExistsNonExistentKey(t *testing.T) {
 }
 
 func TestBloomAddCreatesDefault(t *testing.T) {
-	session, kvs := newTestSession(t)
+	session, kvs := testutil.NewTestSession(t)
 
 	err := kvs.Update(func(tx kv.Tx) error {
 		val, err := Bfadd(session, []byte("auto"), []byte("item")).DbOp(tx)
@@ -208,7 +200,7 @@ func TestBloomAddCreatesDefault(t *testing.T) {
 }
 
 func TestBloomMAdd(t *testing.T) {
-	session, kvs := newTestSession(t)
+	session, kvs := testutil.NewTestSession(t)
 
 	kvs.Update(func(tx kv.Tx) error {
 		_, err := Bfreserve(session, []byte("bf"), 0.01, 1000, 2, false).DbOp(tx)
@@ -237,7 +229,7 @@ func TestBloomMAdd(t *testing.T) {
 }
 
 func TestBloomMExists(t *testing.T) {
-	session, kvs := newTestSession(t)
+	session, kvs := testutil.NewTestSession(t)
 
 	kvs.Update(func(tx kv.Tx) error {
 		_, err := Bfreserve(session, []byte("bf"), 0.01, 1000, 2, false).DbOp(tx)
@@ -265,7 +257,7 @@ func TestBloomMExists(t *testing.T) {
 }
 
 func TestBloomInfo(t *testing.T) {
-	session, kvs := newTestSession(t)
+	session, kvs := testutil.NewTestSession(t)
 
 	kvs.Update(func(tx kv.Tx) error {
 		_, err := Bfreserve(session, []byte("bf"), 0.01, 1000, 2, false).DbOp(tx)
@@ -300,7 +292,7 @@ func TestBloomInfo(t *testing.T) {
 }
 
 func TestBloomInfoNonExistent(t *testing.T) {
-	session, kvs := newTestSession(t)
+	session, kvs := testutil.NewTestSession(t)
 
 	_, err := kvs.Read(func(tx kv.Tx) (any, error) {
 		return Bfinfo(session, []byte("nokey")).DbOp(tx)
@@ -311,7 +303,7 @@ func TestBloomInfoNonExistent(t *testing.T) {
 }
 
 func TestBloomInsert(t *testing.T) {
-	session, kvs := newTestSession(t)
+	session, kvs := testutil.NewTestSession(t)
 
 	err := kvs.Update(func(tx kv.Tx) error {
 		info := &InsertInfo{
@@ -352,7 +344,7 @@ func TestBloomInsert(t *testing.T) {
 }
 
 func TestBloomInsertNoCreate(t *testing.T) {
-	session, kvs := newTestSession(t)
+	session, kvs := testutil.NewTestSession(t)
 
 	err := kvs.Update(func(tx kv.Tx) error {
 		info := &InsertInfo{
@@ -368,7 +360,7 @@ func TestBloomInsertNoCreate(t *testing.T) {
 }
 
 func TestBloomScaling(t *testing.T) {
-	session, kvs := newTestSession(t)
+	session, kvs := testutil.NewTestSession(t)
 
 	kvs.Update(func(tx kv.Tx) error {
 		_, err := Bfreserve(session, []byte("bf"), 0.01, 5, 2, false).DbOp(tx)
@@ -410,7 +402,7 @@ func TestBloomScaling(t *testing.T) {
 }
 
 func TestBloomNonScaling(t *testing.T) {
-	session, kvs := newTestSession(t)
+	session, kvs := testutil.NewTestSession(t)
 
 	kvs.Update(func(tx kv.Tx) error {
 		_, err := Bfreserve(session, []byte("bf"), 0.01, 5, 2, true).DbOp(tx)
@@ -558,7 +550,7 @@ func TestBloomMetaRoundTrip(t *testing.T) {
 }
 
 func TestBloomPageKey(t *testing.T) {
-	session, _ := newTestSession(t)
+	session, _ := testutil.NewTestSession(t)
 
 	suffix := bloomPageSuffix([]byte("mybloom"), 0, 0)
 	key := session.PrivateKey(suffix)
@@ -576,7 +568,7 @@ func TestBloomPageKey(t *testing.T) {
 }
 
 func TestBloomManyItems(t *testing.T) {
-	session, kvs := newTestSession(t)
+	session, kvs := testutil.NewTestSession(t)
 
 	kvs.Update(func(tx kv.Tx) error {
 		_, err := Bfreserve(session, []byte("bf"), 0.001, 5000, 2, false).DbOp(tx)

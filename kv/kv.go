@@ -62,7 +62,9 @@ type WriteHandle interface {
 // Key-value pair, with optional TTL and Metadata, to write to the store
 type Entry interface {
 	Key() []byte
+	Value() []byte
 	Metadata(data byte) Entry
+	MetadataByte() byte
 	TTL(duration time.Duration) Entry
 }
 

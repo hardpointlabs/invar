@@ -22,7 +22,7 @@ type badgerKvImpl struct {
 }
 
 func (b badgerKvImpl) NewEntry(key []byte, value []byte) Entry {
-	return &badgerEntry{e: badger.NewEntry(key, value), key: key, val: value}
+	return &badgerEntry{e: badger.NewEntry(key, value), key: key, val: value, meta: 0}
 }
 
 func (b badgerKvImpl) Begin(mutating bool) Tx {
@@ -89,14 +89,24 @@ type badgerEntry struct {
 	e   *badger.Entry
 	key []byte
 	val []byte
+	meta byte
 }
 
 func (e *badgerEntry) Key() []byte {
 	return e.key
 }
 
+func (e *badgerEntry) Value() []byte {
+	return e.val
+}
+
+func (e *badgerEntry) MetadataByte() byte {
+	return e.meta
+}
+
 func (e *badgerEntry) Metadata(data byte) Entry {
 	e.e = e.e.WithMeta(data)
+	e.meta = data
 	return e
 }
 
@@ -153,7 +163,7 @@ func mapError(err error) error {
 }
 
 func (t badgerTx) Set(entry Entry) error {
-	return t.tx.SetEntry(entry.(*badgerEntry).e)
+	return t.tx.SetEntry(badger.NewEntry(entry.Key(), entry.Value()).WithMeta(entry.MetadataByte()))
 }
 
 func (t badgerTx) Delete(key []byte) error {
@@ -189,6 +199,7 @@ func NewBadger(opts BadgerOpts) KeyValueStore {
 func InMemoryBadger(t *testing.T) KeyValueStore {
 	t.Helper()
 	opts := badger.DefaultOptions("").WithInMemory(true)
+	opts.Logger = nil
 	db, err := badger.Open(opts)
 	if err != nil {
 		t.Fatal(err)

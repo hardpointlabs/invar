@@ -12,6 +12,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/hardpointlabs/invar/config"
 	"github.com/hardpointlabs/invar/kv"
+	"github.com/hardpointlabs/invar/redis/bitmap"
 	"github.com/hardpointlabs/invar/redis/bloom"
 	"github.com/hardpointlabs/invar/redis/common"
 	"github.com/hardpointlabs/invar/redis/hll"
@@ -188,11 +189,112 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 			return
 		}
 	case "bitcount":
-		handleBitCount(conn, db, cmd)
+		if !checkMinArgs(conn, cmd, 2) {
+			return
+		}
+		key := cmd.Args[1]
+		useBit := false
+		var startGiven, endGiven bool
+		var startVal, endVal int
+		i := 2
+		if i < len(cmd.Args) {
+			v, ok := parseIntArg(conn, cmd.Args[i])
+			if ok {
+				startVal = v
+				startGiven = true
+				i++
+			}
+		}
+		if i < len(cmd.Args) {
+			v, ok := parseIntArg(conn, cmd.Args[i])
+			if ok {
+				endVal = v
+				endGiven = true
+				i++
+			}
+		}
+		if i < len(cmd.Args) {
+			unit := strings.ToLower(string(cmd.Args[i]))
+			if unit == "bit" {
+				useBit = true
+			} else if unit != "byte" {
+				conn.WriteError("ERR syntax error")
+				return
+			}
+			i++
+		}
+		if i < len(cmd.Args) {
+			conn.WriteError("ERR syntax error")
+			return
+		}
+		if startGiven != endGiven {
+			conn.WriteError("ERR syntax error")
+			return
+		}
+		session.EnqueueOp(bitmap.BitCount(session, key, startGiven, endGiven, startVal, endVal, useBit))
 	case "bitop":
-		handleBitOp(conn, db, cmd)
+		if len(cmd.Args) < 4 {
+			conn.WriteError("ERR wrong number of arguments for 'bitop' command")
+			return
+		}
+		op, ok := bitmap.ParseBitOp(string(cmd.Args[1]))
+		if !ok {
+			conn.WriteError("ERR syntax error")
+			return
+		}
+		if op == bitmap.BitOpNOT && len(cmd.Args) != 4 {
+			conn.WriteError("ERR wrong number of arguments for 'bitop' command")
+			return
+		}
+		destKey := cmd.Args[2]
+		srcKeys := cmd.Args[3:]
+		session.EnqueueOp(bitmap.BitOp(session, destKey, op, srcKeys))
 	case "bitpos":
-		handleBitPos(conn, db, cmd)
+		if !checkMinArgs(conn, cmd, 3) {
+			return
+		}
+		bit, ok := parseIntArg(conn, cmd.Args[2])
+		if !ok {
+			return
+		}
+		if bit != 0 && bit != 1 {
+			conn.WriteError("ERR bit is not an integer or out of range")
+			return
+		}
+		useBit := false
+		var startGiven bool
+		var startVal, endVal int
+		i := 3
+		if i < len(cmd.Args) {
+			v, ok := parseIntArg(conn, cmd.Args[i])
+			if ok {
+				startVal = v
+				startGiven = true
+				i++
+			}
+		}
+		if i < len(cmd.Args) {
+			v, ok := parseIntArg(conn, cmd.Args[i])
+			if ok {
+				endVal = v
+				i++
+			}
+		}
+		if i < len(cmd.Args) {
+			unit := strings.ToLower(string(cmd.Args[i]))
+			if unit == "bit" {
+				useBit = true
+			} else if unit != "byte" {
+				conn.WriteError("ERR syntax error")
+				return
+			}
+			i++
+		}
+		if i < len(cmd.Args) {
+			conn.WriteError("ERR syntax error")
+			return
+		}
+		session.EnqueueOp(bitmap.BitPos(session, cmd.Args[1], bit, startGiven, startVal, endVal, useBit))
 	case "bgsave":
 		go db.Sync()
 		conn.WriteString("OK")
@@ -269,7 +371,26 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		}
 		setKey(conn, db, cmd.Args[1], cmd.Args[2])
 	case "setbit":
-		handleSetBit(conn, db, cmd)
+		if !checkExactArgs(conn, cmd, 4) {
+			return
+		}
+		offset, ok := parseIntArg(conn, cmd.Args[2])
+		if !ok {
+			return
+		}
+		if offset < 0 {
+			conn.WriteError("ERR bit offset is not an integer or out of range")
+			return
+		}
+		value, ok := parseIntArg(conn, cmd.Args[3])
+		if !ok {
+			return
+		}
+		if value != 0 && value != 1 {
+			conn.WriteError("ERR bit is not an integer or out of range")
+			return
+		}
+		session.EnqueueOp(bitmap.SetBit(session, cmd.Args[1], offset, value))
 	case "setex":
 		if !checkExactArgs(conn, cmd, 4) {
 			return
@@ -298,7 +419,18 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		}
 		substrKey(conn, db, cmd.Args[1], start, end)
 	case "getbit":
-		handleGetBit(conn, db, cmd)
+		if !checkExactArgs(conn, cmd, 3) {
+			return
+		}
+		offset, ok := parseIntArg(conn, cmd.Args[2])
+		if !ok {
+			return
+		}
+		if offset < 0 {
+			conn.WriteError("ERR bit offset is not an integer or out of range")
+			return
+		}
+		session.EnqueueOp(bitmap.GetBit(session, cmd.Args[1], offset))
 	case "get":
 		if !checkExactArgs(conn, cmd, 2) {
 			return

@@ -1,21 +1,22 @@
-package redis
+package bitmap
 
 import (
 	"testing"
 
-	"github.com/dgraph-io/badger/v4"
+	"github.com/hardpointlabs/invar/kv"
+	"github.com/hardpointlabs/invar/redis/common"
+	"github.com/hardpointlabs/invar/redis/testutil"
 )
 
 func TestSetBitAndGetBit(t *testing.T) {
-	db := inMemDB(t)
+	session, db := testutil.NewTestSession(t)
 	defer db.Close()
 
 	key := []byte("bitkey")
-	dbSlot := 0
 
-	err := db.Update(func(txn *badger.Txn) error {
-		e := badger.NewEntry(rawKeyPrefix(key, dbSlot), make([]byte, 2)).WithMeta(byte(RedisString))
-		return txn.SetEntry(e)
+	err := db.Update(func(txn kv.Tx) error {
+		e := session.NewPublicEntry(key, make([]byte, 2)).Metadata(byte(common.RedisString))
+		return txn.Set(e)
 	})
 	if err != nil {
 		t.Fatalf("setup failed: %v", err)
@@ -42,12 +43,12 @@ func TestSetBitAndGetBit(t *testing.T) {
 			mask := byte(1 << bitPos)
 
 			var oldBit int
-			err := db.Update(func(txn *badger.Txn) error {
-				item, err := txn.Get(rawKeyPrefix(key, dbSlot))
+			err := db.Update(func(tx kv.Tx) error {
+				item, err := tx.Get(session.PublicKey(key))
 				if err != nil {
 					return err
 				}
-				data, err := copyItemValue(item)
+				data, err := item.Value()
 				if err != nil {
 					return err
 				}
@@ -57,8 +58,8 @@ func TestSetBitAndGetBit(t *testing.T) {
 				} else {
 					data[byteIndex] &^= mask
 				}
-				e := badger.NewEntry(rawKeyPrefix(key, dbSlot), data).WithMeta(byte(RedisString))
-				return txn.SetEntry(e)
+				e := db.NewEntry(session.PublicKey(key), data).Metadata(byte(common.RedisString))
+				return tx.Set(e)
 			})
 			if err != nil {
 				t.Fatalf("setbit failed: %v", err)
@@ -69,16 +70,15 @@ func TestSetBitAndGetBit(t *testing.T) {
 		})
 	}
 
-	var finalData []byte
-	db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(rawKeyPrefix(key, dbSlot))
+	value, _ := db.Read(func(tx kv.Tx) (any, error) {
+		item, err := tx.Get(session.PublicKey(key))
 		if err != nil {
-			return err
+			return nil, err
 		}
-		finalData, _ = copyItemValue(item)
-		return nil
+		return item.Value()
 	})
 
+	finalData := value.([]byte)
 	if finalData[0] != 0x81 {
 		t.Errorf("byte 0: got 0x%02x, want 0x81", finalData[0])
 	}
@@ -175,7 +175,7 @@ func TestBitPos(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := bitPosInRange(tt.data, 0, max(0, len(tt.data)*8-1), tt.bit, false)
+			got := BitPosInRange(tt.data, 0, max(0, len(tt.data)*8-1), tt.bit, false)
 			if got != tt.want {
 				t.Errorf("bitPos = %d, want %d", got, tt.want)
 			}
@@ -203,7 +203,7 @@ func TestBitPosInRange(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := bitPosInRange(data, tt.startBit, tt.endBit, tt.bit, false)
+			got := BitPosInRange(data, tt.startBit, tt.endBit, tt.bit, false)
 			if got != tt.want {
 				t.Errorf("bitPosInRange = %d, want %d", got, tt.want)
 			}
@@ -281,17 +281,16 @@ func TestBitOpOne(t *testing.T) {
 }
 
 func TestBitOpStoreAndRead(t *testing.T) {
-	db := inMemDB(t)
+	session, db := testutil.NewTestSession(t)
 	defer db.Close()
 
-	dbSlot := 0
 	srcKey := []byte("src1")
 	destKey := []byte("dest")
 	srcData := []byte{0xFF}
 
-	err := db.Update(func(txn *badger.Txn) error {
-		e := badger.NewEntry(rawKeyPrefix(srcKey, dbSlot), srcData).WithMeta(byte(RedisString))
-		return txn.SetEntry(e)
+	err := db.Update(func(tx kv.Tx) error {
+		e := db.NewEntry(session.PublicKey(srcKey), srcData).Metadata(byte(common.RedisString))
+		return tx.Set(e)
 	})
 	if err != nil {
 		t.Fatalf("setup failed: %v", err)
@@ -300,23 +299,22 @@ func TestBitOpStoreAndRead(t *testing.T) {
 	result := make([]byte, 1)
 	result[0] = srcData[0]
 
-	err = db.Update(func(txn *badger.Txn) error {
-		e := badger.NewEntry(rawKeyPrefix(destKey, dbSlot), result).WithMeta(byte(RedisString))
-		return txn.SetEntry(e)
+	err = db.Update(func(tx kv.Tx) error {
+		e := db.NewEntry(session.PublicKey(destKey), result).Metadata(byte(common.RedisString))
+		return tx.Set(e)
 	})
 	if err != nil {
 		t.Fatalf("store failed: %v", err)
 	}
 
-	var readBack []byte
-	db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(rawKeyPrefix(destKey, dbSlot))
+	val, _ := db.Read(func(tx kv.Tx) (any, error) {
+		item, err := tx.Get(session.PublicKey(destKey))
 		if err != nil {
-			return err
+			return nil, err
 		}
-		readBack, _ = copyItemValue(item)
-		return nil
+		return item.Value()
 	})
+	readBack := val.([]byte)
 
 	if len(readBack) != 1 || readBack[0] != 0xFF {
 		t.Errorf("read back: got %v, want [255]", readBack)
@@ -341,15 +339,14 @@ func TestBitOpLargeNot(t *testing.T) {
 }
 
 func TestSetBitExtendsString(t *testing.T) {
-	db := inMemDB(t)
+	session, db := testutil.NewTestSession(t)
 	defer db.Close()
 
 	key := []byte("extendkey")
-	dbSlot := 0
 
-	err := db.Update(func(txn *badger.Txn) error {
-		e := badger.NewEntry(rawKeyPrefix(key, dbSlot), []byte{0x00}).WithMeta(byte(RedisString))
-		return txn.SetEntry(e)
+	err := db.Update(func(tx kv.Tx) error {
+		e := db.NewEntry(session.PublicKey(key), []byte{0x00}).Metadata(byte(common.RedisString))
+		return tx.Set(e)
 	})
 	if err != nil {
 		t.Fatalf("setup failed: %v", err)
@@ -358,12 +355,12 @@ func TestSetBitExtendsString(t *testing.T) {
 	offset := 16
 	byteIndex := offset / 8
 
-	err = db.Update(func(txn *badger.Txn) error {
-		item, err := txn.Get(rawKeyPrefix(key, dbSlot))
+	err = db.Update(func(tx kv.Tx) error {
+		item, err := tx.Get(session.PublicKey(key))
 		if err != nil {
 			return err
 		}
-		data, err := copyItemValue(item)
+		data, err := item.Value()
 		if err != nil {
 			return err
 		}
@@ -373,22 +370,21 @@ func TestSetBitExtendsString(t *testing.T) {
 			data = newData
 		}
 		data[byteIndex] |= 0x80
-		e := badger.NewEntry(rawKeyPrefix(key, dbSlot), data).WithMeta(byte(RedisString))
-		return txn.SetEntry(e)
+		e := db.NewEntry(session.PublicKey(key), data).Metadata(byte(common.RedisString))
+		return tx.Set(e)
 	})
 	if err != nil {
 		t.Fatalf("setbit failed: %v", err)
 	}
 
-	var finalData []byte
-	db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(rawKeyPrefix(key, dbSlot))
+	val, _ := db.Read(func(tx kv.Tx) (any, error) {
+		item, err := tx.Get(session.PublicKey(key))
 		if err != nil {
-			return err
+			return nil, err
 		}
-		finalData, _ = copyItemValue(item)
-		return nil
+		return item.Value()
 	})
+	finalData := val.([]byte)
 
 	if len(finalData) != 3 {
 		t.Errorf("expected len 3, got %d", len(finalData))
@@ -399,10 +395,9 @@ func TestSetBitExtendsString(t *testing.T) {
 }
 
 func TestBitOpOnMissingKeys(t *testing.T) {
-	db := inMemDB(t)
+	session, db := testutil.NewTestSession(t)
 	defer db.Close()
 
-	dbSlot := 0
 	destKey := []byte("missingDest")
 
 	// Simulate BITOP with missing source keys by treating nil as empty byte slice
@@ -415,23 +410,22 @@ func TestBitOpOnMissingKeys(t *testing.T) {
 	}
 
 	result := make([]byte, maxLen)
-	err := db.Update(func(txn *badger.Txn) error {
-		e := badger.NewEntry(rawKeyPrefix(destKey, dbSlot), result).WithMeta(byte(RedisString))
-		return txn.SetEntry(e)
+	err := db.Update(func(tx kv.Tx) error {
+		e := db.NewEntry(session.PublicKey(destKey), result).Metadata(byte(common.RedisString))
+		return tx.Set(e)
 	})
 	if err != nil {
 		t.Fatalf("store failed: %v", err)
 	}
 
-	var readBack []byte
-	db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(rawKeyPrefix(destKey, dbSlot))
+	val, _ := db.Read(func(tx kv.Tx) (any, error) {
+		item, err := tx.Get(session.PublicKey(destKey))
 		if err != nil {
-			return err
+			return nil, err
 		}
-		readBack, _ = copyItemValue(item)
-		return nil
+		return item.Value()
 	})
+	readBack := val.([]byte)
 
 	if len(readBack) != 0 {
 		t.Errorf("expected empty result, got len %d", len(readBack))
