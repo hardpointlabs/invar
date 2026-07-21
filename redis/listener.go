@@ -15,6 +15,7 @@ import (
 	"github.com/hardpointlabs/invar/redis/bitmap"
 	"github.com/hardpointlabs/invar/redis/bloom"
 	"github.com/hardpointlabs/invar/redis/common"
+	"github.com/hardpointlabs/invar/redis/hash"
 	"github.com/hardpointlabs/invar/redis/hll"
 	"github.com/rs/zerolog/log"
 	"github.com/tidwall/redcon"
@@ -853,165 +854,58 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 			conn.WriteError("ERR wrong number of arguments for 'hset' command")
 			return
 		}
-		var added int
-		err := db.Update(func(txn *badger.Txn) error {
-			var err error
-			added, err = hset(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
-			return err
-		})
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return
-		}
-		conn.WriteInt(added)
+		session.EnqueueOp(hash.HSet(session, cmd.Args[1], cmd.Args[2:]...))
 	case "hsetnx":
 		if !checkExactArgs(conn, cmd, 4) {
 			return
 		}
-		var set int
-		err := db.Update(func(txn *badger.Txn) error {
-			var err error
-			set, err = hsetnx(txn, currentDb(conn), cmd.Args[1], cmd.Args[2], cmd.Args[3])
-			return err
-		})
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return
-		}
-		conn.WriteInt(set)
+		session.EnqueueOp(hash.HSetNX(session, cmd.Args[1], cmd.Args[2], cmd.Args[3]))
 	case "hget":
 		if !checkExactArgs(conn, cmd, 3) {
 			return
 		}
-		db.View(func(txn *badger.Txn) error {
-			val, err := hget(txn, currentDb(conn), cmd.Args[1], cmd.Args[2])
-			if err != nil {
-				conn.WriteNull()
-				return nil
-			}
-			conn.WriteBulk(val)
-			return nil
-		})
+		session.EnqueueOp(hash.HGet(session, cmd.Args[1], cmd.Args[2]))
 	case "hdel":
 		if !checkMinArgs(conn, cmd, 3) {
 			return
 		}
-		var hdelRemoved int
-		var hdelErr error
-		hdelErr = db.Update(func(txn *badger.Txn) error {
-			var err error
-			hdelRemoved, err = hdel(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
-			return err
-		})
-		if hdelErr != nil {
-			conn.WriteError("ERR " + hdelErr.Error())
-			return
-		}
-		conn.WriteInt(hdelRemoved)
+		session.EnqueueOp(hash.HDel(session, cmd.Args[1], cmd.Args[2:]...))
 	case "hexists":
 		if !checkExactArgs(conn, cmd, 3) {
 			return
 		}
-		db.View(func(txn *badger.Txn) error {
-			ok, err := hexists(txn, currentDb(conn), cmd.Args[1], cmd.Args[2])
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			if ok {
-				conn.WriteInt(1)
-			} else {
-				conn.WriteInt(0)
-			}
-			return nil
-		})
+		session.EnqueueOp(hash.HExists(session, cmd.Args[1], cmd.Args[2]))
 	case "hlen":
 		if !checkExactArgs(conn, cmd, 2) {
 			return
 		}
-		db.View(func(txn *badger.Txn) error {
-			count, err := hlen(txn, currentDb(conn), cmd.Args[1])
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			conn.WriteInt(count)
-			return nil
-		})
+		session.EnqueueOp(hash.HLen(session, cmd.Args[1]))
 	case "hmget":
 		if !checkMinArgs(conn, cmd, 3) {
 			return
 		}
-		db.View(func(txn *badger.Txn) error {
-			results, err := hmget(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			conn.WriteArray(len(results))
-			for _, r := range results {
-				if r == nil {
-					conn.WriteNull()
-				} else {
-					conn.WriteBulk(r)
-				}
-			}
-			return nil
-		})
+		session.EnqueueOp(hash.HMGet(session, cmd.Args[1], cmd.Args[2:]...))
 	case "hmset":
 		if len(cmd.Args) < 4 || (len(cmd.Args)-2)%2 != 0 {
 			conn.WriteError("ERR wrong number of arguments for 'hmset' command")
 			return
 		}
-		var hmsetErr error
-		hmsetErr = db.Update(func(txn *badger.Txn) error {
-			_, err := hset(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
-			return err
-		})
-		if hmsetErr != nil {
-			conn.WriteError("ERR " + hmsetErr.Error())
-			return
-		}
-		conn.WriteString("OK")
+		session.EnqueueOp(hash.HMSet(session, cmd.Args[1], cmd.Args[2:]...))
 	case "hkeys":
 		if !checkExactArgs(conn, cmd, 2) {
 			return
 		}
-		db.View(func(txn *badger.Txn) error {
-			keys, err := hkeys(txn, currentDb(conn), cmd.Args[1])
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			writeBulkArray(conn, keys)
-			return nil
-		})
+		session.EnqueueOp(hash.HKeys(session, cmd.Args[1]))
 	case "hvals":
 		if !checkExactArgs(conn, cmd, 2) {
 			return
 		}
-		db.View(func(txn *badger.Txn) error {
-			vals, err := hvals(txn, currentDb(conn), cmd.Args[1])
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			writeBulkArray(conn, vals)
-			return nil
-		})
+		session.EnqueueOp(hash.HVals(session, cmd.Args[1]))
 	case "hgetall":
 		if !checkExactArgs(conn, cmd, 2) {
 			return
 		}
-		db.View(func(txn *badger.Txn) error {
-			pairs, err := hgetall(txn, currentDb(conn), cmd.Args[1])
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			writeBulkArray(conn, pairs)
-			return nil
-		})
+		session.EnqueueOp(hash.HGetAll(session, cmd.Args[1]))
 	case "hincrby":
 		if !checkExactArgs(conn, cmd, 4) {
 			return
@@ -1020,18 +914,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !incrOk {
 			return
 		}
-		var newVal int64
-		var incrbyErr error
-		incrbyErr = db.Update(func(txn *badger.Txn) error {
-			var err error
-			newVal, err = hincrby(txn, currentDb(conn), cmd.Args[1], cmd.Args[2], incrAmount)
-			return err
-		})
-		if incrbyErr != nil {
-			conn.WriteError("ERR " + incrbyErr.Error())
-			return
-		}
-		conn.WriteInt64(newVal)
+		session.EnqueueOp(hash.HIncrBy(session, cmd.Args[1], cmd.Args[2], incrAmount))
 	case "hincrbyfloat":
 		if !checkExactArgs(conn, cmd, 4) {
 			return
@@ -1040,18 +923,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !floatOk {
 			return
 		}
-		var floatResult string
-		var incrFloatErr error
-		incrFloatErr = db.Update(func(txn *badger.Txn) error {
-			var err error
-			floatResult, err = hincrbyfloat(txn, currentDb(conn), cmd.Args[1], cmd.Args[2], floatAmount)
-			return err
-		})
-		if incrFloatErr != nil {
-			conn.WriteError("ERR " + incrFloatErr.Error())
-			return
-		}
-		conn.WriteBulkString(floatResult)
+		session.EnqueueOp(hash.HIncrByFloat(session, cmd.Args[1], cmd.Args[2], floatAmount))
 	case "hrandfield":
 		if !checkMinArgs(conn, cmd, 2) {
 			return
@@ -1070,39 +942,12 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 				withValues = true
 			}
 		}
-		db.View(func(txn *badger.Txn) error {
-			result, err := hrandfield(txn, currentDb(conn), cmd.Args[1], count, withValues)
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			if len(cmd.Args) < 3 || count == 1 {
-				if len(result) == 0 {
-					conn.WriteNull()
-				} else {
-					conn.WriteBulk(result[0])
-				}
-			} else {
-				conn.WriteArray(len(result))
-				for _, r := range result {
-					conn.WriteBulk(r)
-				}
-			}
-			return nil
-		})
+		session.EnqueueOp(hash.HRandField(session, cmd.Args[1], count, withValues))
 	case "hstrlen":
 		if !checkExactArgs(conn, cmd, 3) {
 			return
 		}
-		db.View(func(txn *badger.Txn) error {
-			length, err := hstrlen(txn, currentDb(conn), cmd.Args[1], cmd.Args[2])
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			conn.WriteInt(length)
-			return nil
-		})
+		session.EnqueueOp(hash.HStrLen(session, cmd.Args[1], cmd.Args[2]))
 	case "hscan":
 		if !checkMinArgs(conn, cmd, 3) {
 			return
@@ -1130,20 +975,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 				}
 			}
 		}
-		db.View(func(txn *badger.Txn) error {
-			pairs, err := hscan(txn, currentDb(conn), cmd.Args[1], pattern, count)
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			conn.WriteArray(2)
-			conn.WriteBulkString("0")
-			conn.WriteArray(len(pairs))
-			for _, p := range pairs {
-				conn.WriteBulk(p)
-			}
-			return nil
-		})
+		session.EnqueueOp(hash.HScan(session, cmd.Args[1], pattern, count))
 	case "sadd":
 		if !checkMinArgs(conn, cmd, 3) {
 			return

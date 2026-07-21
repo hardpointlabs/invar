@@ -58,6 +58,29 @@ func (b badgerKvImpl) Close() error {
 	return b.db.Close()
 }
 
+type badgerIterator struct {
+	iter    *badger.Iterator
+	prefix  []byte
+	started bool
+}
+
+// Badger
+func (it *badgerIterator) Next() bool {
+	if !it.started {
+		it.iter.Rewind()
+		it.started = true
+	} else {
+		it.iter.Next()
+	}
+	return it.iter.ValidForPrefix(it.prefix)
+}
+func (it *badgerIterator) Item() Item { return &badgerItem{item: it.iter.Item()} }
+func (it *badgerIterator) Err() error { return nil } // Badger has no mid-scan error state
+func (it *badgerIterator) Close() error {
+	it.iter.Close()
+	return nil
+}
+
 // --- Logging adapter ---
 // BadgerZerologAdapter routes Badger logs through Zerolog.
 type badgerZerologAdapter struct {
@@ -86,9 +109,9 @@ func (b *badgerZerologAdapter) Debugf(format string, v ...interface{}) {
 
 // --- Badger Settable Entry implementation ---
 type badgerEntry struct {
-	e   *badger.Entry
-	key []byte
-	val []byte
+	e    *badger.Entry
+	key  []byte
+	val  []byte
 	meta byte
 }
 
@@ -171,7 +194,11 @@ func (t badgerTx) Delete(key []byte) error {
 }
 
 func (t badgerTx) NewIterator(prefix []byte) *KeyValueIterator {
-	return nil
+	opts := badger.DefaultIteratorOptions
+	opts.Prefix = prefix
+	badgerIt := t.tx.NewIterator(opts)
+	var kvIt KeyValueIterator = &badgerIterator{iter: badgerIt, prefix: prefix}
+	return &kvIt
 }
 
 func (t badgerTx) Commit() error {

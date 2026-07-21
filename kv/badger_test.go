@@ -618,9 +618,14 @@ func TestNewIteratorReturnsNil(t *testing.T) {
 	defer tx.Discard()
 
 	it := tx.NewIterator([]byte("prefix"))
-	if it != nil {
-		t.Error("NewIterator should return nil (not yet implemented)")
+	if it == nil {
+		t.Fatal("NewIterator should return a pointer to a non-nil iterator")
 	}
+	kvIt := *it
+	if kvIt == nil {
+		t.Fatal("NewIterator should return a pointer to a non-nil interface")
+	}
+	defer kvIt.Close()
 }
 
 // --- Merge stub ---

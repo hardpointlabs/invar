@@ -78,5 +78,15 @@ type Item interface {
 
 // Generic ordered iterator of keys in the store (not complete)
 type KeyValueIterator interface {
+	// Next advances the iterator and reports whether an item is available.
+	// Must be called before the first Item(). Returns false when the
+	// prefix range is exhausted OR on error — call Err() to distinguish
+	// the two.
+	Next() bool
+	// Item returns the current entry. Valid only after Next() returns true.
+	Item() Item
+	// Err returns any error encountered during iteration. Always check
+	// this after a Next() that returns false.
+	Err() error
 	Close() error
 }
