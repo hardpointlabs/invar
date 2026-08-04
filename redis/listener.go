@@ -18,6 +18,7 @@ import (
 	"github.com/hardpointlabs/invar/redis/hash"
 	"github.com/hardpointlabs/invar/redis/hll"
 	"github.com/hardpointlabs/invar/redis/list"
+	"github.com/hardpointlabs/invar/redis/set"
 	"github.com/rs/zerolog/log"
 	"github.com/tidwall/redcon"
 )
@@ -83,20 +84,6 @@ func writeUint32Sentinel(txn *badger.Txn, key []byte, count uint32, typ redisVal
 	buf := make([]byte, 4)
 	binary.BigEndian.PutUint32(buf, count)
 	return txn.SetEntry(badger.NewEntry(rawKeyPrefix(key, dbSlot), buf).WithMeta(byte(typ)))
-}
-
-// clearPrefixedKeys deletes all internal keys under prefix, then deletes the sentinel key.
-func clearPrefixedKeys(txn *badger.Txn, prefix, sentinelKey []byte) error {
-	opts := badger.DefaultIteratorOptions
-	opts.Prefix = prefix
-	it := txn.NewIterator(opts)
-	defer it.Close()
-	for it.Rewind(); it.Valid(); it.Next() {
-		if err := txn.Delete(it.Item().KeyCopy(nil)); err != nil {
-			return err
-		}
-	}
-	return txn.Delete(sentinelKey)
 }
 
 // writeBulkArray writes a RESP array of bulk strings to conn.
@@ -832,215 +819,72 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !checkMinArgs(conn, cmd, 3) {
 			return
 		}
-		var added int
-		err := db.Update(func(txn *badger.Txn) error {
-			var err error
-			added, err = sadd(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
-			return err
-		})
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return
-		}
-		conn.WriteInt(added)
+		session.EnqueueOp(set.SAdd(session, cmd.Args[1], cmd.Args[2:]...))
 	case "srem":
 		if !checkMinArgs(conn, cmd, 3) {
 			return
 		}
-		var removed int
-		err := db.Update(func(txn *badger.Txn) error {
-			var err error
-			removed, err = srem(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
-			return err
-		})
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return
-		}
-		conn.WriteInt(removed)
+		session.EnqueueOp(set.SRem(session, cmd.Args[1], cmd.Args[2:]...))
 	case "scard":
 		if !checkExactArgs(conn, cmd, 2) {
 			return
 		}
-		db.View(func(txn *badger.Txn) error {
-			count, err := scard(txn, currentDb(conn), cmd.Args[1])
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			conn.WriteInt(count)
-			return nil
-		})
+		session.EnqueueOp(set.SCard(session, cmd.Args[1]))
 	case "smembers":
 		if !checkExactArgs(conn, cmd, 2) {
 			return
 		}
-		db.View(func(txn *badger.Txn) error {
-			members, err := smembers(txn, currentDb(conn), cmd.Args[1])
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			writeBulkArray(conn, members)
-			return nil
-		})
+		session.EnqueueOp(set.SMembers(session, cmd.Args[1]))
 	case "sismember":
 		if !checkExactArgs(conn, cmd, 3) {
 			return
 		}
-		db.View(func(txn *badger.Txn) error {
-			ok, err := sismember(txn, currentDb(conn), cmd.Args[1], cmd.Args[2])
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			if ok {
-				conn.WriteInt(1)
-			} else {
-				conn.WriteInt(0)
-			}
-			return nil
-		})
+		session.EnqueueOp(set.SIsMember(session, cmd.Args[1], cmd.Args[2]))
 	case "spop":
 		if !checkExactArgs(conn, cmd, 2) {
 			return
 		}
-		var val []byte
-		var dbErr error
-		dbErr = db.Update(func(txn *badger.Txn) error {
-			var err error
-			val, err = spop(txn, currentDb(conn), cmd.Args[1])
-			return err
-		})
-		if dbErr != nil {
-			conn.WriteError("ERR " + dbErr.Error())
-			return
-		}
-		if val == nil {
-			conn.WriteNull()
-		} else {
-			conn.WriteBulk(val)
-		}
+		session.EnqueueOp(set.SPop(session, cmd.Args[1]))
 	case "srandmember":
 		if !checkExactArgs(conn, cmd, 2) {
 			return
 		}
-		db.View(func(txn *badger.Txn) error {
-			members, err := srandmember(txn, currentDb(conn), cmd.Args[1], 1)
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			if len(members) == 0 {
-				conn.WriteNull()
-			} else {
-				conn.WriteBulk(members[0])
-			}
-			return nil
-		})
+		session.EnqueueOp(set.SRandMember(session, cmd.Args[1], 1))
 	case "smove":
 		if !checkExactArgs(conn, cmd, 4) {
 			return
 		}
-		var moved bool
-		err := db.Update(func(txn *badger.Txn) error {
-			var err error
-			moved, err = smove(txn, currentDb(conn), cmd.Args[1], cmd.Args[2], cmd.Args[3])
-			return err
-		})
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return
-		}
-		if moved {
-			conn.WriteInt(1)
-		} else {
-			conn.WriteInt(0)
-		}
+		session.EnqueueOp(set.SMove(session, cmd.Args[1], cmd.Args[2], cmd.Args[3]))
 	case "sdiff":
 		if !checkMinArgs(conn, cmd, 2) {
 			return
 		}
-		db.View(func(txn *badger.Txn) error {
-			result, err := sdiff(txn, currentDb(conn), cmd.Args[1:]...)
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			writeBulkArray(conn, result)
-			return nil
-		})
+		session.EnqueueOp(set.SDiff(session, cmd.Args[1:]...))
 	case "sinter":
 		if !checkMinArgs(conn, cmd, 2) {
 			return
 		}
-		db.View(func(txn *badger.Txn) error {
-			result, err := sinter(txn, currentDb(conn), cmd.Args[1:]...)
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			writeBulkArray(conn, result)
-			return nil
-		})
+		session.EnqueueOp(set.SInter(session, cmd.Args[1:]...))
 	case "sunion":
 		if !checkMinArgs(conn, cmd, 2) {
 			return
 		}
-		db.View(func(txn *badger.Txn) error {
-			result, err := sunion(txn, currentDb(conn), cmd.Args[1:]...)
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			writeBulkArray(conn, result)
-			return nil
-		})
+		session.EnqueueOp(set.SUnion(session, cmd.Args[1:]...))
 	case "sdiffstore":
 		if !checkMinArgs(conn, cmd, 3) {
 			return
 		}
-		var count int
-		err := db.Update(func(txn *badger.Txn) error {
-			var err error
-			count, err = sdiffstore(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
-			return err
-		})
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return
-		}
-		conn.WriteInt(count)
+		session.EnqueueOp(set.SDiffStore(session, cmd.Args[1], cmd.Args[2:]...))
 	case "sinterstore":
 		if !checkMinArgs(conn, cmd, 3) {
 			return
 		}
-		var count int
-		err := db.Update(func(txn *badger.Txn) error {
-			var err error
-			count, err = sinterstore(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
-			return err
-		})
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return
-		}
-		conn.WriteInt(count)
+		session.EnqueueOp(set.SInterStore(session, cmd.Args[1], cmd.Args[2:]...))
 	case "sunionstore":
 		if !checkMinArgs(conn, cmd, 3) {
 			return
 		}
-		var count int
-		err := db.Update(func(txn *badger.Txn) error {
-			var err error
-			count, err = sunionstore(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
-			return err
-		})
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return
-		}
-		conn.WriteInt(count)
+		session.EnqueueOp(set.SUnionStore(session, cmd.Args[1], cmd.Args[2:]...))
 	case "zadd":
 		if !checkMinArgs(conn, cmd, 4) {
 			return
