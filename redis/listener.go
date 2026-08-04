@@ -17,6 +17,7 @@ import (
 	"github.com/hardpointlabs/invar/redis/common"
 	"github.com/hardpointlabs/invar/redis/hash"
 	"github.com/hardpointlabs/invar/redis/hll"
+	"github.com/hardpointlabs/invar/redis/list"
 	"github.com/rs/zerolog/log"
 	"github.com/tidwall/redcon"
 )
@@ -610,97 +611,27 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !checkMinArgs(conn, cmd, 3) {
 			return
 		}
-		err := db.Update(func(txn *badger.Txn) error {
-			_, err := lpush(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
-			return err
-		})
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return
-		}
-		db.View(func(txn *badger.Txn) error {
-			size, err := llen(txn, currentDb(conn), cmd.Args[1])
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return err
-			}
-			conn.WriteInt(size)
-			return nil
-		})
+		session.EnqueueOp(list.LPush(session, cmd.Args[1], cmd.Args[2:]...))
 	case "rpush":
 		if !checkMinArgs(conn, cmd, 3) {
 			return
 		}
-		err := db.Update(func(txn *badger.Txn) error {
-			_, err := rpush(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
-			return err
-		})
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return
-		}
-		db.View(func(txn *badger.Txn) error {
-			size, err := llen(txn, currentDb(conn), cmd.Args[1])
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return err
-			}
-			conn.WriteInt(size)
-			return nil
-		})
+		session.EnqueueOp(list.RPush(session, cmd.Args[1], cmd.Args[2:]...))
 	case "lpop":
 		if !checkExactArgs(conn, cmd, 2) {
 			return
 		}
-		var val []byte
-		var dbErr error
-		dbErr = db.Update(func(txn *badger.Txn) error {
-			var err error
-			val, err = lpop(txn, currentDb(conn), cmd.Args[1])
-			return err
-		})
-		if dbErr != nil {
-			conn.WriteError("ERR " + dbErr.Error())
-			return
-		}
-		if val == nil {
-			conn.WriteNull()
-		} else {
-			conn.WriteBulk(val)
-		}
+		session.EnqueueOp(list.LPop(session, cmd.Args[1]))
 	case "rpop":
 		if !checkExactArgs(conn, cmd, 2) {
 			return
 		}
-		var val []byte
-		var dbErr error
-		dbErr = db.Update(func(txn *badger.Txn) error {
-			var err error
-			val, err = rpop(txn, currentDb(conn), cmd.Args[1])
-			return err
-		})
-		if dbErr != nil {
-			conn.WriteError("ERR " + dbErr.Error())
-			return
-		}
-		if val == nil {
-			conn.WriteNull()
-		} else {
-			conn.WriteBulk(val)
-		}
+		session.EnqueueOp(list.RPop(session, cmd.Args[1]))
 	case "llen":
 		if !checkExactArgs(conn, cmd, 2) {
 			return
 		}
-		db.View(func(txn *badger.Txn) error {
-			size, err := llen(txn, currentDb(conn), cmd.Args[1])
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return err
-			}
-			conn.WriteInt(size)
-			return nil
-		})
+		session.EnqueueOp(list.LLen(session, cmd.Args[1]))
 	case "lrange":
 		if !checkExactArgs(conn, cmd, 4) {
 			return
@@ -713,15 +644,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !ok {
 			return
 		}
-		db.View(func(txn *badger.Txn) error {
-			items, err := lrange(txn, currentDb(conn), cmd.Args[1], start, stop)
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return err
-			}
-			writeBulkArray(conn, items)
-			return nil
-		})
+		session.EnqueueOp(list.LRange(session, cmd.Args[1], start, stop))
 	case "lindex":
 		if !checkExactArgs(conn, cmd, 3) {
 			return
@@ -730,19 +653,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !ok {
 			return
 		}
-		db.View(func(txn *badger.Txn) error {
-			val, err := lindex(txn, currentDb(conn), cmd.Args[1], index)
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return err
-			}
-			if val == nil {
-				conn.WriteNull()
-			} else {
-				conn.WriteBulk(val)
-			}
-			return nil
-		})
+		session.EnqueueOp(list.LIndex(session, cmd.Args[1], index))
 	case "lset":
 		if !checkExactArgs(conn, cmd, 4) {
 			return
@@ -751,18 +662,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !ok {
 			return
 		}
-		err := db.Update(func(txn *badger.Txn) error {
-			return lset(txn, currentDb(conn), cmd.Args[1], index, cmd.Args[3])
-		})
-		if err != nil {
-			if err == badger.ErrKeyNotFound {
-				conn.WriteError("ERR no such key")
-			} else {
-				conn.WriteError("ERR " + err.Error())
-			}
-			return
-		}
-		conn.WriteString("OK")
+		session.EnqueueOp(list.LSet(session, cmd.Args[1], index, cmd.Args[3]))
 	case "lrem":
 		if !checkExactArgs(conn, cmd, 4) {
 			return
@@ -771,17 +671,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !ok {
 			return
 		}
-		var removed int
-		err := db.Update(func(txn *badger.Txn) error {
-			var err error
-			removed, err = lrem(txn, currentDb(conn), cmd.Args[1], count, cmd.Args[3])
-			return err
-		})
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return
-		}
-		conn.WriteInt(removed)
+		session.EnqueueOp(list.LRem(session, cmd.Args[1], count, cmd.Args[3]))
 	case "ltrim":
 		if !checkExactArgs(conn, cmd, 4) {
 			return
@@ -794,61 +684,23 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !ok {
 			return
 		}
-		err := db.Update(func(txn *badger.Txn) error {
-			return ltrim(txn, currentDb(conn), cmd.Args[1], start, stop)
-		})
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return
-		}
-		conn.WriteString("OK")
+		session.EnqueueOp(list.LTrim(session, cmd.Args[1], start, stop))
 	case "linsert":
 		if !checkExactArgs(conn, cmd, 5) {
 			return
 		}
 		before := strings.ToLower(string(cmd.Args[2])) == "before"
-		var result int
-		var dbErr error
-		dbErr = db.Update(func(txn *badger.Txn) error {
-			var err error
-			result, err = linsert(txn, currentDb(conn), cmd.Args[1], before, cmd.Args[3], cmd.Args[4])
-			return err
-		})
-		if dbErr != nil {
-			conn.WriteError("ERR " + dbErr.Error())
-			return
-		}
-		conn.WriteInt(result)
+		session.EnqueueOp(list.LInsert(session, cmd.Args[1], before, cmd.Args[3], cmd.Args[4]))
 	case "lpushx":
 		if !checkExactArgs(conn, cmd, 3) {
 			return
 		}
-		var size uint32
-		err := db.Update(func(txn *badger.Txn) error {
-			var err error
-			size, err = lpushx(txn, currentDb(conn), cmd.Args[1], cmd.Args[2])
-			return err
-		})
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return
-		}
-		conn.WriteInt(int(size))
+		session.EnqueueOp(list.LPushX(session, cmd.Args[1], cmd.Args[2]))
 	case "rpushx":
 		if !checkExactArgs(conn, cmd, 3) {
 			return
 		}
-		var size uint32
-		err := db.Update(func(txn *badger.Txn) error {
-			var err error
-			size, err = rpushx(txn, currentDb(conn), cmd.Args[1], cmd.Args[2])
-			return err
-		})
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return
-		}
-		conn.WriteInt(int(size))
+		session.EnqueueOp(list.RPushX(session, cmd.Args[1], cmd.Args[2]))
 	case "hset":
 		if len(cmd.Args) < 4 || (len(cmd.Args)-2)%2 != 0 {
 			conn.WriteError("ERR wrong number of arguments for 'hset' command")
