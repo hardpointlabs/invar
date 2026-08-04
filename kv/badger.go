@@ -113,6 +113,7 @@ type badgerEntry struct {
 	key  []byte
 	val  []byte
 	meta byte
+	ttl  time.Duration
 }
 
 func (e *badgerEntry) Key() []byte {
@@ -135,7 +136,12 @@ func (e *badgerEntry) Metadata(data byte) Entry {
 
 func (e *badgerEntry) TTL(duration time.Duration) Entry {
 	e.e = e.e.WithTTL(duration)
+	e.ttl = duration
 	return e
+}
+
+func (e *badgerEntry) TTLValue() time.Duration {
+	return e.ttl
 }
 
 type badgerItem struct {
@@ -148,6 +154,14 @@ func (i badgerItem) Key() []byte {
 
 func (i badgerItem) TTL() time.Duration {
 	return time.Duration(i.item.ExpiresAt())
+}
+
+func (i badgerItem) Metadata() byte {
+	return i.item.UserMeta()
+}
+
+func (i badgerItem) ExpiresAt() uint64 {
+	return i.item.ExpiresAt()
 }
 
 func (i badgerItem) Value() ([]byte, error) {
@@ -186,7 +200,11 @@ func mapError(err error) error {
 }
 
 func (t badgerTx) Set(entry Entry) error {
-	return t.tx.SetEntry(badger.NewEntry(entry.Key(), entry.Value()).WithMeta(entry.MetadataByte()))
+	be := badger.NewEntry(entry.Key(), entry.Value()).WithMeta(entry.MetadataByte())
+	if ttl := entry.TTLValue(); ttl > 0 {
+		be = be.WithTTL(ttl)
+	}
+	return t.tx.SetEntry(be)
 }
 
 func (t badgerTx) Delete(key []byte) error {

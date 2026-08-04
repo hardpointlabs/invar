@@ -143,12 +143,22 @@ func (s *Session) PublicKey(key []byte) []byte {
 	return append(s.currentDbPrefix(), key...)
 }
 
+// PublicKeyForDB returns the storage key for a public key in a specific DB.
+func (s *Session) PublicKeyForDB(db int, key []byte) []byte {
+	return append([]byte(strconv.Itoa(db)+prefixSeparator), key...)
+}
+
 func (s *Session) PrivateKey(key []byte) []byte {
 	return append(append([]byte(internalPrefix), s.currentDbPrefix()...), key...)
 }
 
 func (s *Session) NewPublicEntry(key []byte, value []byte) kv.Entry {
 	return s.kvs.NewEntry(s.PublicKey(key), value)
+}
+
+// NewEntryForDB creates a public entry in a specific DB.
+func (s *Session) NewEntryForDB(db int, key []byte, value []byte) kv.Entry {
+	return s.kvs.NewEntry(s.PublicKeyForDB(db, key), value)
 }
 
 func (s *Session) NewPrivateEntry(key []byte, value []byte) kv.Entry {

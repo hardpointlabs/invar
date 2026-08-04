@@ -66,12 +66,19 @@ type Entry interface {
 	Metadata(data byte) Entry
 	MetadataByte() byte
 	TTL(duration time.Duration) Entry
+	// TTLValue returns the TTL set via TTL(), or 0 if none was set.
+	TTLValue() time.Duration
 }
 
 // Immutable key-value pair read from the store
 type Item interface {
 	Key() []byte
 	TTL() time.Duration
+	// Metadata returns the metadata byte set when the entry was written.
+	Metadata() byte
+	// ExpiresAt returns the absolute expiry time as Unix seconds, or 0 if the
+	// entry never expires.
+	ExpiresAt() uint64
 	// Returns the value of this entry as a freshly copied byte slice
 	Value() ([]byte, error)
 }

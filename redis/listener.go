@@ -16,6 +16,7 @@ import (
 	"github.com/hardpointlabs/invar/redis/common"
 	"github.com/hardpointlabs/invar/redis/hash"
 	"github.com/hardpointlabs/invar/redis/hll"
+	"github.com/hardpointlabs/invar/redis/keys"
 	"github.com/hardpointlabs/invar/redis/list"
 	"github.com/hardpointlabs/invar/redis/set"
 	"github.com/hardpointlabs/invar/redis/zset"
@@ -29,10 +30,8 @@ var addr = ":6379"
 const prefixSeparator = ":"
 
 // public redis types for LSM tree entries (not private/internal types)
-type redisValueType byte
-
 const (
-	RedisString redisValueType = iota
+	RedisString byte = iota
 	RedisList
 	RedisSet
 	RedisSortedSet
@@ -323,7 +322,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !checkMinArgs(conn, cmd, 2) {
 			return
 		}
-		existsKeys(conn, db, cmd.Args[1:]...)
+		session.EnqueueOp(keys.Exists(session, cmd.Args[1:]...))
 	case "set":
 		if !checkExactArgs(conn, cmd, 3) {
 			return
@@ -399,7 +398,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !checkMinArgs(conn, cmd, 2) {
 			return
 		}
-		getKeys(conn, db, cmd.Args[1:]...)
+		session.EnqueueOp(keys.MGet(session, cmd.Args[1:]...))
 	case "getset":
 		if !checkExactArgs(conn, cmd, 3) {
 			return
@@ -419,17 +418,17 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 			conn.WriteError("ERR invalid DB index")
 			return
 		}
-		moveKey(conn, db, cmd.Args[1], targetDb)
+		session.EnqueueOp(keys.Move(session, cmd.Args[1], targetDb))
 	case "rename":
 		if !checkExactArgs(conn, cmd, 3) {
 			return
 		}
-		renameKey(conn, db, cmd.Args[1], cmd.Args[2])
+		session.EnqueueOp(keys.Rename(session, cmd.Args[1], cmd.Args[2]))
 	case "renamenx":
 		if !checkExactArgs(conn, cmd, 3) {
 			return
 		}
-		renameNXKey(conn, db, cmd.Args[1], cmd.Args[2])
+		session.EnqueueOp(keys.RenameNX(session, cmd.Args[1], cmd.Args[2]))
 	case "object":
 		if !checkMinArgs(conn, cmd, 2) {
 			return
@@ -449,12 +448,12 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !checkExactArgs(conn, cmd, 2) {
 			return
 		}
-		pttlKey(conn, db, cmd.Args[1])
+		session.EnqueueOp(keys.PTTL(session, cmd.Args[1]))
 	case "ttl":
 		if !checkExactArgs(conn, cmd, 2) {
 			return
 		}
-		ttlKey(conn, db, cmd.Args[1])
+		session.EnqueueOp(keys.TTL(session, cmd.Args[1]))
 	case "expire":
 		if !checkExactArgs(conn, cmd, 3) {
 			return
@@ -463,7 +462,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !ok {
 			return
 		}
-		expireKey(conn, db, cmd.Args[1], seconds)
+		session.EnqueueOp(keys.Expire(session, cmd.Args[1], seconds))
 	case "incr":
 		if !checkExactArgs(conn, cmd, 2) {
 			return
@@ -558,12 +557,12 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !checkExactArgs(conn, cmd, 2) {
 			return
 		}
-		typeOfKey(conn, db, cmd.Args[1])
+		session.EnqueueOp(keys.Type(session, cmd.Args[1]))
 	case "del", "unlink":
 		if !checkMinArgs(conn, cmd, 2) {
 			return
 		}
-		delKeys(conn, db, cmd.Args[1:]...)
+		session.EnqueueOp(keys.Del(session, cmd.Args[1:]...))
 	case "lpush":
 		if !checkMinArgs(conn, cmd, 3) {
 			return

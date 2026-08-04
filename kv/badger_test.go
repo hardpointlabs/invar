@@ -494,6 +494,37 @@ func TestItemTTL(t *testing.T) {
 	}
 }
 
+func TestItemMetadataAndExpiry(t *testing.T) {
+	kvs := InMemoryBadger(t)
+	defer kvs.Close()
+
+	err := kvs.Update(func(tx Tx) error {
+		entry := kvs.NewEntry([]byte("meta"), []byte("val")).Metadata(0x2A).TTL(10 * time.Second)
+		return tx.Set(entry)
+	})
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	err = kvs.Update(func(tx Tx) error {
+		item, err := tx.Get([]byte("meta"))
+		if err != nil {
+			return err
+		}
+		if item.Metadata() != 0x2A {
+			t.Errorf("Metadata(): got %#x, want 0x2A", item.Metadata())
+		}
+		expiresAt := item.ExpiresAt()
+		if expiresAt == 0 {
+			t.Error("ExpiresAt(): got 0, want non-zero expiry set by TTL(10s)")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+}
+
 func TestItemValueCopy(t *testing.T) {
 	kvs := InMemoryBadger(t)
 	defer kvs.Close()
