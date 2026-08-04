@@ -26,6 +26,7 @@ package redis
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"sort"
 	"sync"
@@ -64,26 +65,83 @@ func (c *mockConn) result() (value string, isNull bool, isErr bool) {
 	return c.last, c.wasNull, c.wasErr
 }
 
-func (c *mockConn) RemoteAddr() string          { return "127.0.0.1:0" }
-func (c *mockConn) Close() error                { return nil }
-func (c *mockConn) WriteError(msg string)       { c.mu.Lock(); c.last = msg; c.wasNull = false; c.wasErr = true; c.mu.Unlock() }
-func (c *mockConn) WriteString(str string)      { c.mu.Lock(); c.last = str; c.wasNull = false; c.wasErr = false; c.mu.Unlock() }
-func (c *mockConn) WriteBulk(bulk []byte)       { c.mu.Lock(); c.last = string(bulk); c.wasNull = false; c.wasErr = false; c.mu.Unlock() }
-func (c *mockConn) WriteBulkString(bulk string) { c.mu.Lock(); c.last = bulk; c.wasNull = false; c.wasErr = false; c.mu.Unlock() }
-func (c *mockConn) WriteInt(num int)            { c.mu.Lock(); c.last = fmt.Sprintf("%d", num); c.wasNull = false; c.wasErr = false; c.mu.Unlock() }
-func (c *mockConn) WriteInt64(num int64)        { c.mu.Lock(); c.last = fmt.Sprintf("%d", num); c.wasNull = false; c.wasErr = false; c.mu.Unlock() }
-func (c *mockConn) WriteUint64(num uint64)      { c.mu.Lock(); c.last = fmt.Sprintf("%d", num); c.wasNull = false; c.wasErr = false; c.mu.Unlock() }
-func (c *mockConn) WriteArray(count int)        {}
-func (c *mockConn) WriteNull()                  { c.mu.Lock(); c.last = ""; c.wasNull = true; c.wasErr = false; c.mu.Unlock() }
-func (c *mockConn) WriteRaw(data []byte)        { c.mu.Lock(); c.last = string(data); c.wasNull = false; c.wasErr = false; c.mu.Unlock() }
-func (c *mockConn) WriteAny(any interface{})    {}
-func (c *mockConn) Context() interface{}        { return c.ctx }
-func (c *mockConn) SetContext(v interface{})    { c.ctx = v }
-func (c *mockConn) SetReadBuffer(bytes int)     {}
-func (c *mockConn) Detach() redcon.DetachedConn { return nil }
+func (c *mockConn) RemoteAddr() string { return "127.0.0.1:0" }
+func (c *mockConn) Close() error       { return nil }
+func (c *mockConn) WriteError(msg string) {
+	c.mu.Lock()
+	c.last = msg
+	c.wasNull = false
+	c.wasErr = true
+	c.mu.Unlock()
+}
+func (c *mockConn) WriteString(str string) {
+	c.mu.Lock()
+	c.last = str
+	c.wasNull = false
+	c.wasErr = false
+	c.mu.Unlock()
+}
+func (c *mockConn) WriteBulk(bulk []byte) {
+	c.mu.Lock()
+	c.last = string(bulk)
+	c.wasNull = false
+	c.wasErr = false
+	c.mu.Unlock()
+}
+func (c *mockConn) WriteBulkString(bulk string) {
+	c.mu.Lock()
+	c.last = bulk
+	c.wasNull = false
+	c.wasErr = false
+	c.mu.Unlock()
+}
+func (c *mockConn) WriteBulkFrom(num int64, reader io.Reader) {
+	// not implemented
+}
+func (c *mockConn) WriteInt(num int) {
+	c.mu.Lock()
+	c.last = fmt.Sprintf("%d", num)
+	c.wasNull = false
+	c.wasErr = false
+	c.mu.Unlock()
+}
+func (c *mockConn) WriteInt64(num int64) {
+	c.mu.Lock()
+	c.last = fmt.Sprintf("%d", num)
+	c.wasNull = false
+	c.wasErr = false
+	c.mu.Unlock()
+}
+func (c *mockConn) WriteUint64(num uint64) {
+	c.mu.Lock()
+	c.last = fmt.Sprintf("%d", num)
+	c.wasNull = false
+	c.wasErr = false
+	c.mu.Unlock()
+}
+func (c *mockConn) WriteArray(count int) {}
+func (c *mockConn) WriteNull() {
+	c.mu.Lock()
+	c.last = ""
+	c.wasNull = true
+	c.wasErr = false
+	c.mu.Unlock()
+}
+func (c *mockConn) WriteRaw(data []byte) {
+	c.mu.Lock()
+	c.last = string(data)
+	c.wasNull = false
+	c.wasErr = false
+	c.mu.Unlock()
+}
+func (c *mockConn) WriteAny(any interface{})       {}
+func (c *mockConn) Context() interface{}           { return c.ctx }
+func (c *mockConn) SetContext(v interface{})       { c.ctx = v }
+func (c *mockConn) SetReadBuffer(bytes int)        {}
+func (c *mockConn) Detach() redcon.DetachedConn    { return nil }
 func (c *mockConn) ReadPipeline() []redcon.Command { return nil }
 func (c *mockConn) PeekPipeline() []redcon.Command { return nil }
-func (c *mockConn) NetConn() net.Conn           { return nil }
+func (c *mockConn) NetConn() net.Conn              { return nil }
 
 // ---------------------------------------------------------------------------
 // Porcupine model for a single string register (GET / SET)

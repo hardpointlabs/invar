@@ -8,7 +8,7 @@ require (
 	github.com/dgraph-io/badger/v4 v4.9.5
 	github.com/prometheus/client_golang v1.24.1
 	github.com/rs/zerolog v1.35.1
-	github.com/tidwall/redcon v1.6.2
+	github.com/tidwall/redcon v1.6.4
 	golang.org/x/sync v0.22.0
 )
 
