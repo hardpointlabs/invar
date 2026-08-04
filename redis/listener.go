@@ -2,7 +2,6 @@ package redis
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"net"
 	"strconv"
@@ -19,6 +18,7 @@ import (
 	"github.com/hardpointlabs/invar/redis/hll"
 	"github.com/hardpointlabs/invar/redis/list"
 	"github.com/hardpointlabs/invar/redis/set"
+	"github.com/hardpointlabs/invar/redis/zset"
 	"github.com/rs/zerolog/log"
 	"github.com/tidwall/redcon"
 )
@@ -26,7 +26,6 @@ import (
 var addr = ":6379"
 
 // key delimeters
-const internalPrefix = "-"
 const prefixSeparator = ":"
 
 // public redis types for LSM tree entries (not private/internal types)
@@ -64,35 +63,6 @@ func copyItemValue(item *badger.Item) ([]byte, error) {
 }
 
 // readUint32Sentinel reads a 4-byte big-endian uint32 from a public sentinel key.
-func readUint32Sentinel(txn *badger.Txn, key []byte, dbSlot int) (uint32, error) {
-	item, err := txn.Get(rawKeyPrefix(key, dbSlot))
-	if err != nil {
-		return 0, err
-	}
-	var count uint32
-	if err := item.Value(func(val []byte) error {
-		count = binary.BigEndian.Uint32(val)
-		return nil
-	}); err != nil {
-		return 0, err
-	}
-	return count, nil
-}
-
-// writeUint32Sentinel writes a 4-byte big-endian uint32 to a public sentinel key with the given type meta.
-func writeUint32Sentinel(txn *badger.Txn, key []byte, count uint32, typ redisValueType, dbSlot int) error {
-	buf := make([]byte, 4)
-	binary.BigEndian.PutUint32(buf, count)
-	return txn.SetEntry(badger.NewEntry(rawKeyPrefix(key, dbSlot), buf).WithMeta(byte(typ)))
-}
-
-// writeBulkArray writes a RESP array of bulk strings to conn.
-func writeBulkArray(conn redcon.Conn, items [][]byte) {
-	conn.WriteArray(len(items))
-	for _, item := range items {
-		conn.WriteBulk(item)
-	}
-}
 
 func upsertSession(conn redcon.Conn, kvs kv.KeyValueStore) *common.Session {
 	if ctx := conn.Context(); ctx != nil {
@@ -889,43 +859,17 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !checkMinArgs(conn, cmd, 4) {
 			return
 		}
-		var added int
-		err := db.Update(func(txn *badger.Txn) error {
-			var err error
-			added, err = zadd(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
-			return err
-		})
-		if err != nil {
-			conn.WriteError(err.Error())
-			return
-		}
-		conn.WriteInt(added)
+		session.EnqueueOp(zset.ZAdd(session, cmd.Args[1], cmd.Args[2:]...))
 	case "zcard":
 		if !checkExactArgs(conn, cmd, 2) {
 			return
 		}
-		db.View(func(txn *badger.Txn) error {
-			count, err := zcard(txn, currentDb(conn), cmd.Args[1])
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			conn.WriteInt(count)
-			return nil
-		})
+		session.EnqueueOp(zset.ZCard(session, cmd.Args[1]))
 	case "zcount":
 		if !checkExactArgs(conn, cmd, 4) {
 			return
 		}
-		db.View(func(txn *badger.Txn) error {
-			count, err := zcount(txn, currentDb(conn), cmd.Args[1], string(cmd.Args[2]), string(cmd.Args[3]))
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			conn.WriteInt(count)
-			return nil
-		})
+		session.EnqueueOp(zset.ZCount(session, cmd.Args[1], string(cmd.Args[2]), string(cmd.Args[3])))
 	case "zincrby":
 		if !checkExactArgs(conn, cmd, 4) {
 			return
@@ -934,17 +878,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !ok {
 			return
 		}
-		var newScore float64
-		err := db.Update(func(txn *badger.Txn) error {
-			var err error
-			newScore, err = zincrby(txn, currentDb(conn), cmd.Args[1], incr, cmd.Args[3])
-			return err
-		})
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return
-		}
-		conn.WriteBulkString(strconv.FormatFloat(newScore, 'f', -1, 64))
+		session.EnqueueOp(zset.ZIncrBy(session, cmd.Args[1], incr, cmd.Args[3]))
 	case "zinter":
 		fallthrough
 	case "zinterstore":
@@ -1004,74 +938,22 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 			}
 		}
 		if isStore {
-			db.Update(func(txn *badger.Txn) error {
-				m, err := zinter(txn, currentDb(conn), aggregate, keys...)
-				if err != nil {
-					conn.WriteError("ERR " + err.Error())
-					return nil
-				}
-				if len(weights) > 0 {
-					for member, score := range m {
-						m[member] = score * weights[0]
-					}
-				}
-				members := zsetToSlice(m)
-				count, err := storeZSetResult(txn, currentDb(conn), cmd.Args[1], members)
-				if err != nil {
-					conn.WriteError("ERR " + err.Error())
-					return nil
-				}
-				conn.WriteInt(count)
-				return nil
-			})
+			session.EnqueueOp(zset.ZInterStore(session, cmd.Args[1], aggregate, weights, keys...))
 		} else {
-			db.View(func(txn *badger.Txn) error {
-				m, err := zinter(txn, currentDb(conn), aggregate, keys...)
-				if err != nil {
-					conn.WriteError("ERR " + err.Error())
-					return nil
+			hasWithScores := false
+			for _, arg := range cmd.Args {
+				if strings.EqualFold(string(arg), "withscores") {
+					hasWithScores = true
+					break
 				}
-				if len(weights) > 0 {
-					for member, score := range m {
-						m[member] = score * weights[0]
-					}
-				}
-				hasWithScores := false
-				for _, arg := range cmd.Args {
-					if strings.EqualFold(string(arg), "withscores") {
-						hasWithScores = true
-						break
-					}
-				}
-				members := zsetToSlice(m)
-				if hasWithScores {
-					conn.WriteArray(len(members) * 2)
-					for _, e := range members {
-						conn.WriteBulk(e.member)
-						conn.WriteBulkString(strconv.FormatFloat(e.score, 'f', -1, 64))
-					}
-				} else {
-					conn.WriteArray(len(members))
-					for _, e := range members {
-						conn.WriteBulk(e.member)
-					}
-				}
-				return nil
-			})
+			}
+			session.EnqueueOp(zset.ZInter(session, aggregate, weights, hasWithScores, keys...))
 		}
 	case "zlexcount":
 		if !checkExactArgs(conn, cmd, 4) {
 			return
 		}
-		db.View(func(txn *badger.Txn) error {
-			count, err := zlexcount(txn, currentDb(conn), cmd.Args[1], string(cmd.Args[2]), string(cmd.Args[3]))
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			conn.WriteInt(count)
-			return nil
-		})
+		session.EnqueueOp(zset.ZLexCount(session, cmd.Args[1], string(cmd.Args[2]), string(cmd.Args[3])))
 	case "zpopmax":
 		if !checkMinArgs(conn, cmd, 2) {
 			return
@@ -1088,19 +970,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 				return
 			}
 		}
-		db.Update(func(txn *badger.Txn) error {
-			popped, err := zpopmax(txn, currentDb(conn), cmd.Args[1], popCount)
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			conn.WriteArray(len(popped) * 2)
-			for _, e := range popped {
-				conn.WriteBulk(e.member)
-				conn.WriteBulkString(strconv.FormatFloat(e.score, 'f', -1, 64))
-			}
-			return nil
-		})
+		session.EnqueueOp(zset.ZPopMax(session, cmd.Args[1], popCount))
 	case "zpopmin":
 		if !checkMinArgs(conn, cmd, 2) {
 			return
@@ -1117,19 +987,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 				return
 			}
 		}
-		db.Update(func(txn *badger.Txn) error {
-			popped, err := zpopmin(txn, currentDb(conn), cmd.Args[1], popCount)
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			conn.WriteArray(len(popped) * 2)
-			for _, e := range popped {
-				conn.WriteBulk(e.member)
-				conn.WriteBulkString(strconv.FormatFloat(e.score, 'f', -1, 64))
-			}
-			return nil
-		})
+		session.EnqueueOp(zset.ZPopMin(session, cmd.Args[1], popCount))
 	case "zrange":
 		if !checkMinArgs(conn, cmd, 4) {
 			return
@@ -1146,15 +1004,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if len(cmd.Args) >= 5 && strings.EqualFold(string(cmd.Args[4]), "withscores") {
 			withScores = true
 		}
-		db.View(func(txn *badger.Txn) error {
-			result, err := zrange(txn, currentDb(conn), cmd.Args[1], start, stop, withScores)
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			writeBulkArray(conn, result)
-			return nil
-		})
+		session.EnqueueOp(zset.ZRange(session, cmd.Args[1], start, stop, withScores))
 	case "zrangebylex":
 		if !checkMinArgs(conn, cmd, 4) {
 			return
@@ -1175,15 +1025,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 			}
 			hasLimit = true
 		}
-		db.View(func(txn *badger.Txn) error {
-			result, err := zrangebylex(txn, currentDb(conn), cmd.Args[1], minStr, maxStr, limitOffset, limitCount, hasLimit)
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			writeBulkArray(conn, result)
-			return nil
-		})
+		session.EnqueueOp(zset.ZRangeByLex(session, cmd.Args[1], minStr, maxStr, limitOffset, limitCount, hasLimit))
 	case "zrangebyscore":
 		if !checkMinArgs(conn, cmd, 4) {
 			return
@@ -1211,62 +1053,22 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 				i += 2
 			}
 		}
-		db.View(func(txn *badger.Txn) error {
-			result, err := zrangebyscore(txn, currentDb(conn), cmd.Args[1], minStr, maxStr, withScores, limitOffset, limitCount, hasLimit)
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			writeBulkArray(conn, result)
-			return nil
-		})
+		session.EnqueueOp(zset.ZRangeByScore(session, cmd.Args[1], minStr, maxStr, withScores, limitOffset, limitCount, hasLimit))
 	case "zrank":
 		if !checkExactArgs(conn, cmd, 3) {
 			return
 		}
-		db.View(func(txn *badger.Txn) error {
-			rank, found, err := zrank(txn, currentDb(conn), cmd.Args[1], cmd.Args[2])
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			if !found {
-				conn.WriteNull()
-			} else {
-				conn.WriteInt(rank)
-			}
-			return nil
-		})
+		session.EnqueueOp(zset.ZRank(session, cmd.Args[1], cmd.Args[2]))
 	case "zrem":
 		if !checkMinArgs(conn, cmd, 3) {
 			return
 		}
-		var removed int
-		err := db.Update(func(txn *badger.Txn) error {
-			var err error
-			removed, err = zrem(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
-			return err
-		})
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return
-		}
-		conn.WriteInt(removed)
+		session.EnqueueOp(zset.ZRem(session, cmd.Args[1], cmd.Args[2:]...))
 	case "zremrangebylex":
 		if !checkExactArgs(conn, cmd, 4) {
 			return
 		}
-		var removed int
-		err := db.Update(func(txn *badger.Txn) error {
-			var err error
-			removed, err = zremrangebylex(txn, currentDb(conn), cmd.Args[1], string(cmd.Args[2]), string(cmd.Args[3]))
-			return err
-		})
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return
-		}
-		conn.WriteInt(removed)
+		session.EnqueueOp(zset.ZRemRangeByLex(session, cmd.Args[1], string(cmd.Args[2]), string(cmd.Args[3])))
 	case "zremrangebyrank":
 		if !checkExactArgs(conn, cmd, 4) {
 			return
@@ -1279,32 +1081,12 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !ok {
 			return
 		}
-		var removed int
-		err := db.Update(func(txn *badger.Txn) error {
-			var err error
-			removed, err = zremrangebyrank(txn, currentDb(conn), cmd.Args[1], start, stop)
-			return err
-		})
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return
-		}
-		conn.WriteInt(removed)
+		session.EnqueueOp(zset.ZRemRangeByRank(session, cmd.Args[1], start, stop))
 	case "zremrangebyscore":
 		if !checkExactArgs(conn, cmd, 4) {
 			return
 		}
-		var removed int
-		err := db.Update(func(txn *badger.Txn) error {
-			var err error
-			removed, err = zremrangebyscore(txn, currentDb(conn), cmd.Args[1], string(cmd.Args[2]), string(cmd.Args[3]))
-			return err
-		})
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return
-		}
-		conn.WriteInt(removed)
+		session.EnqueueOp(zset.ZRemRangeByScore(session, cmd.Args[1], string(cmd.Args[2]), string(cmd.Args[3])))
 	case "zrevrange":
 		if !checkMinArgs(conn, cmd, 4) {
 			return
@@ -1321,15 +1103,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if len(cmd.Args) >= 5 && strings.EqualFold(string(cmd.Args[4]), "withscores") {
 			withScores = true
 		}
-		db.View(func(txn *badger.Txn) error {
-			result, err := zrevrange(txn, currentDb(conn), cmd.Args[1], start, stop, withScores)
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			writeBulkArray(conn, result)
-			return nil
-		})
+		session.EnqueueOp(zset.ZRevRange(session, cmd.Args[1], start, stop, withScores))
 	case "zrevrangebylex":
 		if !checkMinArgs(conn, cmd, 4) {
 			return
@@ -1350,15 +1124,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 			}
 			hasLimit = true
 		}
-		db.View(func(txn *badger.Txn) error {
-			result, err := zrevrangebylex(txn, currentDb(conn), cmd.Args[1], maxStr, minStr, limitOffset, limitCount, hasLimit)
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			writeBulkArray(conn, result)
-			return nil
-		})
+		session.EnqueueOp(zset.ZRevRangeByLex(session, cmd.Args[1], maxStr, minStr, limitOffset, limitCount, hasLimit))
 	case "zrevrangebyscore":
 		if !checkMinArgs(conn, cmd, 4) {
 			return
@@ -1386,49 +1152,17 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 				i += 2
 			}
 		}
-		db.View(func(txn *badger.Txn) error {
-			result, err := zrevrangebyscore(txn, currentDb(conn), cmd.Args[1], maxStr, minStr, withScores, limitOffset, limitCount, hasLimit)
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			writeBulkArray(conn, result)
-			return nil
-		})
+		session.EnqueueOp(zset.ZRevRangeByScore(session, cmd.Args[1], maxStr, minStr, withScores, limitOffset, limitCount, hasLimit))
 	case "zrevrank":
 		if !checkExactArgs(conn, cmd, 3) {
 			return
 		}
-		db.View(func(txn *badger.Txn) error {
-			rank, found, err := zrevrank(txn, currentDb(conn), cmd.Args[1], cmd.Args[2])
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			if !found {
-				conn.WriteNull()
-			} else {
-				conn.WriteInt(rank)
-			}
-			return nil
-		})
+		session.EnqueueOp(zset.ZRevRank(session, cmd.Args[1], cmd.Args[2]))
 	case "zscore":
 		if !checkExactArgs(conn, cmd, 3) {
 			return
 		}
-		db.View(func(txn *badger.Txn) error {
-			score, found, err := zscore(txn, currentDb(conn), cmd.Args[1], cmd.Args[2])
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			if !found {
-				conn.WriteNull()
-			} else {
-				conn.WriteBulkString(strconv.FormatFloat(score, 'f', -1, 64))
-			}
-			return nil
-		})
+		session.EnqueueOp(zset.ZScore(session, cmd.Args[1], cmd.Args[2]))
 	case "zdiff":
 		if !checkMinArgs(conn, cmd, 3) {
 			return
@@ -1446,27 +1180,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if len(cmd.Args) > 2+numKeys && strings.EqualFold(string(cmd.Args[2+numKeys]), "withscores") {
 			hasWithScores = true
 		}
-		db.View(func(txn *badger.Txn) error {
-			m, err := zdiff(txn, currentDb(conn), keys...)
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			members := zsetToSlice(m)
-			if hasWithScores {
-				conn.WriteArray(len(members) * 2)
-				for _, e := range members {
-					conn.WriteBulk(e.member)
-					conn.WriteBulkString(strconv.FormatFloat(e.score, 'f', -1, 64))
-				}
-			} else {
-				conn.WriteArray(len(members))
-				for _, e := range members {
-					conn.WriteBulk(e.member)
-				}
-			}
-			return nil
-		})
+		session.EnqueueOp(zset.ZDiff(session, hasWithScores, keys...))
 	case "zdiffstore":
 		if !checkMinArgs(conn, cmd, 4) {
 			return
@@ -1480,47 +1194,17 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 			return
 		}
 		keys := cmd.Args[3 : 3+numKeys]
-		db.Update(func(txn *badger.Txn) error {
-			m, err := zdiff(txn, currentDb(conn), keys...)
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			members := zsetToSlice(m)
-			count, err := storeZSetResult(txn, currentDb(conn), cmd.Args[1], members)
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			conn.WriteInt(count)
-			return nil
-		})
+		session.EnqueueOp(zset.ZDiffStore(session, cmd.Args[1], keys...))
 	case "zmscore":
 		if !checkMinArgs(conn, cmd, 3) {
 			return
 		}
-		db.View(func(txn *badger.Txn) error {
-			scores, found, err := zmscore(txn, currentDb(conn), cmd.Args[1], cmd.Args[2:]...)
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			conn.WriteArray(len(scores))
-			for i, s := range scores {
-				if found[i] {
-					conn.WriteBulkString(strconv.FormatFloat(s, 'f', -1, 64))
-				} else {
-					conn.WriteNull()
-				}
-			}
-			return nil
-		})
+		session.EnqueueOp(zset.ZMScore(session, cmd.Args[1], cmd.Args[2:]...))
 	case "zrandmember":
 		if !checkMinArgs(conn, cmd, 2) {
 			return
 		}
 		count := 1
-		withScores := false
 		if len(cmd.Args) >= 3 {
 			var ok bool
 			count, ok = parseIntArg(conn, cmd.Args[2])
@@ -1528,30 +1212,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 				return
 			}
 		}
-		if count < 0 {
-			withScores = true
-			count = -count
-		}
-		db.View(func(txn *badger.Txn) error {
-			members, scores, err := zrandmember(txn, currentDb(conn), cmd.Args[1], count)
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			if withScores {
-				conn.WriteArray(len(members) * 2)
-				for i := range members {
-					conn.WriteBulk(members[i])
-					conn.WriteBulkString(strconv.FormatFloat(scores[i], 'f', -1, 64))
-				}
-			} else {
-				conn.WriteArray(len(members))
-				for _, m := range members {
-					conn.WriteBulk(m)
-				}
-			}
-			return nil
-		})
+		session.EnqueueOp(zset.ZRandMember(session, cmd.Args[1], count))
 	case "zunion":
 		fallthrough
 	case "zunionstore":
@@ -1611,60 +1272,16 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 			}
 		}
 		if isStore {
-			db.Update(func(txn *badger.Txn) error {
-				m, err := zunion(txn, currentDb(conn), aggregate, keys...)
-				if err != nil {
-					conn.WriteError("ERR " + err.Error())
-					return nil
-				}
-				if len(weights) > 0 {
-					for member, score := range m {
-						m[member] = score * weights[0]
-					}
-				}
-				members := zsetToSlice(m)
-				count, err := storeZSetResult(txn, currentDb(conn), cmd.Args[1], members)
-				if err != nil {
-					conn.WriteError("ERR " + err.Error())
-					return nil
-				}
-				conn.WriteInt(count)
-				return nil
-			})
+			session.EnqueueOp(zset.ZUnionStore(session, cmd.Args[1], aggregate, weights, keys...))
 		} else {
-			db.View(func(txn *badger.Txn) error {
-				m, err := zunion(txn, currentDb(conn), aggregate, keys...)
-				if err != nil {
-					conn.WriteError("ERR " + err.Error())
-					return nil
+			hasWithScores := false
+			for _, arg := range cmd.Args {
+				if strings.EqualFold(string(arg), "withscores") {
+					hasWithScores = true
+					break
 				}
-				if len(weights) > 0 {
-					for member, score := range m {
-						m[member] = score * weights[0]
-					}
-				}
-				hasWithScores := false
-				for _, arg := range cmd.Args {
-					if strings.EqualFold(string(arg), "withscores") {
-						hasWithScores = true
-						break
-					}
-				}
-				members := zsetToSlice(m)
-				if hasWithScores {
-					conn.WriteArray(len(members) * 2)
-					for _, e := range members {
-						conn.WriteBulk(e.member)
-						conn.WriteBulkString(strconv.FormatFloat(e.score, 'f', -1, 64))
-					}
-				} else {
-					conn.WriteArray(len(members))
-					for _, e := range members {
-						conn.WriteBulk(e.member)
-					}
-				}
-				return nil
-			})
+			}
+			session.EnqueueOp(zset.ZUnion(session, aggregate, weights, hasWithScores, keys...))
 		}
 	case "zrangestore":
 		if !checkExactArgs(conn, cmd, 5) {
@@ -1678,37 +1295,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !ok {
 			return
 		}
-		var storeCount int
-		err := db.Update(func(txn *badger.Txn) error {
-			result, err := zrange(txn, currentDb(conn), cmd.Args[2], start, stop, false)
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			// Re-fetch with scores for storage
-			resultWS, err := zrange(txn, currentDb(conn), cmd.Args[2], start, stop, true)
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			members := make([]memberScore, len(result))
-			for i := range result {
-				score, _ := strconv.ParseFloat(string(resultWS[i*2+1]), 64)
-				members[i] = memberScore{member: result[i], score: score}
-			}
-			count, err := storeZSetResult(txn, currentDb(conn), cmd.Args[1], members)
-			if err != nil {
-				conn.WriteError("ERR " + err.Error())
-				return nil
-			}
-			storeCount = count
-			return nil
-		})
-		if err != nil {
-			conn.WriteError("ERR " + err.Error())
-			return
-		}
-		conn.WriteInt(storeCount)
+		session.EnqueueOp(zset.ZRangeStore(session, cmd.Args[1], cmd.Args[2], start, stop))
 	case "pfadd":
 		if !checkMinArgs(conn, cmd, 3) {
 			return
