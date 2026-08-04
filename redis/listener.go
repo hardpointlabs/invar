@@ -19,6 +19,7 @@ import (
 	"github.com/hardpointlabs/invar/redis/keys"
 	"github.com/hardpointlabs/invar/redis/list"
 	"github.com/hardpointlabs/invar/redis/set"
+	redisstrings "github.com/hardpointlabs/invar/redis/strings"
 	"github.com/hardpointlabs/invar/redis/zset"
 	"github.com/rs/zerolog/log"
 	"github.com/tidwall/redcon"
@@ -327,7 +328,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !checkExactArgs(conn, cmd, 3) {
 			return
 		}
-		setKey(conn, db, cmd.Args[1], cmd.Args[2])
+		session.EnqueueOp(redisstrings.Set(session, cmd.Args[1], cmd.Args[2]))
 	case "setbit":
 		if !checkExactArgs(conn, cmd, 4) {
 			return
@@ -357,12 +358,12 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !ok {
 			return
 		}
-		setKeyWithTTL(conn, db, cmd.Args[1], cmd.Args[3], sec)
+		session.EnqueueOp(redisstrings.SetEx(session, cmd.Args[1], cmd.Args[3], sec))
 	case "strlen":
 		if !checkExactArgs(conn, cmd, 2) {
 			return
 		}
-		strlenKey(conn, db, cmd.Args[1])
+		session.EnqueueOp(redisstrings.Strlen(session, cmd.Args[1]))
 	case "substr":
 		if !checkExactArgs(conn, cmd, 4) {
 			return
@@ -375,7 +376,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !ok {
 			return
 		}
-		substrKey(conn, db, cmd.Args[1], start, end)
+		session.EnqueueOp(redisstrings.Substr(session, cmd.Args[1], start, end))
 	case "getbit":
 		if !checkExactArgs(conn, cmd, 3) {
 			return
@@ -393,7 +394,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !checkExactArgs(conn, cmd, 2) {
 			return
 		}
-		getKey(conn, db, cmd.Args[1])
+		session.EnqueueOp(redisstrings.Get(session, cmd.Args[1]))
 	case "mget":
 		if !checkMinArgs(conn, cmd, 2) {
 			return
@@ -403,12 +404,12 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !checkExactArgs(conn, cmd, 3) {
 			return
 		}
-		getSet(conn, db, cmd.Args[1], cmd.Args[2])
+		session.EnqueueOp(redisstrings.GetSet(session, cmd.Args[1], cmd.Args[2]))
 	case "getdel":
 		if !checkExactArgs(conn, cmd, 2) {
 			return
 		}
-		getDel(conn, db, cmd.Args[1])
+		session.EnqueueOp(redisstrings.GetDel(session, cmd.Args[1]))
 	case "move":
 		if !checkExactArgs(conn, cmd, 3) {
 			return
@@ -443,7 +444,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !checkExactArgs(conn, cmd, 3) {
 			return
 		}
-		setNX(conn, db, cmd.Args[1], cmd.Args[2])
+		session.EnqueueOp(redisstrings.SetNX(session, cmd.Args[1], cmd.Args[2]))
 	case "pttl":
 		if !checkExactArgs(conn, cmd, 2) {
 			return
@@ -467,7 +468,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !checkExactArgs(conn, cmd, 2) {
 			return
 		}
-		incrementKey(conn, db, cmd.Args[1], 1)
+		session.EnqueueOp(redisstrings.Increment(session, cmd.Args[1], 1))
 	case "incrby":
 		if !checkExactArgs(conn, cmd, 3) {
 			return
@@ -476,12 +477,12 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !ok {
 			return
 		}
-		incrementKey(conn, db, cmd.Args[1], amount)
+		session.EnqueueOp(redisstrings.Increment(session, cmd.Args[1], amount))
 	case "decr":
 		if !checkExactArgs(conn, cmd, 2) {
 			return
 		}
-		incrementKey(conn, db, cmd.Args[1], -1)
+		session.EnqueueOp(redisstrings.Increment(session, cmd.Args[1], -1))
 	case "decrby":
 		if !checkExactArgs(conn, cmd, 3) {
 			return
@@ -490,17 +491,17 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !ok {
 			return
 		}
-		incrementKey(conn, db, cmd.Args[1], -amount)
+		session.EnqueueOp(redisstrings.Increment(session, cmd.Args[1], -amount))
 	case "append":
 		if !checkExactArgs(conn, cmd, 3) {
 			return
 		}
-		appendKey(conn, db, cmd.Args[1], cmd.Args[2])
+		session.EnqueueOp(redisstrings.Append(session, cmd.Args[1], cmd.Args[2]))
 	case "getex":
 		if !checkMinArgs(conn, cmd, 2) {
 			return
 		}
-		getEx(conn, db, cmd.Args[1:]...)
+		session.EnqueueOp(redisstrings.GetEx(session, cmd.Args[1:]...))
 	case "getrange":
 		if !checkExactArgs(conn, cmd, 4) {
 			return
@@ -513,7 +514,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !ok {
 			return
 		}
-		substrKey(conn, db, cmd.Args[1], start, end)
+		session.EnqueueOp(redisstrings.Substr(session, cmd.Args[1], start, end))
 	case "incrbyfloat":
 		if !checkExactArgs(conn, cmd, 3) {
 			return
@@ -522,19 +523,19 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !ok {
 			return
 		}
-		incrByFloat(conn, db, cmd.Args[1], amount)
+		session.EnqueueOp(redisstrings.IncrByFloat(session, cmd.Args[1], amount))
 	case "mset":
 		if len(cmd.Args) < 3 || (len(cmd.Args)-1)%2 != 0 {
 			conn.WriteError("ERR wrong number of arguments for 'mset' command")
 			return
 		}
-		msetKeys(conn, db, cmd.Args[1:]...)
+		session.EnqueueOp(redisstrings.MSet(session, cmd.Args[1:]...))
 	case "msetnx":
 		if len(cmd.Args) < 3 || (len(cmd.Args)-1)%2 != 0 {
 			conn.WriteError("ERR wrong number of arguments for 'msetnx' command")
 			return
 		}
-		msetnxKeys(conn, db, cmd.Args[1:]...)
+		session.EnqueueOp(redisstrings.MSetNX(session, cmd.Args[1:]...))
 	case "psetex":
 		if !checkExactArgs(conn, cmd, 4) {
 			return
@@ -543,7 +544,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !ok {
 			return
 		}
-		setKeyWithTTLMs(conn, db, cmd.Args[1], cmd.Args[3], ms)
+		session.EnqueueOp(redisstrings.PSetEx(session, cmd.Args[1], cmd.Args[3], ms))
 	case "setrange":
 		if !checkExactArgs(conn, cmd, 4) {
 			return
@@ -552,7 +553,11 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		if !ok {
 			return
 		}
-		setRangeKey(conn, db, cmd.Args[1], offset, cmd.Args[3])
+		if offset < 0 {
+			conn.WriteError("ERR offset is out of range")
+			return
+		}
+		session.EnqueueOp(redisstrings.SetRange(session, cmd.Args[1], offset, cmd.Args[3]))
 	case "type":
 		if !checkExactArgs(conn, cmd, 2) {
 			return

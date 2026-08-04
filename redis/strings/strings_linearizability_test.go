@@ -1,18 +1,20 @@
-package redis
+package strings
 
 // Linearizability checks for the basic string get/set operations.
 //
 // We use Porcupine (https://github.com/anishathalye/porcupine) to verify that
-// the observed histories produced by concurrent callers of setKey / getKey are
-// consistent with a sequentially-correct key-value register model.
+// the observed histories produced by concurrent callers of the strings
+// package's Set / Get operations are consistent with a sequentially-correct
+// key-value register model.
 //
-// The guarantees modelled here follow directly from BadgerDB's serializable
-// read-write transactions (db.Update) and read-only snapshots (db.View):
-//   - Every setKey completes an atomic committed write; no torn writes.
-//   - Every getKey reads from a consistent snapshot taken at the start of the
+// The guarantees modelled here follow directly from the kv.KeyValueStore's
+// serializable read-write transactions (Update) and read-only snapshots
+// (Read):
+//   - Every Set completes an atomic committed write; no torn writes.
+//   - Every Get reads from a consistent snapshot taken at the start of the
 //     transaction; it cannot observe a partially-written value.
-//   - Because BadgerDB serialises concurrent writes with MVCC, the full
-//     execution is serialisable, which implies linearizability for
+//   - Because the underlying store serialises concurrent writes with MVCC, the
+//     full execution is serialisable, which implies linearizability for
 //     single-object operations.
 //
 // Model (per key, Porcupine partition):
@@ -26,122 +28,40 @@ package redis
 
 import (
 	"fmt"
-	"io"
-	"net"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/anishathalye/porcupine"
-	"github.com/dgraph-io/badger/v4"
+	"github.com/hardpointlabs/invar/kv"
 	"github.com/hardpointlabs/invar/redis/common"
-	"github.com/tidwall/redcon"
+	"github.com/hardpointlabs/invar/redis/testutil"
 )
 
-// ---------------------------------------------------------------------------
-// Mock redcon.Conn
-// ---------------------------------------------------------------------------
-
-// mockConn is a minimal in-memory implementation of redcon.Conn.
-// It records the most recent response written so the caller can inspect it.
-type mockConn struct {
-	mu      sync.Mutex
-	last    string // last non-null response written
-	wasNull bool   // true if the last write was WriteNull
-	wasErr  bool   // true if the last write was WriteError
-	ctx     interface{}
-}
-
-func newMockConn() *mockConn {
-	c := &mockConn{}
-	c.ctx = common.NewSession(nil)
-	return c
-}
-
+// result returns the most recent response recorded by the mockConn, in a
+// shape suitable for the Porcupine model (value, isNull, isErr).
 func (c *mockConn) result() (value string, isNull bool, isErr bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.last, c.wasNull, c.wasErr
+	if len(c.writes) == 0 {
+		return "", false, false
+	}
+	last := c.writes[len(c.writes)-1]
+	switch {
+	case strings.HasPrefix(last, "null:"):
+		return "", true, false
+	case strings.HasPrefix(last, "err:"):
+		return strings.TrimPrefix(last, "err:"), false, true
+	default:
+		parts := strings.SplitN(last, ":", 2)
+		if len(parts) == 2 {
+			return parts[1], false, false
+		}
+		return "", false, false
+	}
 }
-
-func (c *mockConn) RemoteAddr() string { return "127.0.0.1:0" }
-func (c *mockConn) Close() error       { return nil }
-func (c *mockConn) WriteError(msg string) {
-	c.mu.Lock()
-	c.last = msg
-	c.wasNull = false
-	c.wasErr = true
-	c.mu.Unlock()
-}
-func (c *mockConn) WriteString(str string) {
-	c.mu.Lock()
-	c.last = str
-	c.wasNull = false
-	c.wasErr = false
-	c.mu.Unlock()
-}
-func (c *mockConn) WriteBulk(bulk []byte) {
-	c.mu.Lock()
-	c.last = string(bulk)
-	c.wasNull = false
-	c.wasErr = false
-	c.mu.Unlock()
-}
-func (c *mockConn) WriteBulkString(bulk string) {
-	c.mu.Lock()
-	c.last = bulk
-	c.wasNull = false
-	c.wasErr = false
-	c.mu.Unlock()
-}
-func (c *mockConn) WriteBulkFrom(num int64, reader io.Reader) {
-	// not implemented
-}
-func (c *mockConn) WriteInt(num int) {
-	c.mu.Lock()
-	c.last = fmt.Sprintf("%d", num)
-	c.wasNull = false
-	c.wasErr = false
-	c.mu.Unlock()
-}
-func (c *mockConn) WriteInt64(num int64) {
-	c.mu.Lock()
-	c.last = fmt.Sprintf("%d", num)
-	c.wasNull = false
-	c.wasErr = false
-	c.mu.Unlock()
-}
-func (c *mockConn) WriteUint64(num uint64) {
-	c.mu.Lock()
-	c.last = fmt.Sprintf("%d", num)
-	c.wasNull = false
-	c.wasErr = false
-	c.mu.Unlock()
-}
-func (c *mockConn) WriteArray(count int) {}
-func (c *mockConn) WriteNull() {
-	c.mu.Lock()
-	c.last = ""
-	c.wasNull = true
-	c.wasErr = false
-	c.mu.Unlock()
-}
-func (c *mockConn) WriteRaw(data []byte) {
-	c.mu.Lock()
-	c.last = string(data)
-	c.wasNull = false
-	c.wasErr = false
-	c.mu.Unlock()
-}
-func (c *mockConn) WriteAny(any interface{})       {}
-func (c *mockConn) Context() interface{}           { return c.ctx }
-func (c *mockConn) SetContext(v interface{})       { c.ctx = v }
-func (c *mockConn) SetReadBuffer(bytes int)        {}
-func (c *mockConn) Detach() redcon.DetachedConn    { return nil }
-func (c *mockConn) ReadPipeline() []redcon.Command { return nil }
-func (c *mockConn) PeekPipeline() []redcon.Command { return nil }
-func (c *mockConn) NetConn() net.Conn              { return nil }
 
 // ---------------------------------------------------------------------------
 // Porcupine model for a single string register (GET / SET)
@@ -228,7 +148,7 @@ var kvStringModel = porcupine.Model{
 }
 
 // ---------------------------------------------------------------------------
-// Helpers for recording operations against a real BadgerDB instance
+// Helpers for recording operations against a real kv.KeyValueStore instance
 // ---------------------------------------------------------------------------
 
 // opRecord carries the timing and result of a single get/set call.
@@ -240,10 +160,19 @@ type opRecord struct {
 	clientID int
 }
 
-func doSet(db *badger.DB, key, value string, clientID int) opRecord {
+func doSet(session *common.Session, kvs kv.KeyValueStore, key, value string, clientID int) opRecord {
 	conn := newMockConn()
 	callNs := time.Now().UnixNano()
-	setKey(conn, db, []byte(key), []byte(value))
+	var result any
+	err := kvs.Update(func(tx kv.Tx) error {
+		var err error
+		result, err = Set(session, []byte(key), []byte(value)).DbOp(tx)
+		return err
+	})
+	if err != nil {
+		panic(err)
+	}
+	Set(session, []byte(key), []byte(value)).WireOp(conn, result, nil)
 	returnNs := time.Now().UnixNano()
 	return opRecord{
 		input:    strInput{op: opSet, key: key, value: value},
@@ -254,10 +183,16 @@ func doSet(db *badger.DB, key, value string, clientID int) opRecord {
 	}
 }
 
-func doGet(db *badger.DB, key string, clientID int) opRecord {
+func doGet(session *common.Session, kvs kv.KeyValueStore, key string, clientID int) opRecord {
 	conn := newMockConn()
 	callNs := time.Now().UnixNano()
-	getKey(conn, db, []byte(key))
+	result, err := kvs.Read(func(tx kv.Tx) (any, error) {
+		return Get(session, []byte(key)).DbOp(tx)
+	})
+	if err != nil {
+		panic(err)
+	}
+	Get(session, []byte(key)).WireOp(conn, result, nil)
 	returnNs := time.Now().UnixNano()
 
 	got, isNull, _ := conn.result()
@@ -297,12 +232,11 @@ func toOperations(records []opRecord) []porcupine.Operation {
 // TestLinearizabilitySetGetSerial verifies a simple sequential history:
 // set("foo", "bar") then get("foo") -> "bar". Trivially linearizable.
 func TestLinearizabilitySetGetSerial(t *testing.T) {
-	db := inMemDB(t)
-	defer db.Close()
+	session, kvs := testutil.NewTestSession(t)
 
 	var records []opRecord
-	records = append(records, doSet(db, "foo", "bar", 0))
-	records = append(records, doGet(db, "foo", 0))
+	records = append(records, doSet(session, kvs, "foo", "bar", 0))
+	records = append(records, doGet(session, kvs, "foo", 0))
 
 	if !porcupine.CheckOperations(kvStringModel, toOperations(records)) {
 		t.Fatal("expected serial set/get history to be linearizable")
@@ -312,11 +246,10 @@ func TestLinearizabilitySetGetSerial(t *testing.T) {
 // TestLinearizabilityGetOnAbsent verifies that getting a key that was never
 // set returns "" (nil), consistent with the initial absent state.
 func TestLinearizabilityGetOnAbsent(t *testing.T) {
-	db := inMemDB(t)
-	defer db.Close()
+	session, kvs := testutil.NewTestSession(t)
 
 	var records []opRecord
-	records = append(records, doGet(db, "nonexistent", 0))
+	records = append(records, doGet(session, kvs, "nonexistent", 0))
 
 	if !porcupine.CheckOperations(kvStringModel, toOperations(records)) {
 		t.Fatal("expected get-on-absent history to be linearizable")
@@ -326,13 +259,12 @@ func TestLinearizabilityGetOnAbsent(t *testing.T) {
 // TestLinearizabilityOverwrite verifies a set-overwrite-get chain:
 // set("k","v1"), set("k","v2"), get("k") -> "v2".
 func TestLinearizabilityOverwrite(t *testing.T) {
-	db := inMemDB(t)
-	defer db.Close()
+	session, kvs := testutil.NewTestSession(t)
 
 	var records []opRecord
-	records = append(records, doSet(db, "k", "v1", 0))
-	records = append(records, doSet(db, "k", "v2", 0))
-	records = append(records, doGet(db, "k", 0))
+	records = append(records, doSet(session, kvs, "k", "v1", 0))
+	records = append(records, doSet(session, kvs, "k", "v2", 0))
+	records = append(records, doGet(session, kvs, "k", 0))
 
 	if !porcupine.CheckOperations(kvStringModel, toOperations(records)) {
 		t.Fatal("expected overwrite history to be linearizable")
@@ -340,11 +272,11 @@ func TestLinearizabilityOverwrite(t *testing.T) {
 }
 
 // TestLinearizabilityConcurrent spawns several goroutines that interleave
-// sets and gets against a shared key. BadgerDB's serialisable MVCC guarantees
-// that the resulting history is linearizable; Porcupine confirms this.
+// sets and gets against a shared key. The store's serialisable MVCC
+// guarantees that the resulting history is linearizable; Porcupine confirms
+// this.
 func TestLinearizabilityConcurrent(t *testing.T) {
-	db := inMemDB(t)
-	defer db.Close()
+	session, kvs := testutil.NewTestSession(t)
 
 	const (
 		numClients   = 6
@@ -364,9 +296,9 @@ func TestLinearizabilityConcurrent(t *testing.T) {
 			for i := 0; i < opsPerClient; i++ {
 				var r opRecord
 				if i%2 == 0 {
-					r = doSet(db, "shared", fmt.Sprintf("c%d-v%d", clientID, i), clientID)
+					r = doSet(session, kvs, "shared", fmt.Sprintf("c%d-v%d", clientID, i), clientID)
 				} else {
-					r = doGet(db, "shared", clientID)
+					r = doGet(session, kvs, "shared", clientID)
 				}
 				mu.Lock()
 				records = append(records, r)
@@ -385,8 +317,7 @@ func TestLinearizabilityConcurrent(t *testing.T) {
 // keys concurrently. Porcupine partitions by key, so each key's history is
 // checked independently, which is both correct and efficient.
 func TestLinearizabilityConcurrentDisjointKeys(t *testing.T) {
-	db := inMemDB(t)
-	defer db.Close()
+	session, kvs := testutil.NewTestSession(t)
 
 	keys := []string{"alpha", "beta", "gamma", "delta"}
 
@@ -403,9 +334,9 @@ func TestLinearizabilityConcurrentDisjointKeys(t *testing.T) {
 			for i := 0; i < 8; i++ {
 				var r opRecord
 				if i%3 != 0 {
-					r = doSet(db, k, fmt.Sprintf("v%d", i), clientID)
+					r = doSet(session, kvs, k, fmt.Sprintf("v%d", i), clientID)
 				} else {
-					r = doGet(db, k, clientID)
+					r = doGet(session, kvs, k, clientID)
 				}
 				mu.Lock()
 				records = append(records, r)
@@ -423,7 +354,7 @@ func TestLinearizabilityConcurrentDisjointKeys(t *testing.T) {
 // TestLinearizabilityDetectsViolation confirms that Porcupine correctly
 // identifies a *manually crafted* non-linearizable history. This sanity-check
 // verifies that the model and checker are wired up correctly; it does not
-// exercise BadgerDB.
+// exercise the KV store.
 //
 // History (single key "x", three clients):
 //
