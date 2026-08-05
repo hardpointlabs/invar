@@ -44,7 +44,7 @@ type Tx interface {
 	Get(key []byte) (Item, error)
 	Set(entry Entry) error
 	Delete(key []byte) error
-	NewIterator(prefix []byte) *KeyValueIterator
+	NewIterator(prefix []byte) KeyValueIterator
 	Commit() error
 	Discard()
 }

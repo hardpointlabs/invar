@@ -858,8 +858,7 @@ func TestIteratorBasic(t *testing.T) {
 	// Read them back via iterator
 	result, err := db.Read(func(tx kv.Tx) (any, error) {
 		prefix := session.PrivateKey([]byte("test\x00"))
-		kvIt := tx.NewIterator(prefix)
-		it := *kvIt
+		it := tx.NewIterator(prefix)
 		defer it.Close()
 
 		var keys [][]byte

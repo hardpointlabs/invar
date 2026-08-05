@@ -83,8 +83,7 @@ type MemberScore struct {
 // loadAllMembers returns all members in score order (ascending, with lex tie-break).
 func loadAllMembers(tx kv.Tx, session *common.Session, setName []byte) ([]MemberScore, error) {
 	prefix := scorePrefix(session, setName)
-	kvIt := tx.NewIterator(prefix)
-	it := *kvIt
+	it := tx.NewIterator(prefix)
 	defer it.Close()
 
 	var result []MemberScore
@@ -103,8 +102,7 @@ func loadAllMembers(tx kv.Tx, session *common.Session, setName []byte) ([]Member
 // clearInternalKeys deletes all score and member index keys plus the sentinel.
 func clearInternalKeys(tx kv.Tx, session *common.Session, setName []byte) error {
 	scorePfx := scorePrefix(session, setName)
-	kvIt := tx.NewIterator(scorePfx)
-	it := *kvIt
+	it := tx.NewIterator(scorePfx)
 	for it.Next() {
 		if err := tx.Delete(append([]byte{}, it.Item().Key()...)); err != nil {
 			it.Close()
@@ -114,8 +112,7 @@ func clearInternalKeys(tx kv.Tx, session *common.Session, setName []byte) error 
 	it.Close()
 
 	memberPfx := memberPrefix(session, setName)
-	kvIt2 := tx.NewIterator(memberPfx)
-	it2 := *kvIt2
+	it2 := tx.NewIterator(memberPfx)
 	for it2.Next() {
 		if err := tx.Delete(append([]byte{}, it2.Item().Key()...)); err != nil {
 			it2.Close()

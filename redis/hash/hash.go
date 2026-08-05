@@ -267,8 +267,7 @@ func HKeys(session *common.Session, hash []byte) common.QueuedOp {
 		}
 
 		prefix := fieldPrefix(session, hash)
-		kvIt := tx.NewIterator(prefix)
-		it := *kvIt
+		it := tx.NewIterator(prefix)
 		defer it.Close()
 
 		var keys [][]byte
@@ -304,8 +303,7 @@ func HVals(session *common.Session, hash []byte) common.QueuedOp {
 		}
 
 		prefix := fieldPrefix(session, hash)
-		kvIt := tx.NewIterator(prefix)
-		it := *kvIt
+		it := tx.NewIterator(prefix)
 		defer it.Close()
 
 		var vals [][]byte
@@ -345,8 +343,7 @@ func HGetAll(session *common.Session, hash []byte) common.QueuedOp {
 		}
 
 		prefix := fieldPrefix(session, hash)
-		kvIt := tx.NewIterator(prefix)
-		it := *kvIt
+		it := tx.NewIterator(prefix)
 		defer it.Close()
 
 		var pairs [][]byte
@@ -509,8 +506,7 @@ func HRandField(session *common.Session, hash []byte, count int, withValues bool
 		}
 
 		prefix := fieldPrefix(session, hash)
-		kvIt := tx.NewIterator(prefix)
-		it := *kvIt
+		it := tx.NewIterator(prefix)
 		defer it.Close()
 
 		fieldList := make([]string, 0)
@@ -632,8 +628,7 @@ func HScan(session *common.Session, hash []byte, pattern string, count int) comm
 		}
 
 		prefix := fieldPrefix(session, hash)
-		kvIt := tx.NewIterator(prefix)
-		it := *kvIt
+		it := tx.NewIterator(prefix)
 		defer it.Close()
 
 		matchPattern := len(pattern) > 0

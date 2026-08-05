@@ -211,12 +211,12 @@ func (t badgerTx) Delete(key []byte) error {
 	return t.tx.Delete(key)
 }
 
-func (t badgerTx) NewIterator(prefix []byte) *KeyValueIterator {
+func (t badgerTx) NewIterator(prefix []byte) KeyValueIterator {
 	opts := badger.DefaultIteratorOptions
 	opts.Prefix = prefix
 	badgerIt := t.tx.NewIterator(opts)
 	var kvIt KeyValueIterator = &badgerIterator{iter: badgerIt, prefix: prefix}
-	return &kvIt
+	return kvIt
 }
 
 func (t badgerTx) Commit() error {

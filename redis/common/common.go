@@ -216,7 +216,7 @@ func WriteUint32Sentinel(tx kv.Tx, session *Session, key []byte, count uint32, t
 // ClearPrefixedKeys deletes all keys under the given internal prefix, then deletes the sentinel key.
 func ClearPrefixedKeys(tx kv.Tx, prefix, sentinelKey []byte) error {
 	kvIt := tx.NewIterator(prefix)
-	it := *kvIt
+	it := kvIt
 	defer it.Close()
 	for it.Next() {
 		if err := tx.Delete(it.Item().Key()); err != nil {

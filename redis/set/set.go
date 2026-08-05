@@ -37,8 +37,7 @@ func membersPrefix(session *common.Session, setName []byte) []byte {
 
 func loadSetMembers(tx kv.Tx, session *common.Session, setName []byte) (map[string]struct{}, error) {
 	prefix := membersPrefix(session, setName)
-	kvIt := tx.NewIterator(prefix)
-	it := *kvIt
+	it := tx.NewIterator(prefix)
 	defer it.Close()
 
 	members := make(map[string]struct{})
@@ -166,8 +165,7 @@ func SMembers(session *common.Session, key []byte) common.QueuedOp {
 		}
 
 		prefix := membersPrefix(session, key)
-		kvIt := tx.NewIterator(prefix)
-		it := *kvIt
+		it := tx.NewIterator(prefix)
 		defer it.Close()
 
 		var members [][]byte
@@ -234,8 +232,7 @@ func SPop(session *common.Session, key []byte) common.QueuedOp {
 		}
 
 		prefix := membersPrefix(session, key)
-		kvIt := tx.NewIterator(prefix)
-		it := *kvIt
+		it := tx.NewIterator(prefix)
 		defer it.Close()
 
 		idx := rand.IntN(int(count))
