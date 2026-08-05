@@ -304,6 +304,14 @@
     "setup": [["JSON.SET", "path_strapp", "$", "{\"txt\":\"hello\"}"]]
   },
   {
+    "name": "STRAPPEND legacy 3-arg form appends to root string",
+    "command": ["JSON.STRAPPEND", "path_strapp_legacy", "\"bar\""],
+    "expected": 6,
+    "type": "integer",
+    "version": "1.0.0",
+    "setup": [["JSON.SET", "path_strapp_legacy", "$", "\"foo\""]]
+  },
+  {
     "name": "STRLEN returns string length",
     "command": ["JSON.STRLEN", "path_strlen", "$.txt"],
     "expected": 5,

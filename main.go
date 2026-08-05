@@ -29,7 +29,7 @@ type Listener interface {
 }
 
 // listenAddr is a parsed network address that understands "tcp:6379" and
-// "unix:/var/run/invar.sock" syntax.
+// "unix:/var/run/db.sock" syntax.
 type listenAddr struct {
 	network string
 	address string

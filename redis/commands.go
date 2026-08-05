@@ -6,22 +6,6 @@ import (
 	"github.com/tidwall/redcon"
 )
 
-type SetCommand string
-
-const (
-	Nx      SetCommand = "nx"
-	Xx      SetCommand = "xx"
-	Ifeq    SetCommand = "ifeq"
-	Ifne    SetCommand = "ifne"
-	Ifdeq   SetCommand = "ifdeq"
-	Ifdne   SetCommand = "ifdne"
-	Ex      SetCommand = "ex"
-	Px      SetCommand = "px"
-	Exat    SetCommand = "exat"
-	Pxat    SetCommand = "pxat"
-	KeepTtl SetCommand = "keepttl"
-)
-
 func checkExactArgs(conn redcon.Conn, cmd redcon.Command, n int) bool {
 	if len(cmd.Args) != n {
 		conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
