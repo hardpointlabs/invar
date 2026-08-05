@@ -1,4 +1,4 @@
-package redis
+package json
 
 import (
 	"encoding/json"
@@ -510,7 +510,7 @@ func FuzzJSONGet(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, path string) {
 		// Must not panic; errors are fine.
-		_ , _ = doc.get(path)
+		_, _ = doc.get(path)
 	})
 }
 

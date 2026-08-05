@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"strconv"
@@ -16,6 +17,7 @@ import (
 	"github.com/hardpointlabs/invar/redis/common"
 	"github.com/hardpointlabs/invar/redis/hash"
 	"github.com/hardpointlabs/invar/redis/hll"
+	redisjson "github.com/hardpointlabs/invar/redis/json"
 	"github.com/hardpointlabs/invar/redis/keys"
 	"github.com/hardpointlabs/invar/redis/list"
 	"github.com/hardpointlabs/invar/redis/set"
@@ -30,39 +32,9 @@ var addr = ":6379"
 // key delimeters
 const prefixSeparator = ":"
 
-// public redis types for LSM tree entries (not private/internal types)
-const (
-	RedisString byte = iota
-	RedisList
-	RedisSet
-	RedisSortedSet
-	RedisHash
-	RedisStream
-	RedisVectorSet
-	RedisBloom
-	RedisJSON
-)
-
 func currentDbPrefix(conn redcon.Conn) []byte {
 	return []byte(strconv.Itoa(currentDb(conn)) + prefixSeparator)
 }
-
-// rawKeyPrefix builds the public key prefix "{dbSlot}:{keyName}" for user-accessible keys.
-func rawKeyPrefix(keyName []byte, dbSlot int) []byte {
-	return append([]byte(strconv.Itoa(dbSlot)+prefixSeparator), keyName...)
-}
-
-// copyItemValue safely copies a Badger item's value into a new []byte.
-func copyItemValue(item *badger.Item) ([]byte, error) {
-	var out []byte
-	err := item.Value(func(val []byte) error {
-		out = append([]byte{}, val...)
-		return nil
-	})
-	return out, err
-}
-
-// readUint32Sentinel reads a 4-byte big-endian uint32 from a public sentinel key.
 
 func upsertSession(conn redcon.Conn, kvs kv.KeyValueStore) *common.Session {
 	if ctx := conn.Context(); ctx != nil {
@@ -1418,43 +1390,257 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		}
 		session.EnqueueOp(bloom.Bfinfo(session, cmd.Args[1]))
 	case "json.set":
-		handleJSONSet(conn, db, cmd)
+		if !checkMinArgs(conn, cmd, 4) {
+			return
+		}
+		var value any
+		if err := json.Unmarshal(cmd.Args[3], &value); err != nil {
+			conn.WriteError("ERR invalid JSON")
+			return
+		}
+		nx := false
+		xx := false
+		ft := redisjson.FphaNone
+		for i := 4; i < len(cmd.Args); i++ {
+			flag := strings.ToUpper(string(cmd.Args[i]))
+			switch flag {
+			case "NX":
+				nx = true
+			case "XX":
+				xx = true
+			case "FPHA":
+				if i+1 >= len(cmd.Args) {
+					conn.WriteError("ERR syntax error")
+					return
+				}
+				i++
+				parsed, err := redisjson.ParseFPHA(string(cmd.Args[i]))
+				if err != nil {
+					conn.WriteError("ERR syntax error")
+					return
+				}
+				ft = parsed
+			default:
+				conn.WriteError("ERR syntax error")
+				return
+			}
+		}
+		if nx && xx {
+			conn.WriteError("ERR NX and XX are mutually exclusive")
+			return
+		}
+		if ft != redisjson.FphaNone {
+			if err := redisjson.ValidateFPHA(value, ft); err != nil {
+				conn.WriteError(err.Error())
+				return
+			}
+		}
+		session.EnqueueOp(redisjson.Set(session, cmd.Args[1], string(cmd.Args[2]), value, nx, xx, ft))
 	case "json.get":
-		handleJSONGet(conn, db, cmd)
+		if !checkMinArgs(conn, cmd, 2) {
+			return
+		}
+		paths := make([]string, 0, len(cmd.Args)-2)
+		for _, p := range cmd.Args[2:] {
+			paths = append(paths, string(p))
+		}
+		session.EnqueueOp(redisjson.Get(session, cmd.Args[1], paths))
 	case "json.del":
-		handleJSONDel(conn, db, cmd)
+		if !checkMinArgs(conn, cmd, 2) {
+			return
+		}
+		paths := make([]string, 0, len(cmd.Args)-2)
+		for _, p := range cmd.Args[2:] {
+			paths = append(paths, string(p))
+		}
+		session.EnqueueOp(redisjson.Del(session, cmd.Args[1], paths))
 	case "json.type":
-		handleJSONType(conn, db, cmd)
+		if !checkMinArgs(conn, cmd, 2) {
+			return
+		}
+		path := "$"
+		if len(cmd.Args) >= 3 {
+			path = string(cmd.Args[2])
+		}
+		session.EnqueueOp(redisjson.Type(session, cmd.Args[1], path))
 	case "json.arrappend":
-		handleJSONArrAppend(conn, db, cmd)
+		if !checkMinArgs(conn, cmd, 4) {
+			return
+		}
+		values := make([]any, 0, len(cmd.Args)-3)
+		for i := 3; i < len(cmd.Args); i++ {
+			var v any
+			if err := json.Unmarshal(cmd.Args[i], &v); err != nil {
+				conn.WriteError("ERR invalid JSON")
+				return
+			}
+			values = append(values, v)
+		}
+		session.EnqueueOp(redisjson.ArrAppend(session, cmd.Args[1], string(cmd.Args[2]), values))
 	case "json.arrindex":
-		handleJSONArrIndex(conn, db, cmd)
+		if !checkMinArgs(conn, cmd, 4) {
+			return
+		}
+		var value any
+		if err := json.Unmarshal(cmd.Args[3], &value); err != nil {
+			conn.WriteError("ERR invalid JSON")
+			return
+		}
+		session.EnqueueOp(redisjson.ArrIndex(session, cmd.Args[1], string(cmd.Args[2]), value))
 	case "json.arrlen":
-		handleJSONArrLen(conn, db, cmd)
+		if !checkMinArgs(conn, cmd, 2) {
+			return
+		}
+		path := "$"
+		if len(cmd.Args) >= 3 {
+			path = string(cmd.Args[2])
+		}
+		session.EnqueueOp(redisjson.ArrLen(session, cmd.Args[1], path))
 	case "json.numincrby":
-		handleJSONNumIncrBy(conn, db, cmd)
+		if !checkMinArgs(conn, cmd, 4) {
+			return
+		}
+		delta, err := strconv.ParseFloat(string(cmd.Args[3]), 64)
+		if err != nil {
+			conn.WriteError("ERR value is not a number")
+			return
+		}
+		session.EnqueueOp(redisjson.NumIncrBy(session, cmd.Args[1], string(cmd.Args[2]), delta))
 	case "json.nummultby":
-		handleJSONNumMultBy(conn, db, cmd)
+		if !checkMinArgs(conn, cmd, 4) {
+			return
+		}
+		factor, err := strconv.ParseFloat(string(cmd.Args[3]), 64)
+		if err != nil {
+			conn.WriteError("ERR value is not a number")
+			return
+		}
+		session.EnqueueOp(redisjson.NumMultBy(session, cmd.Args[1], string(cmd.Args[2]), factor))
 	case "json.objkeys":
-		handleJSONObjKeys(conn, db, cmd)
+		if !checkMinArgs(conn, cmd, 2) {
+			return
+		}
+		path := "$"
+		if len(cmd.Args) >= 3 {
+			path = string(cmd.Args[2])
+		}
+		session.EnqueueOp(redisjson.ObjKeys(session, cmd.Args[1], path))
 	case "json.objlen":
-		handleJSONObjLen(conn, db, cmd)
+		if !checkMinArgs(conn, cmd, 2) {
+			return
+		}
+		path := "$"
+		if len(cmd.Args) >= 3 {
+			path = string(cmd.Args[2])
+		}
+		session.EnqueueOp(redisjson.ObjLen(session, cmd.Args[1], path))
 	case "json.strappend":
-		handleJSONStrAppend(conn, db, cmd)
+		if !checkMinArgs(conn, cmd, 3) {
+			return
+		}
+		path := "$"
+		valueIdx := 3
+		if len(cmd.Args) == 4 {
+			path = string(cmd.Args[2])
+			valueIdx = 3
+		} else if len(cmd.Args) == 3 {
+			valueIdx = 2
+		}
+		var suffix string
+		if err := json.Unmarshal(cmd.Args[valueIdx], &suffix); err != nil {
+			conn.WriteError("ERR invalid JSON string")
+			return
+		}
+		session.EnqueueOp(redisjson.StrAppend(session, cmd.Args[1], path, suffix))
 	case "json.strlen":
-		handleJSONStrLen(conn, db, cmd)
+		if !checkMinArgs(conn, cmd, 2) {
+			return
+		}
+		path := "$"
+		if len(cmd.Args) >= 3 {
+			path = string(cmd.Args[2])
+		}
+		session.EnqueueOp(redisjson.StrLen(session, cmd.Args[1], path))
 	case "json.mget":
-		handleJSONMGet(conn, db, cmd)
+		if !checkMinArgs(conn, cmd, 3) {
+			return
+		}
+		path := string(cmd.Args[len(cmd.Args)-1])
+		keys := cmd.Args[1 : len(cmd.Args)-1]
+		session.EnqueueOp(redisjson.MGet(session, keys, path))
 	case "json.resp":
-		handleJSONResp(conn, db, cmd)
+		if !checkMinArgs(conn, cmd, 2) {
+			return
+		}
+		path := ""
+		if len(cmd.Args) >= 3 {
+			path = string(cmd.Args[2])
+		}
+		session.EnqueueOp(redisjson.Resp(session, cmd.Args[1], path))
 	case "json.clear":
-		handleJSONClear(conn, db, cmd)
+		if !checkMinArgs(conn, cmd, 2) {
+			return
+		}
+		path := "$"
+		if len(cmd.Args) >= 3 {
+			path = string(cmd.Args[2])
+		}
+		session.EnqueueOp(redisjson.Clear(session, cmd.Args[1], path))
 	case "json.arrpop":
-		handleJSONArrPop(conn, db, cmd)
+		if !checkMinArgs(conn, cmd, 2) {
+			return
+		}
+		path := "$"
+		idx := -1
+		if len(cmd.Args) >= 3 {
+			path = string(cmd.Args[2])
+		}
+		if len(cmd.Args) >= 4 {
+			var err error
+			idx, err = strconv.Atoi(string(cmd.Args[3]))
+			if err != nil {
+				conn.WriteError("ERR value is not an integer or out of range")
+				return
+			}
+		}
+		session.EnqueueOp(redisjson.ArrPop(session, cmd.Args[1], path, idx))
 	case "json.arrtrim":
-		handleJSONArrTrim(conn, db, cmd)
+		if !checkMinArgs(conn, cmd, 4) {
+			return
+		}
+		start, err := strconv.Atoi(string(cmd.Args[3]))
+		if err != nil {
+			conn.WriteError("ERR value is not an integer or out of range")
+			return
+		}
+		stop := -1
+		if len(cmd.Args) >= 5 {
+			stop, err = strconv.Atoi(string(cmd.Args[4]))
+			if err != nil {
+				conn.WriteError("ERR value is not an integer or out of range")
+				return
+			}
+		}
+		session.EnqueueOp(redisjson.ArrTrim(session, cmd.Args[1], string(cmd.Args[2]), start, stop))
 	case "json.arrinsert":
-		handleJSONArrInsert(conn, db, cmd)
+		if !checkMinArgs(conn, cmd, 5) {
+			return
+		}
+		index, err := strconv.Atoi(string(cmd.Args[3]))
+		if err != nil {
+			conn.WriteError("ERR value is not an integer or out of range")
+			return
+		}
+		values := make([]any, 0, len(cmd.Args)-4)
+		for i := 4; i < len(cmd.Args); i++ {
+			var v any
+			if err := json.Unmarshal(cmd.Args[i], &v); err != nil {
+				conn.WriteError("ERR invalid JSON")
+				return
+			}
+			values = append(values, v)
+		}
+		session.EnqueueOp(redisjson.ArrInsert(session, cmd.Args[1], string(cmd.Args[2]), index, values))
 	case "publish":
 		if !checkExactArgs(conn, cmd, 3) {
 			return

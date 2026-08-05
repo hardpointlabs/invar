@@ -1,10 +1,11 @@
-package redis
+package json
 
 import (
 	"encoding/json"
 	"testing"
 
-	"github.com/dgraph-io/badger/v4"
+	"github.com/hardpointlabs/invar/kv"
+	"github.com/hardpointlabs/invar/redis/common"
 )
 
 func TestJSONPathParsing(t *testing.T) {
@@ -455,40 +456,43 @@ func TestJSONDocumentSerialize(t *testing.T) {
 	}
 }
 
-func TestJSONBadgerDBSetAndGet(t *testing.T) {
-	db := inMemDB(t)
-	defer db.Close()
+// ---------------------------------------------------------------------------
+// kv-backed tests
+// ---------------------------------------------------------------------------
 
-	docJSON := `{"name":"Alice","age":30}`
-	prefix := rawKeyPrefix([]byte("myjson"), 0)
-
-	err := db.Update(func(txn *badger.Txn) error {
-		e := badger.NewEntry(prefix, []byte(docJSON)).WithMeta(byte(RedisJSON))
-		return txn.SetEntry(e)
+func setJSONMeta(t *testing.T, db kv.KeyValueStore, key []byte, value []byte, meta byte) {
+	t.Helper()
+	err := db.Update(func(tx kv.Tx) error {
+		return tx.Set(db.NewEntry(key, value).Metadata(meta))
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+}
 
-	err = db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(prefix)
+func TestJSONKvSetAndGet(t *testing.T) {
+	db := kv.InMemoryBadger(t)
+	defer db.Close()
+
+	docJSON := []byte(`{"name":"Alice","age":30}`)
+	key := []byte("myjson")
+	setJSONMeta(t, db, key, docJSON, byte(common.RedisJSON))
+
+	_, err := db.Read(func(tx kv.Tx) (any, error) {
+		item, err := tx.Get(key)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if item.UserMeta() != byte(RedisJSON) {
-			t.Fatalf("expected RedisJSON type, got %d", item.UserMeta())
+		if item.Metadata() != byte(common.RedisJSON) {
+			t.Fatalf("expected RedisJSON type, got %d", item.Metadata())
 		}
-		var data []byte
-		err = item.Value(func(val []byte) error {
-			data = append([]byte{}, val...)
-			return nil
-		})
+		data, err := item.Value()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		doc, err := newJSONDocument(data)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		name, _ := doc.get("$.name")
 		if name != "Alice" {
@@ -498,110 +502,103 @@ func TestJSONBadgerDBSetAndGet(t *testing.T) {
 		if age != 30.0 {
 			t.Fatalf("expected 30, got %v", age)
 		}
-		return nil
+		return nil, nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestJSONBadgerDBUpdatePath(t *testing.T) {
-	db := inMemDB(t)
+func TestJSONKvUpdatePath(t *testing.T) {
+	db := kv.InMemoryBadger(t)
 	defer db.Close()
 
-	prefix := rawKeyPrefix([]byte("doc"), 0)
+	key := []byte("doc")
+	setJSONMeta(t, db, key, []byte(`{"counter": 10}`), byte(common.RedisJSON))
 
-	err := db.Update(func(txn *badger.Txn) error {
-		e := badger.NewEntry(prefix, []byte(`{"counter": 10}`)).WithMeta(byte(RedisJSON))
-		return txn.SetEntry(e)
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	err = db.Update(func(txn *badger.Txn) error {
-		item, err := txn.Get(prefix)
+	err := db.Update(func(tx kv.Tx) error {
+		item, err := tx.Get(key)
 		if err != nil {
 			return err
 		}
-		var data []byte
-		item.Value(func(val []byte) error {
-			data = append([]byte{}, val...)
-			return nil
-		})
+		data, err := item.Value()
+		if err != nil {
+			return err
+		}
 		doc, _ := newJSONDocument(data)
-		doc.set("$.counter", 25)
-		newData, _ := doc.serialize()
-		e := badger.NewEntry(prefix, newData).WithMeta(byte(RedisJSON))
-		return txn.SetEntry(e)
+		if err := doc.set("$.counter", 25); err != nil {
+			return err
+		}
+		newData, err := doc.serialize()
+		if err != nil {
+			return err
+		}
+		return tx.Set(db.NewEntry(key, newData).Metadata(byte(common.RedisJSON)))
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = db.View(func(txn *badger.Txn) error {
-		item, _ := txn.Get(prefix)
-		var data []byte
-		item.Value(func(val []byte) error {
-			data = append([]byte{}, val...)
-			return nil
-		})
+	_, err = db.Read(func(tx kv.Tx) (any, error) {
+		item, err := tx.Get(key)
+		if err != nil {
+			return nil, err
+		}
+		data, err := item.Value()
+		if err != nil {
+			return nil, err
+		}
 		doc, _ := newJSONDocument(data)
 		val, _ := doc.get("$.counter")
 		if val != 25.0 {
 			t.Fatalf("expected 25, got %v", val)
 		}
-		return nil
+		return nil, nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestJSONBadgerDBDelete(t *testing.T) {
-	db := inMemDB(t)
+func TestJSONKvDelete(t *testing.T) {
+	db := kv.InMemoryBadger(t)
 	defer db.Close()
 
-	prefix := rawKeyPrefix([]byte("doc"), 0)
+	key := []byte("doc")
+	setJSONMeta(t, db, key, []byte(`{"a":1,"b":2}`), byte(common.RedisJSON))
 
-	db.Update(func(txn *badger.Txn) error {
-		e := badger.NewEntry(prefix, []byte(`{"a":1,"b":2}`)).WithMeta(byte(RedisJSON))
-		return txn.SetEntry(e)
+	err := db.Update(func(tx kv.Tx) error {
+		return tx.Delete(key)
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	db.Update(func(txn *badger.Txn) error {
-		return txn.Delete(prefix)
+	_, err = db.Read(func(tx kv.Tx) (any, error) {
+		_, err := tx.Get(key)
+		return nil, err
 	})
-
-	err := db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get(prefix)
-		return err
-	})
-	if err != badger.ErrKeyNotFound {
+	if err != kv.ErrKeyNotFound {
 		t.Fatal("expected key to be deleted")
 	}
 }
 
-func TestJSONBadgerDBWrongType(t *testing.T) {
-	db := inMemDB(t)
+func TestJSONKvWrongType(t *testing.T) {
+	db := kv.InMemoryBadger(t)
 	defer db.Close()
 
-	prefix := rawKeyPrefix([]byte("doc"), 0)
+	key := []byte("doc")
+	setJSONMeta(t, db, key, []byte("not json"), byte(common.RedisString))
 
-	db.Update(func(txn *badger.Txn) error {
-		e := badger.NewEntry(prefix, []byte("not json")).WithMeta(byte(RedisString))
-		return txn.SetEntry(e)
-	})
-
-	err := db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(prefix)
+	_, err := db.Read(func(tx kv.Tx) (any, error) {
+		item, err := tx.Get(key)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if item.UserMeta() != byte(RedisJSON) {
-			return errWrongType
+		if item.Metadata() != byte(common.RedisJSON) {
+			return nil, errWrongType
 		}
-		return nil
+		return nil, nil
 	})
 	if err != errWrongType {
 		t.Fatalf("expected wrong type error, got %v", err)

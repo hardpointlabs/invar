@@ -81,7 +81,7 @@ func (s *Session) DispatchPendingOps(conn redcon.Conn) {
 	// scenario B: we're not inside a MULTI block (either we never were or we just left one),
 	// so we acquire a transaction and apply straight away
 	if s.queue == nil {
-		// No ops were enqueued — command was handled directly (e.g. strings, lists, JSON).
+		// No ops were enqueued — command was handled directly (e.g. pubsub).
 		return
 	}
 
