@@ -10,9 +10,8 @@ This module presents a vendor-neutral abstraction over different LSM-tree implem
 
 **Guarantees, in detail: see the package doc comment in `doc.go`**
 (`go doc .` or your editor's hover-docs from anywhere `kv.KeyValueStore` is
-imported). This README intentionally doesn't restate them — `doc.go` is
-the single source of truth, kept next to the code it describes so it can't
-drift out of sync the way a separate README would.
+imported). That's the single source of truth that implementors should consult
+when calling this API.
 
 ## Usage
 
