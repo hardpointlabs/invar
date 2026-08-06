@@ -58,4 +58,4 @@ echo "Daemon is ready."
 echo ""
 
 cd test
-deno test --allow-net --allow-read
+deno test --allow-net --allow-read --allow-env
