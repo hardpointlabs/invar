@@ -5,6 +5,8 @@
   },
   "imports": {
     "@std/assert": "jsr:@std/assert@^1.0.16",
+    "bullmq": "npm:bullmq@^6.0.8",
+    "ioredis": "npm:ioredis@^6.0.0",
     "redis": "npm:redis@^4.7.1"
   },
   "compilerOptions": {

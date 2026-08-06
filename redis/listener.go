@@ -20,6 +20,7 @@ import (
 	redisjson "github.com/hardpointlabs/invar/redis/json"
 	"github.com/hardpointlabs/invar/redis/keys"
 	"github.com/hardpointlabs/invar/redis/list"
+	"github.com/hardpointlabs/invar/redis/server"
 	"github.com/hardpointlabs/invar/redis/set"
 	redisstrings "github.com/hardpointlabs/invar/redis/strings"
 	"github.com/hardpointlabs/invar/redis/zset"
@@ -43,10 +44,6 @@ func upsertSession(conn redcon.Conn, kvs kv.KeyValueStore) *common.Session {
 	session := common.NewSession(kvs)
 	conn.SetContext(session)
 	return session
-}
-
-func connectionId(conn redcon.Conn) uint64 {
-	return (conn.Context()).(*common.Session).Id
 }
 
 func currentDb(conn redcon.Conn) int {
@@ -104,21 +101,11 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		conn.WriteString("OK")
 		conn.Close()
 	case "client":
-		if len(cmd.Args) < 2 {
-			conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
-			return
-		}
-		subCmd := strings.ToLower(string(cmd.Args[1]))
-		switch subCmd {
-		default:
-			conn.WriteError("subcommand not supported")
-		case "id":
-			conn.WriteUint64(session.Id)
-		case "info":
-			infoString := "id=" + strconv.FormatUint(connectionId(conn), 10) + " db=" + strconv.Itoa(currentDb(conn)) + "\r\n"
-			conn.WriteBulkString(infoString)
-			return
-		}
+		server.Client(session, conn, cmd)
+	case "info":
+		server.Info(session, conn)
+	case "hello":
+		server.Hello(session, conn, cmd)
 	case "bitcount":
 		if !checkMinArgs(conn, cmd, 2) {
 			return
@@ -1692,6 +1679,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 func serve(ln net.Listener, db *badger.DB) error {
 	var ps redcon.PubSub
 	kvs := kv.WrapBadger(db)
+	server.SetAddr(addr)
 	log.Info().Msgf("started RESP protocol listener at %s", addr)
 	err := redcon.Serve(ln,
 		func(conn redcon.Conn, cmd redcon.Command) {
@@ -1701,11 +1689,13 @@ func serve(ln net.Listener, db *badger.DB) error {
 		func(conn redcon.Conn) bool {
 			// Use this function to accept or deny the connection.
 			// log.Printf("accept: %s", conn.RemoteAddr())
+			server.ConnOpened()
 			return true
 		},
 		func(conn redcon.Conn, err error) {
 			// This is called when the connection has been closed
 			// log.Printf("closed: %s, err: %v", conn.RemoteAddr(), err)
+			server.ConnClosed()
 		},
 	)
 	return err

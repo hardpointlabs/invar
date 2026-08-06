@@ -2279,5 +2279,69 @@
     "version": "5.0.0",
     "description": "BZPOPMAX pops without blocking when the sorted set is non-empty",
     "setup": [["DEL", "bzpopmax_immediate"], ["ZADD", "bzpopmax_immediate", "1", "member1"]]
+  },
+  {
+    "name": "INFO returns a bulk string with Server section",
+    "command": ["INFO"],
+    "expected": "# Server",
+    "type": "bulk_string_contains",
+    "version": "2.8.12",
+    "description": "INFO reports a # Server section"
+  },
+  {
+    "name": "INFO reports redis_version",
+    "command": ["INFO"],
+    "expected": "redis_version:",
+    "type": "bulk_string_contains",
+    "version": "2.8.12",
+    "description": "INFO exposes the server version for client capability probing"
+  },
+  {
+    "name": "INFO reports noeviction maxmemory policy",
+    "command": ["INFO"],
+    "expected": "maxmemory_policy:noeviction",
+    "type": "bulk_string_contains",
+    "version": "2.8.12",
+    "description": "INFO reports maxmemory_policy:noeviction"
+  },
+  {
+    "name": "INFO reports not loading",
+    "command": ["INFO"],
+    "expected": "loading:0",
+    "type": "bulk_string_contains",
+    "version": "2.8.12",
+    "description": "INFO reports loading:0 so ready checks pass immediately"
+  },
+  {
+    "name": "CLIENT SETNAME",
+    "command": ["CLIENT", "SETNAME", "integration-test"],
+    "expected": "OK",
+    "type": "simple_string",
+    "version": "2.6.9",
+    "description": "CLIENT SETNAME assigns a name to the connection"
+  },
+  {
+    "name": "CLIENT GETNAME",
+    "command": ["CLIENT", "GETNAME"],
+    "expected": "integration-test",
+    "type": "bulk_string",
+    "version": "2.6.9",
+    "description": "CLIENT GETNAME returns the connection name"
+  },
+  {
+    "name": "CLIENT SETINFO LIB-VER",
+    "command": ["CLIENT", "SETINFO", "LIB-VER", "6.0.0"],
+    "expected": "OK",
+    "type": "simple_string",
+    "version": "7.2.0",
+    "description": "CLIENT SETINFO stores the client library version"
+  },
+  {
+    "name": "CLIENT GETINFO LIB-VER",
+    "command": ["CLIENT", "GETINFO", "LIB-VER"],
+    "expected": "6.0.0",
+    "type": "bulk_string",
+    "version": "7.2.0",
+    "description": "CLIENT GETINFO LIB-VER returns the stored library version"
   }
 ]
