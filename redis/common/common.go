@@ -13,6 +13,10 @@ import (
 
 var globalSessionCounter atomic.Uint64
 
+// GlobalWatchRegistry is the process-wide registry for blocking sorted-set commands.
+// It is initialised once at startup and shared across all connections.
+var GlobalWatchRegistry = NewWatchRegistry()
+
 // key delimeters
 const internalPrefix = "-"
 const prefixSeparator = ":"
@@ -38,6 +42,7 @@ type Session struct {
 	currentDB int32      // Current Redis DB this connection is operating on
 	queue     []QueuedOp // nil when not in MULTI
 	inMulti   bool
+	inScript  bool // true while a Lua script is executing via redis.call
 }
 
 func NewSession(kvs kv.KeyValueStore) *Session {
@@ -60,6 +65,25 @@ func (s *Session) ExitMulti(discard bool) {
 	if discard {
 		s.queue = nil
 	}
+}
+
+// EnterScript marks the session as executing a Lua script.  Blocking commands must
+// degrade to non-blocking pops while this flag is set.
+func (s *Session) EnterScript() {
+	s.inScript = true
+}
+
+// ExitScript clears the Lua-script execution flag.
+func (s *Session) ExitScript() {
+	s.inScript = false
+}
+
+// ShouldBlock reports whether the current session context allows a blocking command to
+// actually block.  It returns false whenever the caller must degrade to an immediate,
+// non-blocking pop — specifically inside a MULTI/EXEC transaction or a Lua script,
+// where stalling the connection is forbidden by the Redis specification.
+func (s *Session) ShouldBlock() bool {
+	return !s.inMulti && !s.inScript
 }
 
 // Enqueue an operation for later execution within a database transaction
@@ -93,6 +117,11 @@ func (s *Session) DispatchPendingOps(conn redcon.Conn) {
 	for i, op := range s.queue {
 		val, err := op.DbOp(tx)
 		if err != nil {
+			// Any claims made by earlier ops in this batch must be returned to
+			// the front of their queues since the transaction will be discarded.
+			for j := 0; j < i; j++ {
+				releaseOpClaims(results[j])
+			}
 			op.WireOp(conn, val, err)
 			s.queue = nil
 			return
@@ -102,6 +131,11 @@ func (s *Session) DispatchPendingOps(conn redcon.Conn) {
 
 	err := tx.Commit()
 	if err != nil {
+		// The transaction failed to commit — release all claims back to the
+		// front of their queues so their waiters remain longest-waiting.
+		for _, result := range results {
+			releaseOpClaims(result)
+		}
 		conn.WriteError("Couldn't commit transaction")
 		s.queue = nil
 		return
@@ -114,6 +148,15 @@ func (s *Session) DispatchPendingOps(conn redcon.Conn) {
 	s.queue = nil
 }
 
+// releaseOpClaims returns any claims embedded in a DbOp result to the registry.
+func releaseOpClaims(result any) {
+	if c, ok := result.(Claimer); ok {
+		for _, claim := range c.Claims() {
+			GlobalWatchRegistry.ReleaseFront(claim)
+		}
+	}
+}
+
 // check if any of the queued ops are mutating
 // and therefore require a writable transaction
 func (s *Session) needsWritableTx() bool {
@@ -124,6 +167,12 @@ func (s *Session) needsWritableTx() bool {
 	}
 
 	return needsWriter
+}
+
+// KVS returns the underlying key-value store for this session.
+// Used by blocking commands that need to open transactions directly.
+func (s *Session) KVS() kv.KeyValueStore {
+	return s.kvs
 }
 
 // Get the current Redis DB (slot) number
@@ -139,6 +188,8 @@ func (s *Session) SwitchDB(db int) {
 	s.currentDB = int32(db)
 }
 
+// Derive a full publicly accessible key in the LSM tree with the sessions'
+// current database and the supplied key name
 func (s *Session) PublicKey(key []byte) []byte {
 	return append(s.currentDbPrefix(), key...)
 }
@@ -148,19 +199,26 @@ func (s *Session) PublicKeyForDB(db int, key []byte) []byte {
 	return append([]byte(strconv.Itoa(db)+prefixSeparator), key...)
 }
 
+// Derive a full private (internal) key in the LSM tree with the sessions'
+// current database and the supplied key name
 func (s *Session) PrivateKey(key []byte) []byte {
 	return append(append([]byte(internalPrefix), s.currentDbPrefix()...), key...)
 }
 
+// Create a publicly accessible key/value entry in the LSM tree with
+// the sessions' current database and the supplied key name
 func (s *Session) NewPublicEntry(key []byte, value []byte) kv.Entry {
 	return s.kvs.NewEntry(s.PublicKey(key), value)
 }
 
 // NewEntryForDB creates a public entry in a specific DB.
+// Similar to NewPublicEntry but allows the caller to specify DB.
 func (s *Session) NewEntryForDB(db int, key []byte, value []byte) kv.Entry {
 	return s.kvs.NewEntry(s.PublicKeyForDB(db, key), value)
 }
 
+// Create a private (internal) key/value entry in the LSM tree with
+// the sessions' current database and the supplied key name
 func (s *Session) NewPrivateEntry(key []byte, value []byte) kv.Entry {
 	return s.kvs.NewEntry(s.PrivateKey(key), value)
 }

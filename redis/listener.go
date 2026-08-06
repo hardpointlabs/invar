@@ -1259,6 +1259,33 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 			}
 			session.EnqueueOp(zset.ZUnion(session, aggregate, weights, hasWithScores, keys...))
 		}
+	case "bzpopmin":
+		if !checkMinArgs(conn, cmd, 3) {
+			return
+		}
+		// Syntax: BZPOPMIN key [key ...] timeout
+		// The last argument is the timeout (float seconds, 0 = indefinite).
+		timeoutArg := cmd.Args[len(cmd.Args)-1]
+		timeoutVal, err := strconv.ParseFloat(string(timeoutArg), 64)
+		if err != nil || timeoutVal < 0 {
+			conn.WriteError("ERR timeout is not a float or out of range")
+			return
+		}
+		keys := cmd.Args[1 : len(cmd.Args)-1]
+		zset.BZPopMin(session, conn, keys, timeoutVal)
+	case "bzpopmax":
+		if !checkMinArgs(conn, cmd, 3) {
+			return
+		}
+		// Syntax: BZPOPMAX key [key ...] timeout
+		timeoutArg := cmd.Args[len(cmd.Args)-1]
+		timeoutVal, err := strconv.ParseFloat(string(timeoutArg), 64)
+		if err != nil || timeoutVal < 0 {
+			conn.WriteError("ERR timeout is not a float or out of range")
+			return
+		}
+		keys := cmd.Args[1 : len(cmd.Args)-1]
+		zset.BZPopMax(session, conn, keys, timeoutVal)
 	case "zrangestore":
 		if !checkExactArgs(conn, cmd, 5) {
 			return

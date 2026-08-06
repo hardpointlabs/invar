@@ -124,8 +124,8 @@ in this implementation.
 
 | Command | Status | Notes |
 |---------|--------|-------|
-| BZPOPMAX | 🚫 | Blocking variant, not implementing |
-| BZPOPMIN | 🚫 | Blocking variant, not implementing |
+| BZPOPMAX | ✅ | |
+| BZPOPMIN | ✅ | |
 | ZADD | ✅ | |
 | ZCARD | ✅ | |
 | ZCOUNT | ✅ | |
@@ -188,7 +188,7 @@ in this implementation.
 
 ## Pub/Sub commands
 
-**Note:** Like Redis, Pub/Sub commands sent to Invar are _not_ persisted and exist in memory only. They should therefore be treated as best-effort.
+**Note:** Like Redis, Pub/Sub commands sent to Invar are _not_ persisted and exist in memory only. They're also not subject to regular transactional guarantees. They should therefore be treated as best-effort.
 
 | Command | Status | Notes |
 |---------|--------|-------|
