@@ -2,6 +2,7 @@ package zset
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"math"
@@ -9,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/hardpointlabs/invar/kv"
 	"github.com/hardpointlabs/invar/redis/common"
@@ -129,7 +131,7 @@ func clearInternalKeys(tx kv.Tx, session *common.Session, setName []byte) error 
 func ZAdd(session *common.Session, key []byte, args ...[]byte) common.QueuedOp {
 	dbOp := func(tx kv.Tx) (any, error) {
 		if len(args) == 0 {
-			return 0, fmt.Errorf("ERR wrong number of arguments for 'zadd' command")
+			return zaddResult{}, fmt.Errorf("ERR wrong number of arguments for 'zadd' command")
 		}
 
 		// Parse options
@@ -163,31 +165,31 @@ func ZAdd(session *common.Session, key []byte, args ...[]byte) common.QueuedOp {
 		}
 
 		if nx && xx {
-			return 0, fmt.Errorf("ERR XX and NX, XX and GT/LT, NX and GT/LT options are not compatible")
+			return zaddResult{}, fmt.Errorf("ERR XX and NX, XX and GT/LT, NX and GT/LT options are not compatible")
 		}
 		if nx && (gt || lt) {
-			return 0, fmt.Errorf("ERR XX and NX, XX and GT/LT, NX and GT/LT options are not compatible")
+			return zaddResult{}, fmt.Errorf("ERR XX and NX, XX and GT/LT, NX and GT/LT options are not compatible")
 		}
 		if xx && (gt || lt) {
-			return 0, fmt.Errorf("ERR XX and NX, XX and GT/LT, NX and GT/LT options are not compatible")
+			return zaddResult{}, fmt.Errorf("ERR XX and NX, XX and GT/LT, NX and GT/LT options are not compatible")
 		}
 		if gt && lt {
-			return 0, fmt.Errorf("ERR GT and LT options are not compatible")
+			return zaddResult{}, fmt.Errorf("ERR GT and LT options are not compatible")
 		}
 
 		remaining := args[idx:]
 		if len(remaining) == 0 || len(remaining)%2 != 0 {
-			return 0, fmt.Errorf("ERR wrong number of arguments for 'zadd' command")
+			return zaddResult{}, fmt.Errorf("ERR wrong number of arguments for 'zadd' command")
 		}
 
 		count, err := common.ReadUint32Sentinel(tx, session, key)
 		if err == kv.ErrKeyNotFound {
 			if xx {
-				return 0, nil
+				return zaddResult{}, nil
 			}
 			count = 0
 		} else if err != nil {
-			return 0, err
+			return zaddResult{}, err
 		}
 
 		changed := 0
@@ -198,7 +200,7 @@ func ZAdd(session *common.Session, key []byte, args ...[]byte) common.QueuedOp {
 			scoreStr := string(remaining[i])
 			score, err := strconv.ParseFloat(scoreStr, 64)
 			if err != nil || math.IsNaN(score) {
-				return 0, fmt.Errorf("ERR value is not a valid float")
+				return zaddResult{}, fmt.Errorf("ERR value is not a valid float")
 			}
 
 			memberKey := session.PrivateKey(memberCompound(key, member))
@@ -209,10 +211,10 @@ func ZAdd(session *common.Session, key []byte, args ...[]byte) common.QueuedOp {
 					if nx {
 						// Add new
 						if err := tx.Set(session.NewPrivateEntry(scoreCompound(key, score, member), nil)); err != nil {
-							return changed + added, err
+							return zaddResult{count: changed + added}, err
 						}
 						if err := tx.Set(session.NewPrivateEntry(memberCompound(key, member), scoreBytes(score))); err != nil {
-							return changed + added, err
+							return zaddResult{count: changed + added}, err
 						}
 						count++
 						added++
@@ -220,16 +222,16 @@ func ZAdd(session *common.Session, key []byte, args ...[]byte) common.QueuedOp {
 					// xx would skip non-existing
 				} else {
 					if err := tx.Set(session.NewPrivateEntry(scoreCompound(key, score, member), nil)); err != nil {
-						return changed + added, err
+						return zaddResult{count: changed + added}, err
 					}
 					if err := tx.Set(session.NewPrivateEntry(memberCompound(key, member), scoreBytes(score))); err != nil {
-						return changed + added, err
+						return zaddResult{count: changed + added}, err
 					}
 					count++
 					added++
 				}
 			} else if existingErr != nil {
-				return 0, existingErr
+				return zaddResult{}, existingErr
 			} else {
 				// Member exists
 				if nx {
@@ -238,7 +240,7 @@ func ZAdd(session *common.Session, key []byte, args ...[]byte) common.QueuedOp {
 
 				val, err := existingItem.Value()
 				if err != nil {
-					return 0, err
+					return zaddResult{}, err
 				}
 				oldScore := math.Float64frombits(binary.BigEndian.Uint64(val))
 
@@ -254,15 +256,15 @@ func ZAdd(session *common.Session, key []byte, args ...[]byte) common.QueuedOp {
 				if oldScore != score {
 					// Remove old score entry
 					if err := tx.Delete(session.PrivateKey(scoreCompound(key, oldScore, member))); err != nil {
-						return changed + added, err
+						return zaddResult{count: changed + added}, err
 					}
 					// Add new score entry
 					if err := tx.Set(session.NewPrivateEntry(scoreCompound(key, score, member), nil)); err != nil {
-						return changed + added, err
+						return zaddResult{count: changed + added}, err
 					}
 					// Update member entry
 					if err := tx.Set(session.NewPrivateEntry(memberCompound(key, member), scoreBytes(score))); err != nil {
-						return changed + added, err
+						return zaddResult{count: changed + added}, err
 					}
 					changed++
 				}
@@ -271,14 +273,47 @@ func ZAdd(session *common.Session, key []byte, args ...[]byte) common.QueuedOp {
 
 		if added > 0 || changed > 0 {
 			if err := common.WriteUint32Sentinel(tx, session, key, count, common.RedisSortedSet); err != nil {
-				return changed + added, err
+				return zaddResult{count: changed + added}, err
 			}
 		}
 
-		if ch {
-			return changed + added, nil
+		// After persisting the write, check if any waiter is blocked on this key.
+		// If so, claim the front waiter and pop an element on its behalf — atomically
+		// within this same transaction.  The claim is returned so WireOp can wake the
+		// waiter after Commit() succeeds.
+		var claim *common.Claim
+		if added > 0 {
+			publicKey := string(session.PublicKey(key))
+			claim = common.GlobalWatchRegistry.TryClaim(publicKey)
+			if claim != nil {
+				var popped *MemberScore
+				var popErr error
+				if claim.WantMin {
+					popped, popErr = popOneMin(tx, session, key)
+				} else {
+					popped, popErr = popOneMax(tx, session, key)
+				}
+				if popErr != nil {
+					// Pop failed; release the claim so the waiter stays in queue.
+					common.GlobalWatchRegistry.ReleaseFront(claim)
+					claim = nil
+					return zaddResult{count: changed + added}, popErr
+				}
+				if popped != nil {
+					claim.SetResult(common.PopResult{
+						Key:    string(key),
+						Member: popped.Member,
+						Score:  popped.Score,
+					})
+				}
+			}
 		}
-		return added, nil
+
+		n := changed + added
+		if ch {
+			return zaddResult{count: n, claim: claim}, nil
+		}
+		return zaddResult{count: added, claim: claim}, nil
 	}
 
 	wireOp := func(conn redcon.Conn, result any, err error) {
@@ -286,10 +321,31 @@ func ZAdd(session *common.Session, key []byte, args ...[]byte) common.QueuedOp {
 			conn.WriteError(err.Error())
 			return
 		}
-		conn.WriteInt(result.(int))
+		r := result.(zaddResult)
+		conn.WriteInt(r.count)
+		// Wake any claimed waiter — this runs only after Commit() succeeded.
+		if r.claim != nil {
+			r.claim.Wake()
+		}
 	}
 
 	return common.QueuedOp{DbOp: dbOp, WireOp: wireOp, IsMutating: true}
+}
+
+// zaddResult carries the integer count returned to the client plus any waiter
+// claim made inside the DbOp.  It implements common.Claimer so DispatchPendingOps
+// can release the claim on transaction failure.
+type zaddResult struct {
+	count int
+	claim *common.Claim
+}
+
+// Claims implements common.Claimer.
+func (r zaddResult) Claims() []*common.Claim {
+	if r.claim == nil {
+		return nil
+	}
+	return []*common.Claim{r.claim}
 }
 
 func scoreBytes(score float64) []byte {
@@ -1130,6 +1186,53 @@ func ZRemRangeByLex(session *common.Session, key []byte, minStr, maxStr string) 
 
 // --- Pop commands ---
 
+// popOneMin removes and returns the single element with the lowest score, or nil if empty.
+// It is the shared primitive used by ZPopMin, BZPOPMIN claim-side, and ZAdd wakeup.
+func popOneMin(tx kv.Tx, session *common.Session, key []byte) (*MemberScore, error) {
+	entries, err := loadAllMembers(tx, session, key)
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	e := entries[0]
+	if err := tx.Delete(session.PrivateKey(memberCompound(key, e.Member))); err != nil {
+		return &e, err
+	}
+	if err := tx.Delete(session.PrivateKey(scoreCompound(key, e.Score, e.Member))); err != nil {
+		return &e, err
+	}
+	newCount := uint32(len(entries) - 1)
+	if newCount == 0 {
+		return &e, tx.Delete(session.PublicKey(key))
+	}
+	return &e, common.WriteUint32Sentinel(tx, session, key, newCount, common.RedisSortedSet)
+}
+
+// popOneMax removes and returns the single element with the highest score, or nil if empty.
+func popOneMax(tx kv.Tx, session *common.Session, key []byte) (*MemberScore, error) {
+	entries, err := loadAllMembers(tx, session, key)
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	e := entries[len(entries)-1]
+	if err := tx.Delete(session.PrivateKey(memberCompound(key, e.Member))); err != nil {
+		return &e, err
+	}
+	if err := tx.Delete(session.PrivateKey(scoreCompound(key, e.Score, e.Member))); err != nil {
+		return &e, err
+	}
+	newCount := uint32(len(entries) - 1)
+	if newCount == 0 {
+		return &e, tx.Delete(session.PublicKey(key))
+	}
+	return &e, common.WriteUint32Sentinel(tx, session, key, newCount, common.RedisSortedSet)
+}
+
 func ZPopMin(session *common.Session, key []byte, count int) common.QueuedOp {
 	dbOp := func(tx kv.Tx) (any, error) {
 		entries, err := loadAllMembers(tx, session, key)
@@ -1700,6 +1803,116 @@ func ZRangeStore(session *common.Session, dest, src []byte, start, stop int) com
 	}
 
 	return common.QueuedOp{DbOp: dbOp, WireOp: wireOp, IsMutating: true}
+}
+
+// --- Blocking pop commands ---
+
+// bzpopResult is the value returned when a blocking pop succeeds (either immediately
+// or after being woken by a writer).
+type bzpopResult struct {
+	key    string
+	member []byte
+	score  float64
+}
+
+// bzpop is the shared implementation for BZPOPMIN and BZPOPMAX.
+//
+// Step 1: attempt an immediate non-blocking pop across keys (first non-empty key wins).
+// Step 2: if all keys are empty and session.ShouldBlock() is true, register a waiter
+// and block.  If ShouldBlock() is false (MULTI/EXEC or Lua script context), reply with
+// a null array immediately instead — the same reply a real timeout would produce.
+//
+// wantMin=true for BZPOPMIN, false for BZPOPMAX.
+// timeout==0 means block indefinitely.
+func bzpop(session *common.Session, conn redcon.Conn, keys [][]byte, timeout float64, wantMin bool) {
+	kvs := session.KVS()
+
+	// Step 1: try an immediate pop across all keys in order.
+	var immediate *bzpopResult
+	err := kvs.Update(func(tx kv.Tx) error {
+		for _, k := range keys {
+			var popped *MemberScore
+			var popErr error
+			if wantMin {
+				popped, popErr = popOneMin(tx, session, k)
+			} else {
+				popped, popErr = popOneMax(tx, session, k)
+			}
+			if popErr != nil {
+				return popErr
+			}
+			if popped != nil {
+				immediate = &bzpopResult{
+					key:    string(k),
+					member: popped.Member,
+					score:  popped.Score,
+				}
+				return nil
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		conn.WriteError("ERR " + err.Error())
+		return
+	}
+
+	if immediate != nil {
+		writeBZPopReply(conn, immediate.key, immediate.member, immediate.score)
+		return
+	}
+
+	// All listed keys were empty.  If we are inside a MULTI/EXEC block or a Lua
+	// script, blocking is forbidden — reply with null immediately.
+	if !session.ShouldBlock() {
+		conn.WriteNull()
+		return
+	}
+
+	// Step 2: register a waiter and block.
+	keyStrs := make([]string, len(keys))
+	for i, k := range keys {
+		keyStrs[i] = string(session.PublicKey(k))
+	}
+
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if timeout == 0 {
+		ctx, cancel = context.WithCancel(context.Background())
+	} else {
+		d := time.Duration(float64(time.Second) * timeout)
+		ctx, cancel = context.WithTimeout(context.Background(), d)
+	}
+	defer cancel()
+
+	res, ok := common.GlobalWatchRegistry.Block(ctx, keyStrs, wantMin)
+	if !ok {
+		// Timed out with no writer — return null array.
+		conn.WriteNull()
+		return
+	}
+
+	writeBZPopReply(conn, res.Key, res.Member, res.Score)
+}
+
+func writeBZPopReply(conn redcon.Conn, key string, member []byte, score float64) {
+	conn.WriteArray(3)
+	conn.WriteBulkString(key)
+	conn.WriteBulk(member)
+	conn.WriteBulkString(common.FormatFloat(score))
+}
+
+// BZPopMin implements BZPOPMIN. It writes directly to conn and does NOT enqueue a
+// QueuedOp — callers must NOT call session.DispatchPendingOps after this.
+func BZPopMin(session *common.Session, conn redcon.Conn, keys [][]byte, timeout float64) {
+	bzpop(session, conn, keys, timeout, true)
+}
+
+// BZPopMax implements BZPOPMAX. It writes directly to conn and does NOT enqueue a
+// QueuedOp — callers must NOT call session.DispatchPendingOps after this.
+func BZPopMax(session *common.Session, conn redcon.Conn, keys [][]byte, timeout float64) {
+	bzpop(session, conn, keys, timeout, false)
 }
 
 // --- Parsing helpers ---

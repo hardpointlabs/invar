@@ -2261,5 +2261,23 @@
     "version": "2.2.0",
     "description": "TYPE returns 'string' for bitmap keys",
     "setup": [["DEL", "bm_type_test"], ["SETBIT", "bm_type_test", "0", "1"]]
+  },
+  {
+    "name": "BZPOPMIN returns immediately when data exists",
+    "command": ["BZPOPMIN", "bzpopmin_immediate", "1"],
+    "expected": ["bzpopmin_immediate", "member1", "1"],
+    "type": "array",
+    "version": "5.0.0",
+    "description": "BZPOPMIN pops without blocking when the sorted set is non-empty",
+    "setup": [["DEL", "bzpopmin_immediate"], ["ZADD", "bzpopmin_immediate", "1", "member1"]]
+  },
+  {
+    "name": "BZPOPMAX returns immediately when data exists",
+    "command": ["BZPOPMAX", "bzpopmax_immediate", "1"],
+    "expected": ["bzpopmax_immediate", "member1", "1"],
+    "type": "array",
+    "version": "5.0.0",
+    "description": "BZPOPMAX pops without blocking when the sorted set is non-empty",
+    "setup": [["DEL", "bzpopmax_immediate"], ["ZADD", "bzpopmax_immediate", "1", "member1"]]
   }
 ]

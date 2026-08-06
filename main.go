@@ -79,6 +79,7 @@ type args struct {
 	DataDir string `arg:"--data-dir" default:"/tmp/badger" help:"path to BadgerDB storage directory"`
 	Pprof   bool   `arg:"--pprof" help:"start pprof HTTP server on localhost:6060"`
 	Metrics bool   `arg:"--metrics" help:"start Prometheus metrics server on localhost:2112"`
+	Writer  bool   `arg:"--writer" help:"designate this node as a write replica" default:"false"`
 
 	Version *versionCmd `arg:"subcommand:version" help:"print version information and exit"`
 	Redis   *redisCmd   `arg:"subcommand:redis"   help:"start with RESP-protocol compatibility"`

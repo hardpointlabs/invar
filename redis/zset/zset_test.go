@@ -1,14 +1,71 @@
 package zset
 
 import (
+	"context"
+	"io"
 	"math"
+	"net"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/hardpointlabs/invar/kv"
 	"github.com/hardpointlabs/invar/redis/common"
 	"github.com/hardpointlabs/invar/redis/testutil"
+	"github.com/tidwall/redcon"
 )
+
+// mockConn is a minimal redcon.Conn that records all writes for inspection in tests.
+type mockConn struct {
+	mu     sync.Mutex
+	writes []string
+	ctx    interface{}
+}
+
+func newMockConn(session *common.Session) *mockConn {
+	return &mockConn{ctx: session}
+}
+
+func (c *mockConn) writesStr() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return strings.Join(c.writes, ";")
+}
+
+func (c *mockConn) RemoteAddr() string                   { return "127.0.0.1:0" }
+func (c *mockConn) Close() error                         { return nil }
+func (c *mockConn) WriteError(msg string)                { c.record("err", msg) }
+func (c *mockConn) WriteString(str string)               { c.record("str", str) }
+func (c *mockConn) WriteBulk(bulk []byte)                { c.record("bulk", string(bulk)) }
+func (c *mockConn) WriteBulkString(bulk string)          { c.record("bulk", bulk) }
+func (c *mockConn) WriteBulkFrom(num int64, r io.Reader) {}
+func (c *mockConn) WriteInt(num int)                     { c.record("int", strconv.Itoa(num)) }
+func (c *mockConn) WriteInt64(num int64)                 { c.record("int64", strconv.FormatInt(num, 10)) }
+func (c *mockConn) WriteUint64(num uint64)               { c.record("uint64", strconv.FormatUint(num, 10)) }
+func (c *mockConn) WriteArray(count int)                 { c.record("array", strconv.Itoa(count)) }
+func (c *mockConn) WriteNull()                           { c.record("null", "") }
+func (c *mockConn) WriteRaw(data []byte)                 { c.record("raw", string(data)) }
+func (c *mockConn) WriteAny(v interface{})               {}
+func (c *mockConn) Context() interface{}                 { return c.ctx }
+func (c *mockConn) SetContext(v interface{})             { c.ctx = v }
+func (c *mockConn) SetReadBuffer(bytes int)              {}
+func (c *mockConn) Detach() redcon.DetachedConn          { return nil }
+func (c *mockConn) ReadPipeline() []redcon.Command       { return nil }
+func (c *mockConn) PeekPipeline() []redcon.Command       { return nil }
+func (c *mockConn) NetConn() net.Conn                    { return nil }
+
+func (c *mockConn) record(kind, payload string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.writes = append(c.writes, kind+":"+payload)
+}
+
+// zaddCount extracts the integer count from a zaddResult returned by ZAdd.DbOp.
+func zaddCount(v any) int {
+	return v.(zaddResult).count
+}
 
 func mustAdd(t *testing.T, session *common.Session, db kv.KeyValueStore, key []byte, pairs ...[]byte) {
 	t.Helper()
@@ -49,8 +106,8 @@ func TestZAddNewKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if added != 3 {
-		t.Errorf("expected 3 added, got %d", added)
+	if zaddCount(added) != 3 {
+		t.Errorf("expected 3 added, got %v", added)
 	}
 	if zcardOf(t, session, db, key) != 3 {
 		t.Error("expected card 3")
@@ -73,8 +130,8 @@ func TestZAddUpdatesExisting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if added != 1 {
-		t.Errorf("expected 1 added, got %d", added)
+	if zaddCount(added) != 1 {
+		t.Errorf("expected 1 added, got %v", added)
 	}
 
 	score, err := db.Read(func(tx kv.Tx) (any, error) {
@@ -108,8 +165,8 @@ func TestZAddWithNx(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if added != 1 {
-		t.Errorf("expected 1 added, got %d", added)
+	if zaddCount(added) != 1 {
+		t.Errorf("expected 1 added, got %v", added)
 	}
 
 	score, err := db.Read(func(tx kv.Tx) (any, error) {
@@ -140,8 +197,8 @@ func TestZAddWithXx(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if added != 0 {
-		t.Errorf("expected 0 added, got %d", added)
+	if zaddCount(added) != 0 {
+		t.Errorf("expected 0 added, got %v", added)
 	}
 	if zcardOf(t, session, db, key) != 1 {
 		t.Error("expected card 1")
@@ -164,8 +221,8 @@ func TestZAddWithCh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if added != 1 {
-		t.Errorf("expected 1 changed with CH, got %d", added)
+	if zaddCount(added) != 1 {
+		t.Errorf("expected 1 changed with CH, got %v", added)
 	}
 }
 
@@ -1545,5 +1602,405 @@ func TestInfinityRoundTrip(t *testing.T) {
 	}
 	if !math.IsInf(score.(float64), -1) {
 		t.Errorf("expected -Inf, got %v", score)
+	}
+}
+
+// newRegistry creates a fresh WatchRegistry for tests that exercise the registry
+// directly, isolated from the global one.
+func newRegistry() *common.WatchRegistry {
+	return common.NewWatchRegistry()
+}
+
+// TestBZPopMinServedByZAdd verifies that a single BZPOPMIN waiter is woken when a
+// ZADD writes to the same key.
+func TestBZPopMinServedByZAdd(t *testing.T) {
+	session, db := testutil.NewTestSession(t)
+	registry := newRegistry()
+
+	key := []byte("mykey")
+	publicKey := string(session.PublicKey(key))
+
+	// Start a waiter in a background goroutine.
+	resultCh := make(chan common.PopResult, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		res, ok := registry.Block(ctx, []string{publicKey}, true)
+		if ok {
+			resultCh <- res
+		} else {
+			resultCh <- common.PopResult{} // timed out
+		}
+	}()
+
+	// Give the goroutine time to register.
+	time.Sleep(20 * time.Millisecond)
+
+	// ZADD — must claim the waiter inside DbOp and wake in WireOp.
+	err := db.Update(func(tx kv.Tx) error {
+		claim := registry.TryClaim(publicKey)
+		if claim == nil {
+			t.Error("expected a waiter to claim")
+			return nil
+		}
+		// Simulate the write.
+		if err := tx.Set(session.NewPrivateEntry(scoreCompound(key, 1.5, []byte("a")), nil)); err != nil {
+			registry.ReleaseFront(claim)
+			return err
+		}
+		if err := tx.Set(session.NewPrivateEntry(memberCompound(key, []byte("a")), scoreBytes(1.5))); err != nil {
+			registry.ReleaseFront(claim)
+			return err
+		}
+		if err := common.WriteUint32Sentinel(tx, session, key, 1, common.RedisSortedSet); err != nil {
+			registry.ReleaseFront(claim)
+			return err
+		}
+		claim.SetResult(common.PopResult{Key: string(key), Member: []byte("a"), Score: 1.5})
+		// Wake only after we know Commit will succeed (simulated: we commit in Update).
+		// In real code Wake is called from WireOp; here we call it post-commit via
+		// a deferred-after-return pattern.
+		go func() { claim.Wake() }()
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case res := <-resultCh:
+		if res.Key != string(key) || string(res.Member) != "a" || res.Score != 1.5 {
+			t.Errorf("unexpected result: %+v", res)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for waiter to be served")
+	}
+}
+
+// TestBZPopMinFIFO verifies that when two waiters are blocked on the same key, the
+// first-registered waiter (longest-waiting) is always served first.
+func TestBZPopMinFIFO(t *testing.T) {
+	session, db := testutil.NewTestSession(t)
+	registry := newRegistry()
+
+	key := []byte("fifokey")
+	publicKey := string(session.PublicKey(key))
+
+	order := make([]int, 0, 2)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	for i := 1; i <= 2; i++ {
+		wg.Add(1)
+		i := i
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			res, ok := registry.Block(ctx, []string{publicKey}, true)
+			if ok {
+				mu.Lock()
+				order = append(order, i)
+				_ = res
+				mu.Unlock()
+			}
+		}()
+		time.Sleep(15 * time.Millisecond) // ensure ordering
+	}
+
+	// Two ZADDs to serve the two waiters in order.
+	for j := 0; j < 2; j++ {
+		scoreVal := float64(j + 1)
+		member := []byte{byte('x' + j)}
+		err := db.Update(func(tx kv.Tx) error {
+			if err := tx.Set(session.NewPrivateEntry(scoreCompound(key, scoreVal, member), nil)); err != nil {
+				return err
+			}
+			if err := tx.Set(session.NewPrivateEntry(memberCompound(key, member), scoreBytes(scoreVal))); err != nil {
+				return err
+			}
+			count := uint32(1)
+			if err := common.WriteUint32Sentinel(tx, session, key, count, common.RedisSortedSet); err != nil {
+				return err
+			}
+			claim := registry.TryClaim(publicKey)
+			if claim == nil {
+				return nil
+			}
+			claim.SetResult(common.PopResult{Key: string(key), Member: member, Score: scoreVal})
+			go func() { claim.Wake() }()
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	wg.Wait()
+
+	if len(order) != 2 || order[0] != 1 || order[1] != 2 {
+		t.Errorf("expected FIFO order [1 2], got %v", order)
+	}
+}
+
+// TestBZPopMinTimeout verifies that a waiter that receives no write within the timeout
+// period gets a "not ok" return and no result.
+func TestBZPopMinTimeout(t *testing.T) {
+	registry := newRegistry()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_, ok := registry.Block(ctx, []string{"nosuchkey"}, true)
+	if ok {
+		t.Error("expected timeout (ok=false), but got ok=true")
+	}
+}
+
+// TestBZPopMinMultiKey verifies multi-key registration: the waiter can be found under
+// any of its registered keys, and once claimed it is removed from all of them.
+func TestBZPopMinMultiKey(t *testing.T) {
+	registry := newRegistry()
+
+	keys := []string{"k1", "k2", "k3"}
+
+	resultCh := make(chan common.PopResult, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		res, ok := registry.Block(ctx, keys, true)
+		if ok {
+			resultCh <- res
+		}
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+
+	// Claim via the second key.
+	claim := registry.TryClaim("k2")
+	if claim == nil {
+		t.Fatal("expected claim on k2")
+	}
+	claim.SetResult(common.PopResult{Key: "k2", Member: []byte("m"), Score: 7})
+	claim.Wake()
+
+	select {
+	case res := <-resultCh:
+		if res.Key != "k2" || string(res.Member) != "m" || res.Score != 7 {
+			t.Errorf("unexpected result: %+v", res)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out")
+	}
+
+	// After the claim, the waiter must have been removed from all keys.
+	for _, k := range keys {
+		if c := registry.TryClaim(k); c != nil {
+			t.Errorf("expected no waiter left on %q after claim, but got one", k)
+		}
+	}
+}
+
+// TestDispatchCompensation verifies that a claim made by an earlier DbOp is released
+// back to the front of the queue when a later DbOp in the same batch fails.
+//
+// This is a unit test for the compensation path in DispatchPendingOps.  It runs the
+// DbOps manually to simulate what DispatchPendingOps does.
+func TestDispatchCompensation(t *testing.T) {
+	session, db := testutil.NewTestSession(t)
+	registry := newRegistry()
+
+	key := []byte("compkey")
+	publicKey := string(session.PublicKey(key))
+
+	// Register a waiter.
+	resultCh := make(chan common.PopResult, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		res, ok := registry.Block(ctx, []string{publicKey}, true)
+		if ok {
+			resultCh <- res
+		}
+	}()
+	time.Sleep(20 * time.Millisecond)
+
+	// Simulate a batch where op0 claims the waiter successfully, but op1 fails.
+	// DispatchPendingOps would release claims from op0 on the op1 error path.
+	var claimedInOp0 *common.Claim
+
+	err := db.Update(func(tx kv.Tx) error {
+		// Op0: write a member and claim the waiter.
+		if err := tx.Set(session.NewPrivateEntry(scoreCompound(key, 10, []byte("z")), nil)); err != nil {
+			return err
+		}
+		if err := tx.Set(session.NewPrivateEntry(memberCompound(key, []byte("z")), scoreBytes(10))); err != nil {
+			return err
+		}
+		if err := common.WriteUint32Sentinel(tx, session, key, 1, common.RedisSortedSet); err != nil {
+			return err
+		}
+		claimedInOp0 = registry.TryClaim(publicKey)
+		if claimedInOp0 != nil {
+			claimedInOp0.SetResult(common.PopResult{Key: string(key), Member: []byte("z"), Score: 10})
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if claimedInOp0 == nil {
+		t.Fatal("expected op0 to claim the waiter")
+	}
+
+	// Simulate op1 failing: release op0's claims back to the front.
+	registry.ReleaseFront(claimedInOp0)
+
+	// The waiter must still be blockable — it should still be at the front.
+	claim2 := registry.TryClaim(publicKey)
+	if claim2 == nil {
+		t.Fatal("expected waiter to be back at front after ReleaseFront")
+	}
+	claim2.SetResult(common.PopResult{Key: string(key), Member: []byte("z"), Score: 99})
+	claim2.Wake()
+
+	select {
+	case res := <-resultCh:
+		if res.Score != 99 {
+			t.Errorf("expected score 99 from re-claimed result, got %v", res.Score)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for re-claimed waiter")
+	}
+}
+
+// TestBZPopInMultiNonBlocking verifies that BZPOPMIN/BZPOPMAX inside a MULTI block
+// does not block: when the key is empty it replies with null immediately, and when
+// the key has data it pops and replies normally.
+func TestBZPopInMultiNonBlocking(t *testing.T) {
+	session, db := testutil.NewTestSession(t)
+	key := []byte("multikey")
+
+	// Verify ShouldBlock is false inside MULTI.
+	session.EnterMulti()
+	if session.ShouldBlock() {
+		t.Fatal("ShouldBlock() should return false inside MULTI")
+	}
+
+	// Empty key — must reply null immediately without blocking.
+	conn := newMockConn(session)
+	done := make(chan struct{})
+	go func() {
+		BZPopMin(session, conn, [][]byte{key}, 30) // 30s timeout — must NOT honour it
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// good — returned immediately
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("BZPopMin inside MULTI blocked instead of returning immediately")
+	}
+
+	if !strings.Contains(conn.writesStr(), "null") {
+		t.Errorf("expected null reply for empty key in MULTI, got %q", conn.writesStr())
+	}
+
+	// Pre-populate the key, then verify a successful non-blocking pop.
+	session.ExitMulti(true)
+	mustAdd(t, session, db, key, []byte("5"), []byte("m"))
+	session.EnterMulti()
+
+	conn2 := newMockConn(session)
+	done2 := make(chan struct{})
+	go func() {
+		BZPopMin(session, conn2, [][]byte{key}, 30)
+		close(done2)
+	}()
+
+	select {
+	case <-done2:
+		// good
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("BZPopMin inside MULTI blocked on a non-empty key")
+	}
+
+	w := conn2.writesStr()
+	if !strings.Contains(w, "array:3") || !strings.Contains(w, "bulk:m") {
+		t.Errorf("expected 3-element pop reply in MULTI, got %q", w)
+	}
+
+	session.ExitMulti(true)
+}
+
+// TestBZPopInScriptNonBlocking verifies the identical degradation for the inScript
+// flag, exercising the shared ShouldBlock() path.
+func TestBZPopInScriptNonBlocking(t *testing.T) {
+	session, _ := testutil.NewTestSession(t)
+	key := []byte("scriptkey")
+
+	session.EnterScript()
+	if session.ShouldBlock() {
+		t.Fatal("ShouldBlock() should return false inside a script")
+	}
+
+	conn := newMockConn(session)
+	done := make(chan struct{})
+	go func() {
+		BZPopMin(session, conn, [][]byte{key}, 0) // indefinite timeout — must NOT honour it
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// good
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("BZPopMin inside script blocked instead of returning immediately")
+	}
+
+	if !strings.Contains(conn.writesStr(), "null") {
+		t.Errorf("expected null reply for empty key in script, got %q", conn.writesStr())
+	}
+
+	session.ExitScript()
+
+	// After ExitScript the flag is cleared and ShouldBlock is true again.
+	if !session.ShouldBlock() {
+		t.Fatal("ShouldBlock() should return true after ExitScript")
+	}
+}
+
+// TestShouldBlockStates exhaustively checks the four combinations of inMulti/inScript.
+func TestShouldBlockStates(t *testing.T) {
+	session, _ := testutil.NewTestSession(t)
+
+	if !session.ShouldBlock() {
+		t.Error("fresh session: ShouldBlock() should be true")
+	}
+
+	session.EnterMulti()
+	if session.ShouldBlock() {
+		t.Error("inMulti only: ShouldBlock() should be false")
+	}
+	session.ExitMulti(true)
+
+	session.EnterScript()
+	if session.ShouldBlock() {
+		t.Error("inScript only: ShouldBlock() should be false")
+	}
+	session.ExitScript()
+
+	session.EnterMulti()
+	session.EnterScript()
+	if session.ShouldBlock() {
+		t.Error("inMulti+inScript: ShouldBlock() should be false")
+	}
+	session.ExitScript()
+	session.ExitMulti(true)
+
+	if !session.ShouldBlock() {
+		t.Error("after both cleared: ShouldBlock() should be true again")
 	}
 }
