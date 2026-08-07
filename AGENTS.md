@@ -26,6 +26,25 @@ To build, simply `go build .`. At this time there are no non-standard build flag
 
 To run, simply invoke the resulting executable: `./invar redis` (which will spin up a daemon listening on `:6379`)
 
+### Optional SlateDB backend
+
+`kv/slate.go` (and `kv/slate_test.go`) implement the kv interface on top of SlateDB via the `slatedb.io/slatedb-go` bindings. This requires the native `libslatedb_uniffi` shared library and is compiled only when the `slatedb` build tag is set (e.g. `go build -tags slatedb .`). The default build has no SlateDB references and works with the BadgerDB backend only.
+
+The committed `go.mod` intentionally contains no SlateDB entries; the `require`/`replace` directives are injected by the Makefile. To set up the SlateDB prerequisites (clones SlateDB at a pinned tag into `.build/`, builds the release uniffi lib, and wires `go.mod`):
+
+`make deps-slatedb`
+
+Then build invar with the SlateDB backend, run the tagged tests, or run only the BadgerDB tests:
+
+* `make build` — builds `./invar` with `-tags slatedb` and an embedded rpath (no `DYLD_LIBRARY_PATH` needed at runtime)
+* `make test` — runs the unit tests with `-tags slatedb`
+* `make test-badger` — runs the plain `go test ./...` without SlateDB
+* `make clean` — removes `.build/` and drops the injected `go.mod` entries
+
+`make` (default target) runs `deps-slatedb` followed by `build`. `make regen-bindings` regenerates the checked-in Go bindings when the SlateDB tag is bumped (requires `uniffi-bindgen-go`).
+
+Note: `go mod tidy` evaluates all build-tag files, so it needs the SlateDB checkout present (run `make deps-slatedb` first) or it will fail trying to resolve `slatedb.io/slatedb-go`.
+
 Before committing, first run staticcheck to catch code quality regressions:
 
 `./run-staticcheck.sh`

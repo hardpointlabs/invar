@@ -30,3 +30,21 @@ jobs:
 
       - name: Integration tests
         run: ./run-tests.sh
+
+  test-slatedb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build SlateDB prerequisites
+        run: make deps-slatedb
+
+      - name: Run SlateDB-tagged tests
+        run: make test
