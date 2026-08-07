@@ -43,6 +43,19 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache cargo registry and build state
+        uses: Swatinem/rust-cache@v2
+
+      - name: Resolve SlateDB ref
+        id: slatedb
+        run: echo "ref=$(sed -n 's/^SLATEDB_REF[[:space:]]*:=[[:space:]]*//p' Makefile)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache SlateDB checkout and artifacts
+        uses: actions/cache@v4
+        with:
+          path: .build/slatedb
+          key: slatedb-${{ runner.os }}-${{ steps.slatedb.outputs.ref }}
+
       - name: Build SlateDB prerequisites
         run: make deps-slatedb
 
