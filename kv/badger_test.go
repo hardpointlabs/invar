@@ -805,18 +805,6 @@ func TestDropPrefix(t *testing.T) {
 	})
 }
 
-// --- Badger() deprecated accessor ---
-
-func TestBadgerAccessor(t *testing.T) {
-	kvs := InMemoryBadger(t)
-	defer kvs.Close()
-
-	bdb := kvs.Badger()
-	if bdb == nil {
-		t.Fatal("Badger() returned nil")
-	}
-}
-
 // --- NewIterator stub ---
 
 func TestNewIteratorReturnsNil(t *testing.T) {

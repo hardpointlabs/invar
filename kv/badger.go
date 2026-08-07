@@ -46,10 +46,6 @@ func (b badgerKvImpl) Read(fn func(tx Tx) (any, error)) (any, error) {
 	return result, err
 }
 
-func (b badgerKvImpl) Badger() *badger.DB {
-	return b.db
-}
-
 func (b badgerKvImpl) Merge(key []byte, operand []byte, opts ...MergeOption) (WriteHandle, error) {
 	return nil, nil
 }
