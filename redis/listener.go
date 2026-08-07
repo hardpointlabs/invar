@@ -3,11 +3,9 @@ package redis
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/hardpointlabs/invar/config"
@@ -15,6 +13,7 @@ import (
 	"github.com/hardpointlabs/invar/redis/bitmap"
 	"github.com/hardpointlabs/invar/redis/bloom"
 	"github.com/hardpointlabs/invar/redis/common"
+	cm "github.com/hardpointlabs/invar/redis/conn"
 	"github.com/hardpointlabs/invar/redis/hash"
 	"github.com/hardpointlabs/invar/redis/hll"
 	redisjson "github.com/hardpointlabs/invar/redis/json"
@@ -29,13 +28,6 @@ import (
 
 var addr = ":6379"
 
-// key delimeters
-const prefixSeparator = ":"
-
-func currentDbPrefix(conn redcon.Conn) []byte {
-	return []byte(strconv.Itoa(currentDb(conn)) + prefixSeparator)
-}
-
 func upsertSession(conn redcon.Conn, kvs kv.KeyValueStore) *common.Session {
 	if ctx := conn.Context(); ctx != nil {
 		return ctx.(*common.Session)
@@ -43,21 +35,6 @@ func upsertSession(conn redcon.Conn, kvs kv.KeyValueStore) *common.Session {
 	session := common.NewSession(kvs)
 	conn.SetContext(session)
 	return session
-}
-
-func connectionId(conn redcon.Conn) uint64 {
-	return (conn.Context()).(*common.Session).Id
-}
-
-func currentDb(conn redcon.Conn) int {
-	if conn == nil {
-		return 0 // default for testing
-	}
-	return (conn.Context()).(*common.Session).CurrentDB()
-}
-
-func setCurrentDb(conn redcon.Conn, dbIndex int) {
-	(conn.Context()).(*common.Session).SwitchDB(dbIndex)
 }
 
 // RedisListener implements the main.Listener interface for the Redis wire protocol.
@@ -74,51 +51,24 @@ func (l *RedisListener) Serve(ctx context.Context, db *badger.DB) error {
 }
 
 func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Command, db *badger.DB, ps *redcon.PubSub) {
+	// Route writes through the session's tracking wrapper so that any error
+	// reply emitted while a MULTI is queuing flags the transaction as dirty,
+	// causing EXEC to abort entirely.
+	conn = session.TrackedConn(conn)
 	switch strings.ToLower(string(cmd.Args[0])) {
 	default:
 		conn.WriteError("ERR unknown command '" + string(cmd.Args[0]) + "'")
 	case "select":
-		if !checkExactArgs(conn, cmd, 2) {
-			return
-		}
-		dbIndex, err := strconv.Atoi(string(cmd.Args[1]))
-		if err != nil || dbIndex < 0 {
-			conn.WriteError("ERR invalid DB index")
-			return
-		}
-		setCurrentDb(conn, dbIndex)
-		conn.WriteString("OK")
+		session.EnqueueOp(cm.Select(cmd.Args, conn))
 	case "echo":
-		if len(cmd.Args) != 2 {
-			conn.WriteError("ERR wrong number of arguments for 'echo' command")
-		} else {
-			conn.WriteBulkString(string(cmd.Args[1]))
-		}
+		session.EnqueueWireOp(cm.Echo(cmd.Args))
 	case "ping":
-		if len(cmd.Args) > 1 {
-			conn.WriteBulkString(string(cmd.Args[1]))
-		} else {
-			conn.WriteString("PONG")
-		}
+		session.EnqueueWireOp(cm.Ping(cmd.Args))
 	case "quit":
 		conn.WriteString("OK")
 		conn.Close()
 	case "client":
-		if len(cmd.Args) < 2 {
-			conn.WriteError("ERR wrong number of arguments for '" + string(cmd.Args[0]) + "' command")
-			return
-		}
-		subCmd := strings.ToLower(string(cmd.Args[1]))
-		switch subCmd {
-		default:
-			conn.WriteError("subcommand not supported")
-		case "id":
-			conn.WriteUint64(session.Id)
-		case "info":
-			infoString := "id=" + strconv.FormatUint(connectionId(conn), 10) + " db=" + strconv.Itoa(currentDb(conn)) + "\r\n"
-			conn.WriteBulkString(infoString)
-			return
-		}
+		session.EnqueueWireOp(cm.Client(cmd.Args, session))
 	case "bitcount":
 		if !checkMinArgs(conn, cmd, 2) {
 			return
@@ -227,70 +177,47 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		}
 		session.EnqueueOp(bitmap.BitPos(session, cmd.Args[1], bit, startGiven, startVal, endVal, useBit))
 	case "bgsave":
-		go db.Sync()
-		conn.WriteString("OK")
-	case "module":
-		if len(cmd.Args) < 2 {
-			conn.WriteError("ERR wrong number of arguments for 'module' command")
-			return
-		}
-		if strings.ToLower(string(cmd.Args[1])) == "list" {
-			conn.WriteArray(0)
-		} else {
-			conn.WriteError("ERR unknown subcommand")
-		}
+		session.EnqueueWireOp(cm.BgSave(session))
 	case "save":
-		if err := db.Sync(); err != nil {
-			conn.WriteError("ERR " + err.Error())
+		if session.InMulti() {
+			conn.WriteError("Command not allowed inside a transaction")
+		} else {
+			session.EnqueueWireOp(cm.Save(session))
+		}
+	case "module":
+		session.EnqueueWireOp(cm.Module(cmd.Args))
+	case "sync", "psync":
+		session.EnqueueWireOp(cm.Sync())
+	case "wait":
+		session.EnqueueWireOp(cm.Wait())
+	case "lolwut":
+		session.EnqueueWireOp(cm.Lolwut(config.Version, config.Commit))
+	case "time":
+		session.EnqueueWireOp(cm.Time())
+	case "flushall":
+		if session.InMulti() {
+			conn.WriteError("This server does not support FLUSHALL execution inside MULTI")
 			return
 		}
-		conn.WriteString("OK")
-	case "sync", "psync":
-		// since Invar only runs in a single process, 'replication' is meaningless, however
-		// we're implementing to avoid breaking callers who expect these commands
-		conn.WriteString("OK")
-	case "wait":
-		conn.WriteString("OK")
-	case "lolwut":
-		conn.WriteBulkString(fmt.Sprintf("Invar version: %s, commit: %s\n", config.Version, config.Commit))
-	case "time":
-		now := time.Now()
-		sec := now.Unix()
-		micro := now.Nanosecond() / 1000
-		conn.WriteArray(2)
-		conn.WriteBulkString(strconv.FormatInt(sec, 10))
-		conn.WriteBulkString(strconv.FormatInt(int64(micro), 10))
-	case "flushall":
-		err := db.DropAll()
+		err := session.KVS().Destroy()
 		if err != nil {
 			conn.WriteError("ERR " + err.Error())
 			return
 		}
 		conn.WriteString("OK")
 	case "flushdb":
-		err := db.DropPrefix(currentDbPrefix(conn))
+		if session.InMulti() {
+			conn.WriteError("This server does not support FLUSHDB execution inside MULTI")
+			return
+		}
+		err := session.KVS().DropPrefix(session.Prefix())
 		if err != nil {
 			conn.WriteError("ERR " + err.Error())
 			return
 		}
 		conn.WriteString("OK")
 	case "dbsize":
-		// NOTE: this is O(n) as opposed to O(1) in redis!
-		// Do not use this routinely in production!
-		db.View(func(txn *badger.Txn) error {
-			opts := badger.DefaultIteratorOptions
-			opts.PrefetchValues = false
-			opts.PrefetchSize = 100
-			opts.Prefix = currentDbPrefix(conn)
-			it := txn.NewIterator(opts)
-			defer it.Close()
-			var count int64 = 0
-			for it.Rewind(); it.Valid(); it.Next() {
-				count++
-			}
-			conn.WriteInt64(count)
-			return nil
-		})
+		session.EnqueueOp(cm.DbSize(session))
 	case "exists":
 		if !checkMinArgs(conn, cmd, 2) {
 			return
@@ -1273,6 +1200,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		}
 		keys := cmd.Args[1 : len(cmd.Args)-1]
 		zset.BZPopMin(session, conn, keys, timeoutVal)
+		return
 	case "bzpopmax":
 		if !checkMinArgs(conn, cmd, 3) {
 			return
@@ -1286,6 +1214,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		}
 		keys := cmd.Args[1 : len(cmd.Args)-1]
 		zset.BZPopMax(session, conn, keys, timeoutVal)
+		return
 	case "zrangestore":
 		if !checkExactArgs(conn, cmd, 5) {
 			return
@@ -1626,7 +1555,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 			var err error
 			idx, err = strconv.Atoi(string(cmd.Args[3]))
 			if err != nil {
-				conn.WriteError("ERR value is not an integer or out of range")
+				conn.WriteError("value is not an integer or out of range")
 				return
 			}
 		}
@@ -1637,14 +1566,14 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 		}
 		start, err := strconv.Atoi(string(cmd.Args[3]))
 		if err != nil {
-			conn.WriteError("ERR value is not an integer or out of range")
+			conn.WriteError("value is not an integer or out of range")
 			return
 		}
 		stop := -1
 		if len(cmd.Args) >= 5 {
 			stop, err = strconv.Atoi(string(cmd.Args[4]))
 			if err != nil {
-				conn.WriteError("ERR value is not an integer or out of range")
+				conn.WriteError("value is not an integer or out of range")
 				return
 			}
 		}
@@ -1673,8 +1602,13 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 			return
 		}
 		conn.WriteInt(ps.Publish(string(cmd.Args[1]), string(cmd.Args[2])))
+		return
 	case "subscribe", "psubscribe":
 		if !checkMinArgs(conn, cmd, 2) {
+			return
+		}
+		if session.InMulti() {
+			conn.WriteError("Cannot subscribe inside MULTI")
 			return
 		}
 		command := strings.ToLower(string(cmd.Args[0]))
@@ -1685,8 +1619,33 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 				ps.Subscribe(conn, string(cmd.Args[i]))
 			}
 		}
+		return
+	case "multi":
+		if session.InMulti() {
+			// Nested MULTI is an error but does not abort the outer transaction,
+			// so the reply bypasses the dirty-tracking wrapper.
+			conn.(interface{ Unwrapped() redcon.Conn }).Unwrapped().WriteError("MULTI calls can not be nested")
+			return
+		}
+		session.EnterMulti()
+		conn.WriteString("OK")
+		return
+	case "exec":
+		if err := session.ExitMulti(false); err != nil {
+			conn.WriteError("ERR EXEC without MULTI")
+			return
+		}
+		session.DispatchPendingOps(conn, true)
+		return
+	case "discard":
+		if err := session.ExitMulti(true); err != nil {
+			conn.WriteError("DISCARD without MULTI")
+			return
+		}
+		conn.WriteString("OK")
+		return
 	}
-	session.DispatchPendingOps(conn)
+	session.DispatchPendingOps(conn, false)
 }
 
 func serve(ln net.Listener, db *badger.DB) error {

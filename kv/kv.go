@@ -37,6 +37,12 @@ type KeyValueStore interface {
 	// is [transparent / not supported, returns ErrRequiresMergeHandle —
 	// confirm and delete one] on both backends.
 	Merge(key []byte, operand []byte, opts ...MergeOption) (WriteHandle, error)
+	// Forcibly write data to underlying storage
+	Sync() error
+	// Drop all keys in the entire key value store
+	Destroy() error
+	// Drop all keys in the key value store starting with the specified prefix
+	DropPrefix(prefix []byte) error
 }
 
 // Generic transaction object
@@ -49,7 +55,7 @@ type Tx interface {
 	Discard()
 }
 
-// TODO make this work 💩
+// TODO waiting on implementation of commutative operation support
 type MergeOption struct{}
 
 // func WithMergeTTL(d time.Duration) MergeOption // maps to SlateDB's MergeOptions.TTL

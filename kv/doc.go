@@ -87,8 +87,8 @@
 // guarantee is not yet available through this package and needs to be
 // verified/added before relying on it. Durability under crash is
 // explicitly a different property from linearizability and is not
-// covered by anything in linearizability_test.go — it would need a
-// separate fault-injection test.
+// covered by anything in linearizability_test.go. We do plan to write
+// separate fault-injection tests to verify this, however.
 //
 // # Enforcement
 //
@@ -97,6 +97,6 @@
 // hand-crafted adversarial scenarios (write skew, iterator snapshot
 // scope, phantom reads) through Porcupine against every backend
 // implementation. If you change what this package guarantees, update the
-// corresponding test (and this comment) in the same change — a guarantee
+// corresponding test (and this comment) in the same change. A guarantee
 // documented here that isn't checked there will drift silently.
 package kv

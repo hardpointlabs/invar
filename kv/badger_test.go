@@ -627,6 +627,184 @@ func TestClose(t *testing.T) {
 	}
 }
 
+// --- Destroy / DropPrefix ---
+
+func TestDestroy(t *testing.T) {
+	kvs := InMemoryBadger(t)
+	defer kvs.Close()
+
+	keys := []string{"a", "b", "c"}
+	err := kvs.Update(func(tx Tx) error {
+		for _, k := range keys {
+			if err := tx.Set(kvs.NewEntry([]byte(k), []byte("v"))); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("batch Set failed: %v", err)
+	}
+
+	if err := kvs.Destroy(); err != nil {
+		t.Fatalf("Destroy() returned error: %v", err)
+	}
+
+	_, err = kvs.Read(func(tx Tx) (any, error) {
+		for _, k := range keys {
+			if _, err := tx.Get([]byte(k)); err != ErrKeyNotFound {
+				t.Errorf("Get(%q) after Destroy: got %v, want ErrKeyNotFound", k, err)
+			}
+		}
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatalf("Read failed: %v", err)
+	}
+}
+
+func TestDestroyLeavesStoreUsable(t *testing.T) {
+	kvs := InMemoryBadger(t)
+	defer kvs.Close()
+
+	err := kvs.Update(func(tx Tx) error {
+		return tx.Set(kvs.NewEntry([]byte("old"), []byte("v")))
+	})
+	if err != nil {
+		t.Fatalf("initial Set failed: %v", err)
+	}
+
+	if err := kvs.Destroy(); err != nil {
+		t.Fatalf("Destroy() returned error: %v", err)
+	}
+
+	// The store should accept new writes after a destroy.
+	err = kvs.Update(func(tx Tx) error {
+		return tx.Set(kvs.NewEntry([]byte("new"), []byte("v2")))
+	})
+	if err != nil {
+		t.Fatalf("Set after Destroy failed: %v", err)
+	}
+
+	val, err := kvs.Read(func(tx Tx) (any, error) {
+		item, err := tx.Get([]byte("new"))
+		if err != nil {
+			return nil, err
+		}
+		return item.Value()
+	})
+	if err != nil {
+		t.Fatalf("Read after Destroy failed: %v", err)
+	}
+	if string(val.([]byte)) != "v2" {
+		t.Errorf("got %q, want %q", val, "v2")
+	}
+}
+
+func TestDropPrefix(t *testing.T) {
+	t.Run("drops matching keys", func(t *testing.T) {
+		kvs := InMemoryBadger(t)
+		defer kvs.Close()
+
+		keys := []string{"user:1", "user:2", "user:1:extra"}
+		if err := kvs.Update(func(tx Tx) error {
+			for _, k := range keys {
+				if err := tx.Set(kvs.NewEntry([]byte(k), []byte("v"))); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("batch Set failed: %v", err)
+		}
+
+		if err := kvs.DropPrefix([]byte("user:")); err != nil {
+			t.Fatalf("DropPrefix() returned error: %v", err)
+		}
+
+		_, err := kvs.Read(func(tx Tx) (any, error) {
+			for _, k := range keys {
+				if _, err := tx.Get([]byte(k)); err != ErrKeyNotFound {
+					t.Errorf("Get(%q) after DropPrefix: got %v, want ErrKeyNotFound", k, err)
+				}
+			}
+			return nil, nil
+		})
+		if err != nil {
+			t.Fatalf("Read failed: %v", err)
+		}
+	})
+
+	t.Run("preserves non-matching keys", func(t *testing.T) {
+		kvs := InMemoryBadger(t)
+		defer kvs.Close()
+
+		dropped := []string{"user:1", "user:2"}
+		preserved := []string{"other:1", "prefuser:1", "user"}
+		all := []string{"user:1", "user:2", "other:1", "prefuser:1", "user"}
+		if err := kvs.Update(func(tx Tx) error {
+			for _, k := range all {
+				if err := tx.Set(kvs.NewEntry([]byte(k), []byte("v"))); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("batch Set failed: %v", err)
+		}
+
+		if err := kvs.DropPrefix([]byte("user:")); err != nil {
+			t.Fatalf("DropPrefix() returned error: %v", err)
+		}
+
+		_, err := kvs.Read(func(tx Tx) (any, error) {
+			for _, k := range dropped {
+				if _, err := tx.Get([]byte(k)); err != ErrKeyNotFound {
+					t.Errorf("Get(%q) after DropPrefix: got %v, want ErrKeyNotFound", k, err)
+				}
+			}
+			for _, k := range preserved {
+				if _, err := tx.Get([]byte(k)); err != nil {
+					t.Errorf("Get(%q) after DropPrefix: unexpected error %v", k, err)
+				}
+			}
+			return nil, nil
+		})
+		if err != nil {
+			t.Fatalf("Read failed: %v", err)
+		}
+	})
+
+	t.Run("prefix with no matches is a no-op", func(t *testing.T) {
+		kvs := InMemoryBadger(t)
+		defer kvs.Close()
+
+		if err := kvs.Update(func(tx Tx) error {
+			return tx.Set(kvs.NewEntry([]byte("a"), []byte("v")))
+		}); err != nil {
+			t.Fatalf("Set failed: %v", err)
+		}
+
+		if err := kvs.DropPrefix([]byte("missing:")); err != nil {
+			t.Fatalf("DropPrefix() returned error: %v", err)
+		}
+
+		val, err := kvs.Read(func(tx Tx) (any, error) {
+			item, err := tx.Get([]byte("a"))
+			if err != nil {
+				return nil, err
+			}
+			return item.Value()
+		})
+		if err != nil {
+			t.Fatalf("Read failed: %v", err)
+		}
+		if string(val.([]byte)) != "v" {
+			t.Errorf("got %q, want %q", val, "v")
+		}
+	})
+}
+
 // --- Badger() deprecated accessor ---
 
 func TestBadgerAccessor(t *testing.T) {

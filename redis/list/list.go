@@ -3,6 +3,7 @@ package list
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"iter"
 	"math/rand/v2"
 
@@ -10,6 +11,8 @@ import (
 	"github.com/hardpointlabs/invar/redis/common"
 	"github.com/tidwall/redcon"
 )
+
+var errWrongType = errors.New("WRONGTYPE Operation against a key holding the wrong kind of value")
 
 type listNode struct {
 	sentinel *linkedList
@@ -148,6 +151,9 @@ func readSentinel(tx kv.Tx, session *common.Session, listName []byte) (uint32, [
 	item, err := tx.Get(session.PublicKey(listName))
 	if err != nil {
 		return 0, nil, nil, err
+	}
+	if item.Metadata() != byte(common.RedisList) {
+		return 0, nil, nil, errWrongType
 	}
 	val, err := item.Value()
 	if err != nil {
