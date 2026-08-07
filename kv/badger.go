@@ -54,6 +54,21 @@ func (b badgerKvImpl) Merge(key []byte, operand []byte, opts ...MergeOption) (Wr
 	return nil, nil
 }
 
+func (b badgerKvImpl) Sync() error {
+	// TODO map Badger error to a public type
+	return b.db.Sync()
+}
+
+func (b badgerKvImpl) Destroy() error {
+	// TODO map Badger error to a public type
+	return b.db.DropAll()
+}
+
+func (b badgerKvImpl) DropPrefix(prefix []byte) error {
+	// TODO map Badger error to a public type
+	return b.db.DropPrefix(prefix)
+}
+
 func (b badgerKvImpl) Close() error {
 	return b.db.Close()
 }
@@ -168,7 +183,7 @@ func (i badgerItem) Value() ([]byte, error) {
 	return copyItemValue(i.item)
 }
 
-// this is such a common idiom that we expose a utility function for it
+// this is such a common idiom that we keep a utility function for it
 func copyItemValue(item *badger.Item) ([]byte, error) {
 	var out []byte
 	err := item.Value(func(val []byte) error {

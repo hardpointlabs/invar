@@ -24,6 +24,12 @@ const testCases: TestCase[] = JSON.parse(
   new TextDecoder().decode(Deno.readFileSync("redis-commands.json"))
 );
 
+// An error marker ({"error": true}) means "any error reply matches here", so
+// tests can assert that an error appears without pinning its exact message.
+function isErrorMarker(value: unknown): boolean {
+  return value !== null && typeof value === "object" && "error" in value;
+}
+
 let client: RedisClientType | null = null;
 const results: TestResult[] = [];
 
@@ -43,6 +49,9 @@ function compareResult(actual: unknown, expected: unknown, type: string): boolea
       return typeof actual === "number" && actual > threshold;
     case "null":
       return actual === null;
+    case "error":
+      if (isErrorMarker(expected)) return typeof actual === "string" && actual.length > 0;
+      return typeof actual === "string" && actual.includes(expected as string);
     case "null_or_bulk":
       return actual === null || actual === expected;
     case "array_length":
@@ -51,10 +60,14 @@ function compareResult(actual: unknown, expected: unknown, type: string): boolea
       if (!Array.isArray(expected) || !Array.isArray(actual)) return false;
       if (expected.length !== actual.length) return false;
       for (let i = 0; i < expected.length; i++) {
-        if (expected[i] === null) {
+        const exp = expected[i];
+        if (isErrorMarker(exp)) {
+          // error marker: any Error reply in this slot matches
+          if (!(actual[i] instanceof Error)) return false;
+        } else if (exp === null) {
           if (actual[i] !== null) return false;
         } else {
-          if (actual[i] !== expected[i]) return false;
+          if (actual[i] !== exp) return false;
         }
       }
       return true;
@@ -248,6 +261,23 @@ async function runTest(testCase: TestCase): Promise<TestResult> {
 
     // Check if there was an error
     if (actual && typeof actual === "object" && "error" in actual) {
+      // An error reply may be the expected outcome (e.g. EXECABORT on a dirty tx).
+      // A top-level {"error": true} marker accepts any error reply without
+      // pinning the exact message.
+      if (isErrorMarker(testCase.expected) || testCase.type === "error") {
+        const errorStr = (actual as { error: string }).error;
+        const passed = isErrorMarker(testCase.expected)
+          ? true
+          : compareResult(errorStr, testCase.expected, testCase.type);
+        return {
+          name: testCase.name,
+          version: testCase.version,
+          status: passed ? "passed" : "failed",
+          expected: testCase.expected,
+          actual: null,
+          error: passed ? undefined : `Expected error matching ${formatResult(testCase.expected)}, got ${errorStr}`,
+        };
+      }
       return {
         name: testCase.name,
         version: testCase.version,
@@ -255,6 +285,18 @@ async function runTest(testCase: TestCase): Promise<TestResult> {
         expected: testCase.expected,
         actual: null,
         error: (actual as { error: string }).error,
+      };
+    }
+
+    // The command did not raise an error, but the test asserted one should appear.
+    if (isErrorMarker(testCase.expected)) {
+      return {
+        name: testCase.name,
+        version: testCase.version,
+        status: "failed",
+        expected: testCase.expected,
+        actual: actual,
+        error: `Expected an error reply (${formatResult(testCase.expected)}), got ${formatResult(actual)}`,
       };
     }
 

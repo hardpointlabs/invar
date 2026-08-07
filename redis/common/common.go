@@ -3,6 +3,7 @@ package common
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"math"
 	"strconv"
 	"sync/atomic"
@@ -24,6 +25,8 @@ const prefixSeparator = ":"
 // public redis types for LSM tree entries (not private/internal types)
 type RedisValueType byte
 
+type WireOp func(conn redcon.Conn, result any, err error)
+
 const (
 	RedisString RedisValueType = iota
 	RedisList
@@ -36,13 +39,21 @@ const (
 	RedisJSON
 )
 
+// Session wraps client-scoped information about the underlying Redis
+// connection, and local state such as the current Redis DB, whether we are
+// in a MULTI block, error state, e.t.c
+//
+// It also exposes key derivation methods for command implementations to use
+// when they need to create & read entries, without leaking internal key layout
 type Session struct {
-	kvs       kv.KeyValueStore
-	Id        uint64     // Redis connection ID
-	currentDB int32      // Current Redis DB this connection is operating on
-	queue     []QueuedOp // nil when not in MULTI
-	inMulti   bool
-	inScript  bool // true while a Lua script is executing via redis.call
+	kvs         kv.KeyValueStore
+	Id          uint64      // Redis connection ID
+	currentDB   int32       // Current Redis DB this connection is operating on
+	queue       []QueuedOp  // nil when not in MULTI
+	inMulti     bool        // true while inside a MULTI block
+	dirtyExec   bool        // set when a command failed while queuing, aborting EXEC
+	inScript    bool        // true while a Lua script is executing via redis.call
+	trackedConn redcon.Conn // per-connection wrapper used to flag dirty transactions
 }
 
 func NewSession(kvs kv.KeyValueStore) *Session {
@@ -55,15 +66,32 @@ func NewSession(kvs kv.KeyValueStore) *Session {
 
 func (s *Session) EnterMulti() {
 	s.inMulti = true
+	s.dirtyExec = false
 }
 
-func (s *Session) ExitMulti(discard bool) {
+// InMulti reports whether the session is currently inside a MULTI block.
+func (s *Session) InMulti() bool {
+	return s.inMulti
+}
+
+func (s *Session) ExitMulti(discard bool) error {
 	if !s.inMulti {
-		panic("Not inside a MULTI block")
+		return errors.New("not inside a MULTI block")
 	}
 	s.inMulti = false
 	if discard {
 		s.queue = nil
+		s.dirtyExec = false
+	}
+	return nil
+}
+
+// MarkDirty flags the current MULTI transaction for abort because a command
+// failed while it was being queued. It only takes effect while inside a MULTI
+// block, so runtime errors during EXEC (or outside a transaction) are ignored.
+func (s *Session) MarkDirty() {
+	if s.inMulti {
+		s.dirtyExec = true
 	}
 }
 
@@ -86,6 +114,17 @@ func (s *Session) ShouldBlock() bool {
 	return !s.inMulti && !s.inScript
 }
 
+func (s *Session) EnqueueWireOp(wireOp WireOp) {
+	op := QueuedOp{
+		IsMutating: false,
+		DbOp: func(tx kv.Tx) (any, error) {
+			return nil, nil
+		},
+		WireOp: wireOp,
+	}
+	s.EnqueueOp(op)
+}
+
 // Enqueue an operation for later execution within a database transaction
 func (s *Session) EnqueueOp(op QueuedOp) {
 	if s.queue == nil {
@@ -93,38 +132,65 @@ func (s *Session) EnqueueOp(op QueuedOp) {
 	} else {
 		s.queue = append(s.queue, op)
 	}
+	if s.inMulti {
+		s.trackedConn.WriteString("QUEUED")
+	}
 }
 
-// Attempt to acquire a database transaction and execute pending operations
-func (s *Session) DispatchPendingOps(conn redcon.Conn) {
+// Attempt to acquire a database transaction and execute pending operations.
+// When batch is true (we are executing an EXEC) the results are wrapped in a
+// single RESP array and a runtime error in one command does not roll back its
+// siblings — matching Redis semantics.
+func (s *Session) DispatchPendingOps(conn redcon.Conn, batch bool) {
 	if s.inMulti {
 		// scenario A: we're inside a MULTI block, do nothing
 		return
 	}
 
-	// scenario B: we're not inside a MULTI block (either we never were or we just left one),
-	// so we acquire a transaction and apply straight away
-	if s.queue == nil {
-		// No ops were enqueued — command was handled directly (e.g. pubsub).
+	if batch && s.dirtyExec {
+		// A command failed while queuing, which aborts the whole transaction.
+		s.queue = nil
+		s.dirtyExec = false
+		conn.WriteError("EXECABORT Transaction discarded because of previous errors.")
 		return
 	}
 
+	if s.queue == nil {
+		// No ops were enqueued — command was handled directly (e.g. pubsub).
+		if batch {
+			conn.WriteArray(0)
+			return
+		}
+		return
+	}
+
+	// scenario B: we're not inside a MULTI block (either we never were or we just
+	// left one), so we acquire a transaction and apply the batch straight away.
 	tx := s.kvs.Begin(s.needsWritableTx())
 	defer tx.Discard()
 
 	results := make([]any, len(s.queue))
+	errs := make([]error, len(s.queue))
 
 	for i, op := range s.queue {
 		val, err := op.DbOp(tx)
 		if err != nil {
-			// Any claims made by earlier ops in this batch must be returned to
-			// the front of their queues since the transaction will be discarded.
-			for j := 0; j < i; j++ {
-				releaseOpClaims(results[j])
+			if !batch {
+				// Any claims made by earlier ops in this batch must be returned to
+				// the front of their queues since the transaction will be discarded.
+				for j := 0; j < i; j++ {
+					releaseOpClaims(results[j])
+				}
+				op.WireOp(conn, val, err)
+				s.inMulti = false
+				s.queue = nil
+				return
 			}
-			op.WireOp(conn, val, err)
-			s.queue = nil
-			return
+			// Inside EXEC a runtime error is confined to its own array element:
+			// sibling commands still run and the transaction still commits.
+			results[i] = val
+			errs[i] = err
+			continue
 		}
 		results[i] = val
 	}
@@ -141,9 +207,11 @@ func (s *Session) DispatchPendingOps(conn redcon.Conn) {
 		return
 	}
 
+	if batch {
+		conn.WriteArray(len(s.queue))
+	}
 	for i := range s.queue {
-		fn := s.queue[i].WireOp
-		fn(conn, results[i], nil)
+		s.queue[i].WireOp(conn, results[i], errs[i])
 	}
 	s.queue = nil
 }
@@ -191,7 +259,7 @@ func (s *Session) SwitchDB(db int) {
 // Derive a full publicly accessible key in the LSM tree with the sessions'
 // current database and the supplied key name
 func (s *Session) PublicKey(key []byte) []byte {
-	return append(s.currentDbPrefix(), key...)
+	return append(s.Prefix(), key...)
 }
 
 // PublicKeyForDB returns the storage key for a public key in a specific DB.
@@ -202,7 +270,7 @@ func (s *Session) PublicKeyForDB(db int, key []byte) []byte {
 // Derive a full private (internal) key in the LSM tree with the sessions'
 // current database and the supplied key name
 func (s *Session) PrivateKey(key []byte) []byte {
-	return append(append([]byte(internalPrefix), s.currentDbPrefix()...), key...)
+	return append(append([]byte(internalPrefix), s.Prefix()...), key...)
 }
 
 // Create a publicly accessible key/value entry in the LSM tree with
@@ -223,7 +291,9 @@ func (s *Session) NewPrivateEntry(key []byte, value []byte) kv.Entry {
 	return s.kvs.NewEntry(s.PrivateKey(key), value)
 }
 
-func (s *Session) currentDbPrefix() []byte {
+// The raw prefix for public keys stored in the current Redis DB
+// Functionally equivalent to calling PublicKey() with an empty []byte
+func (s *Session) Prefix() []byte {
 	return []byte(strconv.Itoa(s.CurrentDB()) + prefixSeparator)
 }
 
@@ -235,7 +305,7 @@ type QueuedOp struct {
 	// The DB side: runs inside the transaction, returns an opaque result or error
 	DbOp func(tx kv.Tx) (any, error)
 	// The wire side: runs after commit, consumes the result
-	WireOp func(conn redcon.Conn, result any, err error)
+	WireOp WireOp
 	// Flags whether this op needs to run in a write transaction
 	IsMutating bool
 }
@@ -293,4 +363,35 @@ func FormatFloat(f float64) string {
 		return "-inf"
 	}
 	return strconv.FormatFloat(f, 'f', -1, 64)
+}
+
+// trackingConn wraps a redcon.Conn so that any error reply written while the
+// session is inside a MULTI block flags the transaction as dirty (matching
+// Redis's CLIENT_DIRTY_EXEC). The wrapper is cached on the session so that a
+// given connection always presents the same wrapper instance to redcon — the
+// PubSub implementation keys subscribed connections by identity.
+type trackingConn struct {
+	redcon.Conn
+	session *Session
+}
+
+func (t *trackingConn) WriteError(msg string) {
+	t.session.MarkDirty()
+	t.Conn.WriteError(msg)
+}
+
+// Unwrapped returns the underlying connection, bypassing dirty tracking. Used
+// for replies that must not abort an open MULTI, e.g. a nested MULTI error.
+func (t *trackingConn) Unwrapped() redcon.Conn {
+	return t.Conn
+}
+
+// TrackedConn returns the session's error-tracking connection wrapper. The
+// wrapper is created once per session and reused for every command on the
+// underlying connection.
+func (s *Session) TrackedConn(conn redcon.Conn) redcon.Conn {
+	if s.trackedConn == nil {
+		s.trackedConn = &trackingConn{Conn: conn, session: s}
+	}
+	return s.trackedConn
 }

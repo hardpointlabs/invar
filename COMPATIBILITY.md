@@ -210,9 +210,9 @@ in this implementation.
 
 | Command | Status | Notes |
 |---------|--------|-------|
-| DISCARD | 🚫 | |
-| EXEC | 🚫 | |
-| MULTI | 🚫 | |
+| DISCARD | ✅ | |
+| EXEC | ✅ | |
+| MULTI | ✅ | |
 | UNWATCH | 🚫 | |
 | WATCH | 🚫 | |
 
@@ -265,7 +265,7 @@ in this implementation.
 | ACL USERS | 🚫 | |
 | ACL WHOAMI | 🚫 | |
 | BGREWRITEAOF | 🚫 | |
-| BGSAVE | ✅ | |
+| BGSAVE | ✅ | no-op |
 | COMMAND | 🚫 | |
 | COMMAND COUNT | 🚫 | |
 | COMMAND DOCS | 🚫 | |
@@ -277,7 +277,7 @@ in this implementation.
 | CONFIG RESETSTAT | 🚫 | |
 | CONFIG REWRITE | 🚫 | |
 | CONFIG SET | 🚫 | |
-| DBSIZE | ✅ | |
+| DBSIZE | ✅ | Runs in O(n) time |
 | DEBUG | 🚫 | |
 | FAILOVER | 🚫 | |
 | FLUSHALL | ✅ | |

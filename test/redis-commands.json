@@ -2279,5 +2279,110 @@
     "version": "5.0.0",
     "description": "BZPOPMAX pops without blocking when the sorted set is non-empty",
     "setup": [["DEL", "bzpopmax_immediate"], ["ZADD", "bzpopmax_immediate", "1", "member1"]]
+  },
+  {
+    "name": "MULTI with empty command set returns empty array",
+    "command": ["EXEC"],
+    "expected": [],
+    "type": "array",
+    "version": "1.2.0",
+    "setup": [["MULTI"]]
+  },
+  {
+    "name": "Unknown command inside MULTI errors immediately, not queued",
+    "command": ["NOTACOMMAND", "foo"],
+    "expected": { "error": true },
+    "type": "error",
+    "version": "1.2.0",
+    "description": "Should reply with an immediate error, not +QUEUED, and mark the transaction dirty",
+    "setup": [["DEL", "multi_abort_key"], ["MULTI"]]
+  },
+  {
+    "name": "EXEC on a dirtied transaction returns EXECABORT and runs nothing",
+    "command": ["EXEC"],
+    "expected": { "error": true },
+    "type": "error",
+    "version": "1.2.0",
+    "description": "Must not execute any previously-queued commands"
+  },
+  {
+    "name": "Confirm nothing from the aborted transaction persisted",
+    "command": ["GET", "multi_abort_key"],
+    "expected": null,
+    "type": "null",
+    "version": "1.2.0"
+  },
+  {
+    "name": "Queue-time abort means nothing in the batch actually ran",
+    "command": ["GET", "multi_abort_key"],
+    "expected": null,
+    "type": "null",
+    "version": "1.2.0",
+    "description": "Confirms the SET from the aborted transaction above never took effect",
+    "version_note": "run immediately after the previous test case"
+  },
+  {
+    "name": "MULTI runtime error doesn't roll back sibling commands",
+    "command": ["EXEC"],
+    "expected": ["OK", {"error": true}],
+    "type": "array",
+    "version": "1.2.0",
+    "setup": [["DEL", "multi_runtime_key"], ["MULTI"], ["SET", "multi_runtime_key", "hello"], ["LPUSH", "multi_runtime_key", "val"]]
+  },
+  {
+    "name": "Confirm the SET before the WRONGTYPE persisted despite the later failure",
+    "command": ["GET", "multi_runtime_key"],
+    "expected": "hello",
+    "type": "bulk_string",
+    "version": "1.2.0"
+  },
+  {
+    "name": "Commands within one EXEC see each other's writes",
+    "command": ["EXEC"],
+    "expected": ["OK", 2],
+    "type": "array",
+    "version": "1.2.0",
+    "setup": [["DEL", "multi_seq_key"], ["MULTI"], ["SET", "multi_seq_key", "1"], ["INCR", "multi_seq_key"]]
+  },
+  {
+    "name": "PING is queued inside MULTI, not answered immediately",
+    "command": ["EXEC"],
+    "expected": ["PONG"],
+    "type": "array",
+    "version": "1.2.0",
+    "setup": [["MULTI"], ["PING"]]
+  },
+  {
+    "name": "SELECT inside MULTI only takes effect atomically",
+    "command": ["EXEC"],
+    "expected": ["OK", "OK"],
+    "type": "array",
+    "version": "1.2.0",
+    "setup": [["SELECT", "0"], ["MULTI"], ["SELECT", "1"], ["SET", "multi_select_key", "v"]]
+  },
+  {
+    "name": "The SELECT-scoped write landed in db1, not db0",
+    "command": ["GET", "multi_select_key"],
+    "expected": null,
+    "type": "null",
+    "version": "1.2.0",
+    "setup": [["SELECT", "0"]]
+  },
+  {
+    "name": "FLUSHDB inside MULTI is rejected",
+    "command": ["EXEC"],
+    "expected": {"error": true},
+    "type": "array",
+    "version": "1.2.0",
+    "setup": [["SET", "pre_flush_marker", "1"], ["MULTI"], ["FLUSHDB"], ["SET", "post_flush_marker", "1"]]
+  },
+  {
+    "name": "SUBSCRIBE inside MULTI is rejected, not executed",
+    "command": ["EXEC"],
+    "expected": {"error": true},
+    "type": "null_or_bulk",
+    "version": "1.2.0",
+    "description": "Queuing SUBSCRIBE should mark the transaction dirty and abort EXEC",
+    "setup": [["MULTI"], ["SUBSCRIBE", "somechannel"]]
   }
 ]
