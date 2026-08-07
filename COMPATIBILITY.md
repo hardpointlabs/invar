@@ -240,7 +240,7 @@ in this implementation.
 | CLIENT UNBLOCK | 🚫 | Not implementing |
 | CLIENT UNPAUSE | 🚫 | Not implementing |
 | ECHO | ✅ | |
-| HELLO | 🚫 | Not implementing |
+| HELLO | ✅ | |
 | PING | ✅ | |
 | QUIT | ✅ | |
 | RESET | 🚫 | |
@@ -282,7 +282,7 @@ in this implementation.
 | FAILOVER | 🚫 | |
 | FLUSHALL | ✅ | |
 | FLUSHDB | ✅ | |
-| INFO | 🚫 | |
+| INFO | ✅ | |
 | LASTSAVE | 🚫 | |
 | LATENCY DOCTOR | 🚫 | |
 | LATENCY GRAPH | 🚫 | |

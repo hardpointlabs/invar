@@ -3,8 +3,6 @@ package kv
 import (
 	"errors"
 	"time"
-
-	"github.com/dgraph-io/badger/v4"
 )
 
 var (
@@ -24,9 +22,6 @@ type KeyValueStore interface {
 	// It's critical to call this to clean up all DB resources and
 	// to ensure all data is persisted to durable storage
 	Close() error
-	// DEPRECATED! This accessor is purely for smoothing transition
-	// to the KeyValueStore interface
-	Badger() *badger.DB
 	// Merge appends a commutative delta to key using the store's globally
 	// registered MergeFunc (see Options.MergeFunc). This is a blind write:
 	// it never conflicts with concurrent Merge calls on the same key, and
