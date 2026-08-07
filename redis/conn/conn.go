@@ -29,16 +29,6 @@ func setCurrentDb(conn redcon.Conn, dbIndex int) {
 	(conn.Context()).(*common.Session).SwitchDB(dbIndex)
 }
 
-// TODO this should live somewhere common but the priority for now is
-// to move all connection/server mgmt commands to queued ops
-func checkExactArgs(conn redcon.Conn, args [][]byte, n int) bool {
-	if len(args) != n {
-		conn.WriteError("ERR wrong number of arguments for '" + string(args[0]) + "' command")
-		return false
-	}
-	return true
-}
-
 func currentDb(conn redcon.Conn) int {
 	if conn == nil {
 		return 0 // default for testing
@@ -91,11 +81,11 @@ func Select(args [][]byte, conn redcon.Conn) common.QueuedOp {
 		IsMutating: true,
 		DbOp: func(tx kv.Tx) (any, error) {
 			if len(args) != 2 {
-				return nil, errors.New("Invalid arguments")
+				return nil, errors.New("invalid arguments")
 			}
 			dbIndex, err := strconv.Atoi(string(args[1]))
 			if err != nil || dbIndex < 0 {
-				return nil, errors.New("Invalid DB index")
+				return nil, errors.New("invalid DB index")
 			}
 
 			setCurrentDb(conn, dbIndex)
