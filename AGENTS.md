@@ -45,6 +45,10 @@ Then build invar with the SlateDB backend, run the tagged tests, or run only the
 
 Note: `go mod tidy` evaluates all build-tag files, so it needs the SlateDB checkout present (run `make deps-slatedb` first) or it will fail trying to resolve `slatedb.io/slatedb-go`.
 
+### Simulating a release locally
+
+The goreleaser routine (linux/amd64 + linux/arm64 binaries, archives, and the multi-arch docker images) must run on linux/amd64 because the amd64 Go build uses the native `gcc`. It cannot run directly on macOS. `./simulate-release.sh` runs the exact steps in an `ubuntu:24.04` container with the host docker daemon mounted, then invokes `goreleaser release --snapshot --clean`, which builds and `--load`s the images into the local daemon without pushing anything. Run `make clean` afterwards to restore `go.mod` and remove `.build/`. Requires Docker (OrbStack: `open -a OrbStack`).
+
 Before committing, first run staticcheck to catch code quality regressions:
 
 `./run-staticcheck.sh`
