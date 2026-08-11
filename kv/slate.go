@@ -14,6 +14,7 @@ import (
 type SlateDBOpts struct {
 	Path           string
 	ObjectStoreURL string
+	Settings       *slatedb.Settings // optional; applied to the DbBuilder when non-nil
 }
 
 func NewSlateDB(opts SlateDBOpts) (KeyValueStore, error) {
@@ -23,6 +24,12 @@ func NewSlateDB(opts SlateDBOpts) (KeyValueStore, error) {
 	}
 	builder := slatedb.NewDbBuilder(opts.Path, store)
 	defer builder.Destroy()
+	if opts.Settings != nil {
+		if err := builder.WithSettings(opts.Settings); err != nil {
+			store.Destroy()
+			return nil, err
+		}
+	}
 	db, err := builder.Build()
 	if err != nil {
 		store.Destroy()

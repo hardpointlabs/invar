@@ -24,7 +24,7 @@ The modules should be periodically updated:
 
 To build, simply `go build .`. At this time there are no non-standard build flags.
 
-To run, simply invoke the resulting executable: `./invar redis` (which will spin up a daemon listening on `:6379`)
+To run, the storage backend is a mandatory subcommand. For example, invoke the resulting executable as `./invar redis badger --data-dir /tmp/badger` to spin up a daemon with BadgerDB listening on `:6379`. The Redis and Mongo protocol subcommands each accept `badger` or `slatedb`:
 
 ### Optional SlateDB backend
 

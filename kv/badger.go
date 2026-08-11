@@ -3,10 +3,12 @@ package kv
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/dgraph-io/badger/v4/options"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -14,6 +16,20 @@ import (
 type BadgerOpts struct {
 	DataDir string // The directory where data is persisted. Must be writable by this process
 	Logger  zerolog.Logger
+
+	// Optional tuning knobs. Zero values leave BadgerDB defaults in place.
+	ValueLogFileSize int64  // size of each value log file in bytes
+	MemTableSize     int64  // maximum size of the LSM memtable in bytes
+	BlockSize        int64  // size of a data block in bytes
+	Compression      string // SSTable compression codec: "", "none", "snappy", or "zstd"
+	SyncWrites       bool   // fsync every write to the value log
+}
+
+// BadgerStore is implemented by KeyValueStore backends that are backed by
+// BadgerDB. It exposes the underlying database handle for backend-specific
+// tooling (e.g. metrics).
+type BadgerStore interface {
+	Badger() *badger.DB
 }
 
 // --- Badger KeyValueStore implementation ---
@@ -67,6 +83,10 @@ func (b badgerKvImpl) DropPrefix(prefix []byte) error {
 
 func (b badgerKvImpl) Close() error {
 	return b.db.Close()
+}
+
+func (b badgerKvImpl) Badger() *badger.DB {
+	return b.db
 }
 
 type badgerIterator struct {
@@ -245,6 +265,30 @@ func NewBadger(opts BadgerOpts) KeyValueStore {
 	badgerOpts := badger.DefaultOptions(opts.DataDir)
 	adapter := &badgerZerologAdapter{Logger: opts.Logger}
 	badgerOpts.Logger = adapter
+	if opts.ValueLogFileSize > 0 {
+		badgerOpts.ValueLogFileSize = opts.ValueLogFileSize
+	}
+	if opts.MemTableSize > 0 {
+		badgerOpts.MemTableSize = opts.MemTableSize
+	}
+	if opts.BlockSize > 0 {
+		badgerOpts.BlockSize = int(opts.BlockSize)
+	}
+	if opts.SyncWrites {
+		badgerOpts.SyncWrites = true
+	}
+	if opts.Compression != "" {
+		switch strings.ToLower(opts.Compression) {
+		case "none":
+			badgerOpts.Compression = options.None
+		case "snappy":
+			badgerOpts.Compression = options.Snappy
+		case "zstd":
+			badgerOpts.Compression = options.ZSTD
+		default:
+			log.Fatal().Str("compression", opts.Compression).Msg("invalid badger compression codec (must be none, snappy, or zstd)")
+		}
+	}
 	db, err := badger.Open(badgerOpts)
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to open badger database")

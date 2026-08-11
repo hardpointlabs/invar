@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/dgraph-io/badger/v4"
 	"github.com/hardpointlabs/invar/config"
 	"github.com/hardpointlabs/invar/kv"
 	"github.com/hardpointlabs/invar/redis/bitmap"
@@ -26,8 +25,6 @@ import (
 	"github.com/tidwall/redcon"
 )
 
-var addr = ":6379"
-
 func upsertSession(conn redcon.Conn, kvs kv.KeyValueStore) *common.Session {
 	if ctx := conn.Context(); ctx != nil {
 		return ctx.(*common.Session)
@@ -42,15 +39,15 @@ type RedisListener struct {
 	Ln net.Listener
 }
 
-func (l *RedisListener) Serve(ctx context.Context, db *badger.DB) error {
+func (l *RedisListener) Serve(ctx context.Context, kv kv.KeyValueStore) error {
 	go func() {
 		<-ctx.Done()
 		l.Ln.Close()
 	}()
-	return serve(l.Ln, db)
+	return serve(l.Ln, kv)
 }
 
-func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Command, db *badger.DB, ps *redcon.PubSub) {
+func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Command, ps *redcon.PubSub) {
 	// Route writes through the session's tracking wrapper so that any error
 	// reply emitted while a MULTI is queuing flags the transaction as dirty,
 	// causing EXEC to abort entirely.
@@ -1648,14 +1645,13 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 	session.DispatchPendingOps(conn, false)
 }
 
-func serve(ln net.Listener, db *badger.DB) error {
+func serve(ln net.Listener, kv kv.KeyValueStore) error {
 	var ps redcon.PubSub
-	kvs := kv.WrapBadger(db)
-	log.Info().Msgf("started RESP protocol listener at %s", addr)
+	log.Info().Msgf("started RESP protocol listener at %s", ln.Addr())
 	err := redcon.Serve(ln,
 		func(conn redcon.Conn, cmd redcon.Command) {
-			session := upsertSession(conn, kvs)
-			dispatchCommand(session, conn, cmd, db, &ps)
+			session := upsertSession(conn, kv)
+			dispatchCommand(session, conn, cmd, &ps)
 		},
 		func(conn redcon.Conn) bool {
 			// Use this function to accept or deny the connection.
