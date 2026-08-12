@@ -1,3 +1,10 @@
+## [1.0.6](https://github.com/hardpointlabs/invar/compare/v1.0.5...v1.0.6) (2026-08-12)
+
+
+### Bug Fixes
+
+* release initial SlateDB integration ([cc87d11](https://github.com/hardpointlabs/invar/commit/cc87d11b7ef40d0ab7e54f55759ecff785ffc821))
+
 ## [1.0.5](https://github.com/hardpointlabs/invar/compare/v1.0.4...v1.0.5) (2026-06-16)
 
 
