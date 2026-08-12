@@ -8,9 +8,9 @@
 
 Invar is a lightweight durable document database. Its main goals are:
 
-* Lightweight: low resource-usage, single binary
+* Lightweight single binary
 * Simple consistency & durability guarantees
-* Ops friendliness: simple backups and encryption
+* Compatibility with RESP and Mongo Wire Protocols
 * Open: Apache 2.0-licensed
 
 It supports clients which speak the Redis Serialization Protocol (RESP), and has incubating support for MongoDB client drivers.
@@ -28,7 +28,7 @@ Invar is backed by [Hardpoint Labs](https://hardpoint.dev) and powers our enterp
 We ship Docker builds of our latest releases which you can pull and run as a 1-liner:
 
 ```
-docker run -it -v /tmp:/var/run/invar -p 6379:7379 ghcr.io/hardpointlabs/invar:latest redis
+docker run -it -v /tmp:/var/run/invar -p 6379:7379 ghcr.io/hardpointlabs/invar:latest redis badger --data-dir /var/run/invar
 ```
 
 ### Redis client compatibility
@@ -39,11 +39,27 @@ See the [compatibility](./COMPATIBILITY.md) docs for more details.
 
 We're still working on a stable release with Mongo wire protocol support; please create an [issue](https://github.com/hardpointlabs/invar/issues) if this is something you're interested in.
 
----
+## Architectural Overview
 
-## Design goals
+```mermaid
 
-* Everything is persisted as keys in BadgerDB under the hood (a fast LSM-tree-based, ACID-compliant key store written in pure Go).
-* It's not expected that this runs in a cluster: one daemon, one database
-* The goal is not to rival the in-memory speed of Redis (or the speed of mongo when mmap is working well, although it should get close). Instead the goal is light weight, allowing individual DBs to scale down to a few MBs of RAM and minimal CPU when idling, so many of them can run concurrently on underlying hardware through some hypervisor such as [Firecracker](https://firecracker-microvm.github.io/)
-* Since BadgerDB supports transactions, we aim to support them
+flowchart TB
+    subgraph Invar["Invar"]
+        direction TB
+
+        subgraph QueryEngines["Query Engines"]
+            direction LR
+            Mongo["Mongo"]
+            Redis["Redis"]
+        end
+
+        subgraph KVS["KVS"]
+            direction LR
+            SlateDB["SlateDB"]
+            BadgerDB["BadgerDB"]
+        end
+
+        Mongo --> KVS
+        Redis --> KVS
+    end
+```

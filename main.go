@@ -13,8 +13,8 @@ import (
 	"time"
 
 	arg "github.com/alexflint/go-arg"
-	badger "github.com/dgraph-io/badger/v4"
 	"github.com/hardpointlabs/invar/config"
+	"github.com/hardpointlabs/invar/kv"
 	"github.com/hardpointlabs/invar/metrics"
 	mongolistener "github.com/hardpointlabs/invar/mongo"
 	"github.com/hardpointlabs/invar/redis"
@@ -25,7 +25,7 @@ import (
 
 // Listener is implemented by each protocol backend.
 type Listener interface {
-	Serve(ctx context.Context, db *badger.DB) error
+	Serve(ctx context.Context, kv kv.KeyValueStore) error
 }
 
 // listenAddr is a parsed network address that understands "tcp:6379" and
@@ -61,25 +61,12 @@ func (a listenAddr) Listen() (net.Listener, error) {
 	return net.Listen(a.network, a.address)
 }
 
-// ---- subcommand argument structs ----
-
-type versionCmd struct{}
-
-type redisCmd struct {
-	ListenAddr listenAddr `arg:"--listen-addr" default:"tcp::6379" help:"listen address (tcp:<addr> or unix:<path>)"`
-}
-
-type mongoCmd struct {
-	ListenAddr listenAddr `arg:"--listen-addr" default:"tcp::27017" help:"listen address (tcp:<addr> or unix:<path>)"`
-}
-
 // ---- top-level args ----
 
 type args struct {
-	DataDir string `arg:"--data-dir" default:"/tmp/badger" help:"path to BadgerDB storage directory"`
-	Pprof   bool   `arg:"--pprof" help:"start pprof HTTP server on localhost:6060"`
-	Metrics bool   `arg:"--metrics" help:"start Prometheus metrics server on localhost:2112"`
-	Writer  bool   `arg:"--writer" help:"designate this node as a write replica" default:"false"`
+	Pprof   bool `arg:"--pprof" help:"start pprof HTTP server on localhost:6060"`
+	Metrics bool `arg:"--metrics" help:"start Prometheus metrics server on localhost:2112"`
+	Writer  bool `arg:"--writer" help:"designate this node as a write replica" default:"false"`
 
 	Version *versionCmd `arg:"subcommand:version" help:"print version information and exit"`
 	Redis   *redisCmd   `arg:"subcommand:redis"   help:"start with RESP-protocol compatibility"`
@@ -87,6 +74,30 @@ type args struct {
 }
 
 func (args) Description() string { return "Invar - a lightweight, durable document store" }
+
+// badgerCmdOf returns the selected badger subcommand, or nil if it was not
+// chosen under either protocol subcommand.
+func badgerCmdOf(a *args) *badgerCmd {
+	if a.Redis != nil && a.Redis.Badger != nil {
+		return a.Redis.Badger
+	}
+	if a.Mongo != nil && a.Mongo.Badger != nil {
+		return a.Mongo.Badger
+	}
+	return nil
+}
+
+// slateDBCmdOf returns the selected slatedb subcommand, or nil if it was not
+// chosen under either protocol subcommand.
+func slateDBCmdOf(a *args) *slateDBCmd {
+	if a.Redis != nil && a.Redis.SlateDB != nil {
+		return a.Redis.SlateDB
+	}
+	if a.Mongo != nil && a.Mongo.SlateDB != nil {
+		return a.Mongo.SlateDB
+	}
+	return nil
+}
 
 func main() {
 	var a args
@@ -103,18 +114,34 @@ func main() {
 		p.Fail("a subcommand is required: version, redis, or mongo")
 	}
 
+	// Ensure a storage backend subcommand was provided.
+	if badgerCmdOf(&a) == nil && slateDBCmdOf(&a) == nil {
+		p.Fail("a storage backend subcommand is required: badger or slatedb")
+	}
+
 	// ---- logging ----
 	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
-	adapter := &BadgerZerologAdapter{Logger: logger}
 
-	// ---- BadgerDB ----
-	opts := badger.DefaultOptions(a.DataDir)
-	opts.Logger = adapter
-	db, err := badger.Open(opts)
-	if err != nil {
-		log.Fatal().Err(err).Msg("failed to open badger database")
+	// ---- storage backend ----
+	var store kv.KeyValueStore
+	var err error
+	if bc := badgerCmdOf(&a); bc != nil {
+		store = kv.NewBadger(kv.BadgerOpts{
+			DataDir:          bc.DataDir,
+			Logger:           logger,
+			ValueLogFileSize: bc.ValueLogFileSize,
+			MemTableSize:     bc.MemTableSize,
+			BlockSize:        bc.BlockSize,
+			Compression:      bc.Compression,
+			SyncWrites:       bc.SyncWrites,
+		})
+	} else if sc := slateDBCmdOf(&a); sc != nil {
+		store, err = openSlateDB(sc)
+		if err != nil {
+			log.Fatal().Err(err).Msg("failed to open slatedb backend")
+		}
 	}
-	defer db.Close()
+	defer store.Close()
 
 	// ---- context / signal handling ----
 	ctx, cancel := context.WithCancel(context.Background())
@@ -145,10 +172,14 @@ func main() {
 
 	// ---- optional: Prometheus metrics ----
 	if a.Metrics {
-		g.Go(func() error {
-			m := metrics.CreateMetrics(db)
-			return m.Start(groupCtx)
-		})
+		if bdb, ok := store.(kv.BadgerStore); ok && bdb.Badger() != nil {
+			g.Go(func() error {
+				m := metrics.CreateMetrics(bdb.Badger())
+				return m.Start(groupCtx)
+			})
+		} else {
+			log.Warn().Msg("--metrics is only supported with the badger backend; skipping")
+		}
 	}
 
 	// ---- protocol listener ----
@@ -172,7 +203,7 @@ func main() {
 	}
 
 	g.Go(func() error {
-		return l.Serve(groupCtx, db)
+		return l.Serve(groupCtx, store)
 	})
 
 	// ---- signal → cancel ----

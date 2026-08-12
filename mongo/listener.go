@@ -4,7 +4,7 @@ import (
 	"context"
 	"net"
 
-	badger "github.com/dgraph-io/badger/v4"
+	"github.com/hardpointlabs/invar/kv"
 	"github.com/rs/zerolog/log"
 )
 
@@ -14,7 +14,7 @@ type MongoListener struct {
 	Ln net.Listener
 }
 
-func (l *MongoListener) Serve(ctx context.Context, db *badger.DB) error {
+func (l *MongoListener) Serve(ctx context.Context, kv kv.KeyValueStore) error {
 	log.Info().Msgf("started mongo listener at %s (not yet implemented)", l.Ln.Addr())
 	go func() {
 		<-ctx.Done()
