@@ -1277,8 +1277,11 @@ dependencies = [
 name = "redis"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bytes",
  "futures",
+ "kv",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
