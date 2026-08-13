@@ -185,6 +185,12 @@ impl Session {
         Entry::new(self.public_key(key), value.to_vec())
     }
 
+    /// Creates a public entry in a specific DB (used by `MOVE`, which writes
+    /// the target DB without switching the session).
+    pub fn new_entry_for_db(&self, db: i32, key: &[u8], value: &[u8]) -> Entry {
+        Entry::new(self.public_key_for_db(db, key), value.to_vec())
+    }
+
     /// Creates a private (internal) entry in the current DB.
     pub fn new_private_entry(&self, key: &[u8], value: &[u8]) -> Entry {
         Entry::new(self.private_key(key), value.to_vec())

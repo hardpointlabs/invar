@@ -7,6 +7,7 @@
 pub mod bloom;
 pub mod commands;
 pub mod common;
+pub mod keys;
 pub mod list;
 pub mod listener;
 pub mod resp;
