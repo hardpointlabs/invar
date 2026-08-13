@@ -1,0 +1,17 @@
+[package]
+name = "kv"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+async-trait = "0.1"
+fjall = "3.1"
+slatedb = { version = "0.15", default-features = false }
+thiserror = "1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

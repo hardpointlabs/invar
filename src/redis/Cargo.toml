@@ -1,0 +1,17 @@
+[package]
+name = "redis"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+bytes = "1"
+futures = "0.3"
+thiserror = "1"
+tokio = { version = "1", features = ["net", "io-util", "rt"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "time"] }
