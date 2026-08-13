@@ -31,6 +31,12 @@ pub enum DbError {
     Kv(#[from] KvError),
     #[error("WRONGTYPE Operation against a key holding the wrong kind of value")]
     WrongType,
+    #[error("key already exists")]
+    KeyExists,
+    /// A Redis-specific error with a literal message (rendered as `ERR `msg).
+    /// Carries no "ERR" prefix itself.
+    #[error("{0}")]
+    Redis(String),
 }
 
 /// RESP error reply for `WRONGTYPE`.
@@ -41,6 +47,8 @@ const WRONG_TYPE_REPLY: Bytes =
 pub fn err_resp(err: &DbError) -> RespValue {
     match err {
         DbError::WrongType => RespValue::Error(WRONG_TYPE_REPLY),
+        DbError::KeyExists => RespValue::Error(Bytes::from_static(b"ERR key already exists")),
+        DbError::Redis(msg) => RespValue::Error(format!("ERR {msg}").into()),
         DbError::Kv(e) => RespValue::Error(format!("ERR {e}").into()),
     }
 }
