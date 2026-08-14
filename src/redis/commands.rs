@@ -2067,6 +2067,21 @@ pub async fn dispatch_command(session: &mut Session, args: &[Bytes]) -> Vec<Resp
                 replies.push(queued);
             }
         }
+        b"object" => {
+            // TODO this is hard-wired to only implement the IDLETIME subcommand stub
+            // Replace if/when we decide to implement more OBJECT subcommands
+            if args.len() < 3 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'object' command",
+                );
+                return replies;
+            }
+            if let Some(queued) = session.enqueue_op(keys::idle_time(session)) {
+                replies.push(queued);
+            }
+        }
         b"move" => {
             if args.len() != 3 {
                 error(

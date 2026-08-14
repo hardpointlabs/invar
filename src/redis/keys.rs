@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 
-use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
+use crate::common::op::{err_resp, DbError, DbOp, DbResult, NoOp, QueuedOp, WireOp};
 use crate::common::session::Session;
 use crate::common::ValueType;
 use crate::resp::RespValue;
@@ -147,6 +147,26 @@ pub fn del(session: &Session, keys: &[Bytes]) -> QueuedOp {
         }),
         wire_op: Box::new(IntWire),
         is_mutating: true,
+    }
+}
+
+struct NullWire;
+
+impl WireOp for NullWire {
+    fn reply(&self, _result: Result<DbResult, DbError>) -> RespValue {
+        RespValue::Array(None)
+    }
+}
+
+/// Returns the idle time of a key
+/// Invar doesn't currently have any bookkeeping mechanism to track
+/// this, but it's implemented to always nil to avoid breaking
+/// upstream applications which expect command support
+pub fn idle_time(_: &Session) -> QueuedOp {
+    QueuedOp {
+        db_op: Box::new(NoOp),
+        wire_op: Box::new(NullWire),
+        is_mutating: false,
     }
 }
 
