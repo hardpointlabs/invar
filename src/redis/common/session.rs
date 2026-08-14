@@ -16,6 +16,7 @@ use kv::kv::Entry;
 use crate::common::op::{DbError, DbResult, NoOp, QueuedOp, WireOp};
 use crate::common::registry::WatchRegistry;
 use crate::common::store::RedisStore;
+use crate::pubsub::PubSubRegistry;
 use crate::resp::RespValue;
 
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
@@ -45,8 +46,12 @@ pub struct Session {
     dirty_exec: bool,
     /// True while a Lua script is executing via `redis.call`.
     in_script: bool,
+    /// Set by `QUIT`: the listener should close the connection after the
+    /// replies are flushed.
+    should_close: bool,
     store: Arc<dyn RedisStore>,
     registry: Arc<WatchRegistry>,
+    pubsub: Arc<PubSubRegistry>,
 }
 
 impl Session {
@@ -58,8 +63,31 @@ impl Session {
             in_multi: false,
             dirty_exec: false,
             in_script: false,
+            should_close: false,
             store,
             registry,
+            pubsub: Arc::new(PubSubRegistry::new()),
+        }
+    }
+
+    /// Creates a session with an explicit, shared pub/sub registry.  Used by
+    /// the listener so all connections on the same server share one registry.
+    pub fn new_with_pubsub(
+        store: Arc<dyn RedisStore>,
+        registry: Arc<WatchRegistry>,
+        pubsub: Arc<PubSubRegistry>,
+    ) -> Self {
+        Self {
+            id: NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed),
+            current_db: 0,
+            queue: Vec::new(),
+            in_multi: false,
+            dirty_exec: false,
+            in_script: false,
+            should_close: false,
+            store,
+            registry,
+            pubsub,
         }
     }
 
@@ -138,6 +166,18 @@ impl Session {
         !self.in_multi && !self.in_script
     }
 
+    /// Requests the connection to be closed after the current reply batch is
+    /// flushed (used by `QUIT`).
+    pub fn request_close(&mut self) {
+        self.should_close = true;
+    }
+
+    /// Reports whether the listener should close the connection (set by
+    /// `QUIT`).
+    pub fn should_close(&self) -> bool {
+        self.should_close
+    }
+
     /// The shared key-value store for this connection.
     pub fn store(&self) -> Arc<dyn RedisStore> {
         self.store.clone()
@@ -146,6 +186,11 @@ impl Session {
     /// The process-wide watch registry.
     pub fn registry(&self) -> Arc<WatchRegistry> {
         self.registry.clone()
+    }
+
+    /// The process-wide pub/sub registry.
+    pub fn pubsub(&self) -> Arc<PubSubRegistry> {
+        self.pubsub.clone()
     }
 
     /// The raw prefix for public keys stored in the current Redis DB.

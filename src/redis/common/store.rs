@@ -20,6 +20,9 @@ pub trait RedisStore: Send + Sync + 'static {
     /// Closes the store, flushing all data to durable storage.
     async fn close(&self) -> Result<(), KvError>;
 
+    /// Forcibly flushes buffered writes to durable storage (SAVE/BGSAVE).
+    async fn sync(&self) -> Result<(), KvError>;
+
     /// Destroys the entire store.
     async fn destroy(&self) -> Result<(), KvError>;
 
@@ -35,6 +38,10 @@ impl<S: KeyValueStore> RedisStore for S {
 
     async fn close(&self) -> Result<(), KvError> {
         KeyValueStore::close(self).await
+    }
+
+    async fn sync(&self) -> Result<(), KvError> {
+        KeyValueStore::sync(self).await
     }
 
     async fn destroy(&self) -> Result<(), KvError> {

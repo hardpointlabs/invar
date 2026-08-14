@@ -4,9 +4,13 @@
 
 use bytes::Bytes;
 
+use crate::bitmap;
 use crate::bloom;
 use crate::common::op::WireOp;
 use crate::common::session::Session;
+use crate::conn;
+use crate::hash;
+use crate::hll;
 use crate::json;
 use crate::keys;
 use crate::list;
@@ -49,7 +53,16 @@ pub async fn dispatch_command(session: &mut Session, args: &[Bytes]) -> Vec<Resp
                 [db] => match parse_i64(db) {
                     Some(db) if db >= 0 => {
                         session.switch_db(db as i32);
-                        replies.push(ok());
+                        if session.in_multi() {
+                            // Deferred: reply `+OK` at EXEC, matching the
+                            // transactional semantics where each queued
+                            // command yields one array element.
+                            if let Some(queued) = session.enqueue_op(conn::ok_op()) {
+                                replies.push(queued);
+                            }
+                        } else {
+                            replies.push(ok());
+                        }
                     }
                     _ => error(session, &mut replies, "ERR invalid DB index"),
                 },
@@ -82,6 +95,300 @@ pub async fn dispatch_command(session: &mut Session, args: &[Bytes]) -> Vec<Resp
             Ok(()) => replies.push(ok()),
             Err(_) => error(session, &mut replies, "DISCARD without MULTI"),
         },
+        b"client" => {
+            if let Some(queued) = session.enqueue_op(conn::client(session, args)) {
+                replies.push(queued);
+            }
+        }
+        b"sync" | b"psync" => {
+            if let Some(queued) = session.enqueue_op(conn::sync()) {
+                replies.push(queued);
+            }
+        }
+        b"wait" => {
+            if let Some(queued) = session.enqueue_op(conn::wait()) {
+                replies.push(queued);
+            }
+        }
+        b"lolwut" => {
+            if let Some(queued) = session.enqueue_op(conn::lolwut(conn::VERSION, conn::COMMIT)) {
+                replies.push(queued);
+            }
+        }
+        b"time" => {
+            if let Some(queued) = session.enqueue_op(conn::time()) {
+                replies.push(queued);
+            }
+        }
+        b"module" => {
+            if let Some(queued) = session.enqueue_op(conn::module(args)) {
+                replies.push(queued);
+            }
+        }
+        b"bgsave" => {
+            if let Some(queued) = session.enqueue_op(conn::bgsave(session)) {
+                replies.push(queued);
+            }
+        }
+        b"save" => {
+            if session.in_multi() {
+                // Written via the tracked connection in Go, so it dirties the
+                // transaction and aborts EXEC.
+                error(session, &mut replies, "Command not allowed inside a transaction");
+            } else {
+                match session.store().sync().await {
+                    Ok(()) => replies.push(ok()),
+                    Err(e) => replies.push(RespValue::Error(format!("ERR {e}").into())),
+                }
+            }
+            return replies;
+        }
+        b"dbsize" => {
+            if let Some(queued) = session.enqueue_op(conn::dbsize(session)) {
+                replies.push(queued);
+            }
+        }
+        b"quit" => {
+            replies.push(ok());
+            session.request_close();
+            return replies;
+        }
+        b"flushall" => {
+            if session.in_multi() {
+                error(
+                    session,
+                    &mut replies,
+                    "This server does not support FLUSHALL execution inside MULTI",
+                );
+            } else {
+                match session.store().destroy().await {
+                    Ok(()) => replies.push(ok()),
+                    Err(e) => replies.push(RespValue::Error(format!("ERR {e}").into())),
+                }
+            }
+            return replies;
+        }
+        b"flushdb" => {
+            if session.in_multi() {
+                error(
+                    session,
+                    &mut replies,
+                    "This server does not support FLUSHDB execution inside MULTI",
+                );
+            } else {
+                match session.store().drop_prefix(&session.prefix()).await {
+                    Ok(()) => replies.push(ok()),
+                    Err(e) => replies.push(RespValue::Error(format!("ERR {e}").into())),
+                }
+            }
+            return replies;
+        }
+        b"setbit" => {
+            if args.len() != 4 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'setbit' command",
+                );
+                return replies;
+            }
+            let Some(offset) = parse_i64(&args[2]) else {
+                error(session, &mut replies, "ERR value is not an integer or out of range");
+                return replies;
+            };
+            if offset < 0 {
+                error(session, &mut replies, "ERR bit offset is not an integer or out of range");
+                return replies;
+            }
+            let Some(value) = parse_i64(&args[3]) else {
+                error(session, &mut replies, "ERR value is not an integer or out of range");
+                return replies;
+            };
+            if value != 0 && value != 1 {
+                error(session, &mut replies, "ERR bit is not an integer or out of range");
+                return replies;
+            }
+            if let Some(queued) = session.enqueue_op(bitmap::set_bit(session, &args[1], offset, value))
+            {
+                replies.push(queued);
+            }
+        }
+        b"getbit" => {
+            if args.len() != 3 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'getbit' command",
+                );
+                return replies;
+            }
+            let Some(offset) = parse_i64(&args[2]) else {
+                error(session, &mut replies, "ERR value is not an integer or out of range");
+                return replies;
+            };
+            if offset < 0 {
+                error(session, &mut replies, "ERR bit offset is not an integer or out of range");
+                return replies;
+            }
+            if let Some(queued) = session.enqueue_op(bitmap::get_bit(session, &args[1], offset)) {
+                replies.push(queued);
+            }
+        }
+        b"bitcount" => {
+            if args.len() < 2 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'bitcount' command",
+                );
+                return replies;
+            }
+            let mut start_given = false;
+            let mut end_given = false;
+            let mut start_val = 0i64;
+            let mut end_val = 0i64;
+            let mut use_bit = false;
+            let mut i = 2usize;
+            if i < args.len() {
+                let Some(v) = parse_i64(&args[i]) else {
+                    error(session, &mut replies, "ERR value is not an integer or out of range");
+                    return replies;
+                };
+                start_val = v;
+                start_given = true;
+                i += 1;
+            }
+            if i < args.len() {
+                let Some(v) = parse_i64(&args[i]) else {
+                    error(session, &mut replies, "ERR value is not an integer or out of range");
+                    return replies;
+                };
+                end_val = v;
+                end_given = true;
+                i += 1;
+            }
+            if i < args.len() {
+                let unit = args[i].to_ascii_lowercase();
+                if unit == *b"bit" {
+                    use_bit = true;
+                } else if unit != *b"byte" {
+                    error(session, &mut replies, "ERR syntax error");
+                    return replies;
+                }
+                i += 1;
+            }
+            if i < args.len() {
+                error(session, &mut replies, "ERR syntax error");
+                return replies;
+            }
+            if start_given != end_given {
+                error(session, &mut replies, "ERR syntax error");
+                return replies;
+            }
+            if let Some(queued) = session.enqueue_op(bitmap::bit_count(
+                session,
+                &args[1],
+                start_given,
+                end_given,
+                start_val,
+                end_val,
+                use_bit,
+            )) {
+                replies.push(queued);
+            }
+        }
+        b"bitpos" => {
+            if args.len() < 3 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'bitpos' command",
+                );
+                return replies;
+            }
+            let Some(bit) = parse_i64(&args[2]) else {
+                error(session, &mut replies, "ERR value is not an integer or out of range");
+                return replies;
+            };
+            if bit != 0 && bit != 1 {
+                error(session, &mut replies, "ERR bit is not an integer or out of range");
+                return replies;
+            }
+            let mut start_given = false;
+            let mut start_val = 0i64;
+            let mut end_val = 0i64;
+            let mut use_bit = false;
+            let mut i = 3usize;
+            if i < args.len() {
+                let Some(v) = parse_i64(&args[i]) else {
+                    error(session, &mut replies, "ERR value is not an integer or out of range");
+                    return replies;
+                };
+                start_val = v;
+                start_given = true;
+                i += 1;
+            }
+            if i < args.len() {
+                let Some(v) = parse_i64(&args[i]) else {
+                    error(session, &mut replies, "ERR value is not an integer or out of range");
+                    return replies;
+                };
+                end_val = v;
+                i += 1;
+            }
+            if i < args.len() {
+                let unit = args[i].to_ascii_lowercase();
+                if unit == *b"bit" {
+                    use_bit = true;
+                } else if unit != *b"byte" {
+                    error(session, &mut replies, "ERR syntax error");
+                    return replies;
+                }
+                i += 1;
+            }
+            if i < args.len() {
+                error(session, &mut replies, "ERR syntax error");
+                return replies;
+            }
+            if let Some(queued) = session.enqueue_op(bitmap::bit_pos(
+                session,
+                &args[1],
+                bit,
+                start_given,
+                start_val,
+                end_val,
+                use_bit,
+            )) {
+                replies.push(queued);
+            }
+        }
+        b"bitop" => {
+            if args.len() < 4 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'bitop' command",
+                );
+                return replies;
+            }
+            let Some(op) = bitmap::parse_bit_op(&args[1]) else {
+                error(session, &mut replies, "ERR syntax error");
+                return replies;
+            };
+            if op == bitmap::BitOpType::Not && args.len() != 4 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'bitop' command",
+                );
+                return replies;
+            }
+            let src_keys: Vec<&[u8]> = args[3..].iter().map(|b| b.as_ref()).collect();
+            if let Some(queued) = session.enqueue_op(bitmap::bit_op(session, &args[2], op, &src_keys))
+            {
+                replies.push(queued);
+            }
+        }
         b"set" => {
             let Some((key, value)) = parse_pair(&args[1..]) else {
                 error(
@@ -1051,6 +1358,47 @@ pub async fn dispatch_command(session: &mut Session, args: &[Bytes]) -> Vec<Resp
                 }
             }
             if let Some(queued) = session.enqueue_op(json::arr_insert(session, &args[1], &args[2], index, values)) {
+                replies.push(queued);
+            }
+        }
+        b"pfadd" => {
+            if args.len() < 3 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'pfadd' command",
+                );
+                return replies;
+            }
+            if let Some(queued) = session.enqueue_op(hll::pfadd(session, &args[1], &args[2..])) {
+                replies.push(queued);
+            }
+        }
+        b"pfcount" => {
+            if args.len() < 2 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'pfcount' command",
+                );
+                return replies;
+            }
+            if let Some(queued) = session.enqueue_op(hll::pfcount(session, &args[1..])) {
+                replies.push(queued);
+            }
+        }
+        b"pfmerge" => {
+            if args.len() < 2 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'pfmerge' command",
+                );
+                return replies;
+            }
+            if let Some(queued) =
+                session.enqueue_op(hll::pfmerge(session, &args[1], &args[2..]))
+            {
                 replies.push(queued);
             }
         }
@@ -2534,6 +2882,416 @@ pub async fn dispatch_command(session: &mut Session, args: &[Bytes]) -> Vec<Resp
                 replies.push(queued);
             }
         }
+        b"hset" => {
+            // HSET key field value [field value ...]
+            if args.len() < 4 || (args.len() - 2) % 2 != 0 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'hset' command",
+                );
+                return replies;
+            }
+            if let Some(queued) = session.enqueue_op(hash::hset(session, &args[1], &args[2..])) {
+                replies.push(queued);
+            }
+        }
+        b"hsetnx" => {
+            if args.len() != 4 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'hsetnx' command",
+                );
+                return replies;
+            }
+            if let Some(queued) =
+                session.enqueue_op(hash::hsetnx(session, &args[1], &args[2], &args[3]))
+            {
+                replies.push(queued);
+            }
+        }
+        b"hget" => {
+            if args.len() != 3 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'hget' command",
+                );
+                return replies;
+            }
+            if let Some(queued) = session.enqueue_op(hash::hget(session, &args[1], &args[2])) {
+                replies.push(queued);
+            }
+        }
+        b"hmget" => {
+            if args.len() < 3 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'hmget' command",
+                );
+                return replies;
+            }
+            if let Some(queued) =
+                session.enqueue_op(hash::hmget(session, &args[1], &args[2..]))
+            {
+                replies.push(queued);
+            }
+        }
+        b"hdel" => {
+            if args.len() < 3 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'hdel' command",
+                );
+                return replies;
+            }
+            if let Some(queued) = session.enqueue_op(hash::hdel(session, &args[1], &args[2..])) {
+                replies.push(queued);
+            }
+        }
+        b"hexists" => {
+            if args.len() != 3 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'hexists' command",
+                );
+                return replies;
+            }
+            if let Some(queued) =
+                session.enqueue_op(hash::hexists(session, &args[1], &args[2]))
+            {
+                replies.push(queued);
+            }
+        }
+        b"hlen" => {
+            if args.len() != 2 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'hlen' command",
+                );
+                return replies;
+            }
+            if let Some(queued) = session.enqueue_op(hash::hlen(session, &args[1])) {
+                replies.push(queued);
+            }
+        }
+        b"hkeys" => {
+            if args.len() != 2 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'hkeys' command",
+                );
+                return replies;
+            }
+            if let Some(queued) = session.enqueue_op(hash::hkeys(session, &args[1])) {
+                replies.push(queued);
+            }
+        }
+        b"hvals" => {
+            if args.len() != 2 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'hvals' command",
+                );
+                return replies;
+            }
+            if let Some(queued) = session.enqueue_op(hash::hvals(session, &args[1])) {
+                replies.push(queued);
+            }
+        }
+        b"hgetall" => {
+            if args.len() != 2 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'hgetall' command",
+                );
+                return replies;
+            }
+            if let Some(queued) = session.enqueue_op(hash::hgetall(session, &args[1])) {
+                replies.push(queued);
+            }
+        }
+        b"hmset" => {
+            // HMSET key field value [field value ...]
+            if args.len() < 4 || (args.len() - 2) % 2 != 0 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'hmset' command",
+                );
+                return replies;
+            }
+            if let Some(queued) = session.enqueue_op(hash::hmset(session, &args[1], &args[2..])) {
+                replies.push(queued);
+            }
+        }
+        b"hincrby" => {
+            if args.len() != 4 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'hincrby' command",
+                );
+                return replies;
+            }
+            let Some(amount) = parse_i64(&args[3]) else {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR value is not an integer or out of range",
+                );
+                return replies;
+            };
+            if let Some(queued) =
+                session.enqueue_op(hash::hincrby(session, &args[1], &args[2], amount))
+            {
+                replies.push(queued);
+            }
+        }
+        b"hincrbyfloat" => {
+            if args.len() != 4 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'hincrbyfloat' command",
+                );
+                return replies;
+            }
+            let Some(amount) = parse_f64(&args[3]) else {
+                error(session, &mut replies, "ERR value is not a float");
+                return replies;
+            };
+            if let Some(queued) =
+                session.enqueue_op(hash::hincrbyfloat(session, &args[1], &args[2], amount))
+            {
+                replies.push(queued);
+            }
+        }
+        b"hrandfield" => {
+            if args.len() < 2 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'hrandfield' command",
+                );
+                return replies;
+            }
+            let mut count = 1i64;
+            let mut with_values = false;
+            if args.len() >= 3 {
+                let Some(parsed) = parse_i64(&args[2]) else {
+                    error(
+                        session,
+                        &mut replies,
+                        "ERR value is not an integer or out of range",
+                    );
+                    return replies;
+                };
+                count = parsed;
+            }
+            if args.len() >= 4 {
+                if args[3].eq_ignore_ascii_case(b"withvalues") {
+                    with_values = true;
+                } else {
+                    error(session, &mut replies, "ERR syntax error");
+                    return replies;
+                }
+            }
+            if let Some(queued) =
+                session.enqueue_op(hash::hrandfield(session, &args[1], count, with_values))
+            {
+                replies.push(queued);
+            }
+        }
+        b"hstrlen" => {
+            if args.len() != 3 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'hstrlen' command",
+                );
+                return replies;
+            }
+            if let Some(queued) =
+                session.enqueue_op(hash::hstrlen(session, &args[1], &args[2]))
+            {
+                replies.push(queued);
+            }
+        }
+        b"hscan" => {
+            if args.len() < 3 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'hscan' command",
+                );
+                return replies;
+            }
+            // HSCAN key cursor [MATCH pattern] [COUNT count]
+            // Cursor argument is accepted but ignored (always full scan, cursor "0").
+            let mut pattern: Vec<u8> = Vec::new();
+            let mut count = 0i64;
+            let mut i = 3usize;
+            while i < args.len() {
+                if args[i].eq_ignore_ascii_case(b"match") && i + 1 < args.len() {
+                    i += 1;
+                    pattern = args[i].to_vec();
+                } else if args[i].eq_ignore_ascii_case(b"count") && i + 1 < args.len() {
+                    i += 1;
+                    match parse_i64(&args[i]) {
+                        Some(v) => count = v,
+                        None => {
+                            error(
+                                session,
+                                &mut replies,
+                                "ERR value is not an integer or out of range",
+                            );
+                            return replies;
+                        }
+                    }
+                } else {
+                    error(session, &mut replies, "ERR syntax error");
+                    return replies;
+                }
+                i += 1;
+            }
+            if let Some(queued) =
+                session.enqueue_op(hash::hscan(session, &args[1], pattern, count))
+            {
+                replies.push(queued);
+            }
+        }
+        // --- Pub/Sub commands ---
+        //
+        // SUBSCRIBE / PSUBSCRIBE / SSUBSCRIBE / UNSUBSCRIBE / PUNSUBSCRIBE /
+        // SUNSUBSCRIBE are handled directly in the listener's connection loop
+        // (they switch the connection into subscribe mode and need access to
+        // the per-connection StreamMap state).
+        //
+        // Inside a MULTI block they are not allowed at all — queuing them must
+        // mark the transaction dirty and immediately return an error, so EXEC
+        // aborts rather than executing a partial batch.
+        b"subscribe" | b"psubscribe" | b"ssubscribe"
+        | b"unsubscribe" | b"punsubscribe" | b"sunsubscribe" => {
+            // Reject inside MULTI: dirty the transaction and return an error.
+            // Outside MULTI these commands are intercepted before dispatch_command
+            // is called (in listener.rs), so if we reach here outside a MULTI
+            // context that is also an error (belt-and-suspenders).
+            error(
+                session,
+                &mut replies,
+                "ERR Command not allowed inside a transaction",
+            );
+            return replies;
+        }
+        b"publish" | b"spublish" => {
+            // SPUBLISH is a thin alias for PUBLISH in single-node mode.
+            // TODO: distinguish SPUBLISH properly if horizontal scaling is added.
+            if args.len() != 3 {
+                error(
+                    session,
+                    &mut replies,
+                    format!(
+                        "ERR wrong number of arguments for '{}' command",
+                        String::from_utf8_lossy(&name)
+                    ),
+                );
+                return replies;
+            }
+            // PUBLISH / SPUBLISH are allowed inside MULTI (they queue and
+            // execute normally — no special-casing).
+            let channel = args[1].clone();
+            let payload = args[2].clone();
+            let pubsub_reg = session.pubsub();
+            // Execute immediately (bypass QueuedOp machinery for PUBLISH
+            // since it is pure in-memory state with no DB side effects).
+            if session.in_multi() {
+                // Inside MULTI: return +QUEUED and defer actual publish to EXEC.
+                // We implement this as a wire-only op that executes the publish
+                // at commit time.
+                let reply = session.enqueue_op(crate::pubsub_cmds::publish_op(
+                    pubsub_reg, channel, payload,
+                ));
+                if let Some(q) = reply {
+                    replies.push(q);
+                }
+            } else {
+                let count = pubsub_reg.publish(&channel, payload);
+                replies.push(RespValue::Integer(count));
+                return replies;
+            }
+        }
+        b"pubsub" => {
+            if args.len() < 2 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'pubsub' command",
+                );
+                return replies;
+            }
+            let sub_cmd: Vec<u8> = args[1].iter().map(u8::to_ascii_lowercase).collect();
+            match sub_cmd.as_slice() {
+                b"channels" => {
+                    let pat = args.get(2).map(|b| b.as_ref());
+                    let pubsub_reg = session.pubsub();
+                    let mut channels = pubsub_reg.active_channels(pat);
+                    channels.sort();
+                    replies.push(RespValue::Array(Some(
+                        channels
+                            .into_iter()
+                            .map(|c| RespValue::BulkString(Some(c)))
+                            .collect(),
+                    )));
+                    return replies;
+                }
+                b"numsub" => {
+                    let pubsub_reg = session.pubsub();
+                    let channel_args: Vec<Bytes> = args[2..].to_vec();
+                    let counts = pubsub_reg.numsub(&channel_args);
+                    let mut flat = Vec::with_capacity(counts.len() * 2);
+                    for (ch, count) in counts {
+                        flat.push(RespValue::BulkString(Some(ch)));
+                        flat.push(RespValue::Integer(count));
+                    }
+                    replies.push(RespValue::Array(Some(flat)));
+                    return replies;
+                }
+                b"numpat" => {
+                    let pubsub_reg = session.pubsub();
+                    replies.push(RespValue::Integer(pubsub_reg.numpat()));
+                    return replies;
+                }
+                b"help" => {
+                    replies.push(RespValue::Array(Some(vec![
+                        RespValue::BulkString(Some(Bytes::from_static(b"PUBSUB <subcommand> [<arg> [value] [opt] ...]. subcommands are:"))),
+                        RespValue::BulkString(Some(Bytes::from_static(b"CHANNELS [<pattern>] -- Return the currently active channels matching a pattern (default: all)."))),
+                        RespValue::BulkString(Some(Bytes::from_static(b"NUMSUB [<channel> ...] -- Return listen count for channels."))),
+                        RespValue::BulkString(Some(Bytes::from_static(b"NUMPAT -- Return the number of active patterns."))),
+                    ])));
+                    return replies;
+                }
+                _ => {
+                    error(
+                        session,
+                        &mut replies,
+                        format!(
+                            "ERR unknown subcommand '{}'. Try PUBSUB HELP.",
+                            String::from_utf8_lossy(&sub_cmd)
+                        ),
+                    );
+                    return replies;
+                }
+            }
+        }
         _ => {
             error(
                 session,
@@ -3588,6 +4346,476 @@ mod tests {
         assert_eq!(
             dispatch(&mut session, &["exec"]).await,
             vec![RespValue::Array(Some(vec![ok(), bulk("1")]))]
+        );
+    }
+
+    fn int(n: i64) -> RespValue {
+        RespValue::Integer(n)
+    }
+
+    #[tokio::test]
+    async fn pfadd_pfcount_pfmerge_through_dispatch() {
+        let mut session = test_session();
+        assert_eq!(
+            dispatch(&mut session, &["pfadd", "hll_a", "hello", "world"]).await,
+            vec![int(1)]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["pfadd", "hll_a", "hello"]).await,
+            vec![int(0)]
+        );
+        // Single-key count of a populated sketch.
+        assert_eq!(
+            dispatch(&mut session, &["pfcount", "hll_a"]).await,
+            vec![int(2)]
+        );
+        // Empty/nonexistent sketches count 0.
+        assert_eq!(
+            dispatch(&mut session, &["pfcount", "hll_empty"]).await,
+            vec![int(0)]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["pfcount", "hll_nonexist"]).await,
+            vec![int(0)]
+        );
+        // Merge into a fresh key, then cross-check counts.
+        assert_eq!(
+            dispatch(&mut session, &["pfadd", "hll_b", "hello"]).await,
+            vec![int(1)]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["pfmerge", "hll_m", "hll_a", "hll_b"]).await,
+            vec![ok()]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["pfcount", "hll_m"]).await,
+            vec![int(2)]
+        );
+        // A multi-key count must be >= each single-key count.
+        let multi = match &dispatch(&mut session, &["pfcount", "hll_a", "hll_b"]).await[0] {
+            RespValue::Integer(n) => *n,
+            other => panic!("expected integer, got {other:?}"),
+        };
+        assert!(multi >= 2);
+    }
+
+    #[tokio::test]
+    async fn pf_commands_wrong_arity() {
+        let mut session = test_session();
+        for cmd in [&["pfadd", "k"][..], &["pfcount"][..]] {
+            assert_eq!(
+                dispatch(&mut session, cmd).await,
+                vec![RespValue::Error(Bytes::from(format!(
+                    "ERR wrong number of arguments for '{}' command",
+                    cmd[0]
+                )))]
+            );
+        }
+        // PFMERGE with only a dest key is legal: it unions zero sources into
+        // an empty sketch (Go's checkMinArgs(..., 2)).
+        assert_eq!(
+            dispatch(&mut session, &["pfmerge", "empty_dest"]).await,
+            vec![ok()]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["pfcount", "empty_dest"]).await,
+            vec![int(0)]
+        );
+    }
+
+    #[tokio::test]
+    async fn pf_commands_work_inside_multi() {
+        let mut session = test_session();
+        dispatch(&mut session, &["multi"]).await;
+        assert_eq!(
+            dispatch(&mut session, &["pfadd", "hll", "a"]).await,
+            vec![RespValue::SimpleString(Bytes::from_static(b"QUEUED"))]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["pfcount", "hll"]).await,
+            vec![RespValue::SimpleString(Bytes::from_static(b"QUEUED"))]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["exec"]).await,
+            vec![RespValue::Array(Some(vec![int(1), int(1)]))]
+        );
+    }
+
+    #[tokio::test]
+    async fn conn_commands_through_dispatch() {
+        let mut session = test_session();
+        // CLIENT ID echoes the session id.
+        assert_eq!(
+            dispatch(&mut session, &["client", "id"]).await,
+            vec![int(session.id() as i64)]
+        );
+        // CLIENT INFO is a bulk with id and db.
+        match &dispatch(&mut session, &["client", "info"]).await[0] {
+            RespValue::BulkString(Some(info)) => {
+                let info = String::from_utf8_lossy(info).to_string();
+                assert_eq!(info, format!("id={} db=0\r\n", session.id()));
+            }
+            other => panic!("expected bulk string, got {other:?}"),
+        }
+        // Unknown CLIENT subcommand (no ERR prefix, matching Go).
+        assert_eq!(
+            dispatch(&mut session, &["client", "setname"]).await,
+            vec![RespValue::Error(Bytes::from_static(
+                b"subcommand not supported"
+            ))]
+        );
+        // SYNC / PSYNC / WAIT reply +OK.
+        assert_eq!(dispatch(&mut session, &["sync"]).await, vec![ok()]);
+        assert_eq!(dispatch(&mut session, &["psync"]).await, vec![ok()]);
+        assert_eq!(dispatch(&mut session, &["wait"]).await, vec![ok()]);
+        // LOLWUT is the Invar banner.
+        assert!(matches!(
+            &dispatch(&mut session, &["lolwut"]).await[0],
+            RespValue::BulkString(Some(b)) if String::from_utf8_lossy(b).contains("Invar version:")
+        ));
+        // TIME is [sec, micro].
+        match &dispatch(&mut session, &["time"]).await[0] {
+            RespValue::Array(Some(items)) => {
+                assert_eq!(items.len(), 2);
+                for item in items {
+                    assert!(matches!(item, RespValue::BulkString(Some(_))));
+                }
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+        // MODULE LIST is an empty array.
+        assert_eq!(
+            dispatch(&mut session, &["module", "list"]).await,
+            vec![RespValue::Array(Some(Vec::new()))]
+        );
+        // SAVE / BGSAVE reply +OK.
+        assert_eq!(dispatch(&mut session, &["save"]).await, vec![ok()]);
+        assert_eq!(dispatch(&mut session, &["bgsave"]).await, vec![ok()]);
+        // DBSIZE counts the current DB.
+        assert_eq!(dispatch(&mut session, &["dbsize"]).await, vec![int(0)]);
+        dispatch(&mut session, &["set", "foo", "bar"]).await;
+        dispatch(&mut session, &["set", "baz", "qux"]).await;
+        assert_eq!(dispatch(&mut session, &["dbsize"]).await, vec![int(2)]);
+        // SELECT then DBSIZE is scoped to the new DB.
+        assert_eq!(dispatch(&mut session, &["select", "3"]).await, vec![ok()]);
+        assert_eq!(dispatch(&mut session, &["dbsize"]).await, vec![int(0)]);
+        // Select back to DB 0: still two keys.
+        assert_eq!(dispatch(&mut session, &["select", "0"]).await, vec![ok()]);
+        assert_eq!(dispatch(&mut session, &["dbsize"]).await, vec![int(2)]);
+    }
+
+    #[tokio::test]
+    async fn conn_commands_wrong_arity_and_bad_subcommand() {
+        let mut session = test_session();
+        assert_eq!(
+            dispatch(&mut session, &["client"]).await,
+            vec![RespValue::Error(Bytes::from_static(
+                b"ERR wrong number of arguments for 'client' command"
+            ))]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["module"]).await,
+            vec![RespValue::Error(Bytes::from_static(
+                b"ERR wrong number of arguments for 'module' command"
+            ))]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["module", "load", "x.so"]).await,
+            vec![RespValue::Error(Bytes::from_static(
+                b"ERR unknown subcommand"
+            ))]
+        );
+    }
+
+    #[tokio::test]
+    async fn save_is_rejected_inside_multi() {
+        let mut session = test_session();
+        dispatch(&mut session, &["multi"]).await;
+        assert_eq!(
+            dispatch(&mut session, &["save"]).await,
+            vec![RespValue::Error(Bytes::from_static(
+                b"Command not allowed inside a transaction"
+            ))]
+        );
+        // The rejection dirties the transaction (Go writes the error through a
+        // tracked connection), so EXEC aborts.
+        dispatch(&mut session, &["set", "foo", "bar"]).await;
+        assert_eq!(
+            dispatch(&mut session, &["exec"]).await,
+            vec![RespValue::Error(Bytes::from_static(
+                b"EXECABORT Transaction discarded because of previous errors."
+            ))]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["get", "foo"]).await,
+            vec![RespValue::BulkString(None)]
+        );
+    }
+
+    #[tokio::test]
+    async fn bgsave_works_inside_multi() {
+        let mut session = test_session();
+        dispatch(&mut session, &["multi"]).await;
+        assert_eq!(
+            dispatch(&mut session, &["bgsave"]).await,
+            vec![RespValue::SimpleString(Bytes::from_static(b"QUEUED"))]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["exec"]).await,
+            vec![RespValue::Array(Some(vec![ok()]))]
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    #[tokio::test]
+    async fn quit_replies_ok_and_requests_close() {
+        let mut session = test_session();
+        assert_eq!(
+            dispatch(&mut session, &["quit"]).await,
+            vec![ok()]
+        );
+        assert!(session.should_close());
+    }
+
+    #[tokio::test]
+    async fn flushall_and_flushdb_through_dispatch() {
+        let mut session = test_session();
+        dispatch(&mut session, &["set", "keep", "1"]).await;
+        assert_eq!(
+            dispatch(&mut session, &["flushdb"]).await,
+            vec![ok()]
+        );
+        assert_eq!(dispatch(&mut session, &["dbsize"]).await, vec![int(0)]);
+        dispatch(&mut session, &["set", "other", "2"]).await;
+        assert_eq!(
+            dispatch(&mut session, &["flushall"]).await,
+            vec![ok()]
+        );
+        assert_eq!(dispatch(&mut session, &["dbsize"]).await, vec![int(0)]);
+    }
+
+    #[tokio::test]
+    async fn flush_is_rejected_inside_multi_and_dirties() {
+        let mut session = test_session();
+        dispatch(&mut session, &["multi"]).await;
+        for cmd in [&["flushall"][..], &["flushdb"][..]] {
+            assert_eq!(
+                dispatch(&mut session, cmd).await,
+                vec![RespValue::Error(Bytes::from(format!(
+                    "This server does not support {} execution inside MULTI",
+                    cmd[0].to_ascii_uppercase()
+                )))]
+            );
+        }
+        // The rejection dirties the transaction, so EXEC aborts.
+        assert_eq!(
+            dispatch(&mut session, &["set", "foo", "bar"]).await,
+            vec![RespValue::SimpleString(Bytes::from_static(b"QUEUED"))]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["exec"]).await,
+            vec![RespValue::Error(Bytes::from_static(
+                b"EXECABORT Transaction discarded because of previous errors."
+            ))]
+        );
+    }
+
+    #[tokio::test]
+    async fn select_inside_multi_takes_effect_atomically() {
+        let mut session = test_session();
+        dispatch(&mut session, &["multi"]).await;
+        // SELECT is queued (QUEUED), not applied with an immediate reply.
+        assert_eq!(
+            dispatch(&mut session, &["select", "1"]).await,
+            vec![RespValue::SimpleString(Bytes::from_static(b"QUEUED"))]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["set", "multi_select_key", "v"]).await,
+            vec![RespValue::SimpleString(Bytes::from_static(b"QUEUED"))]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["exec"]).await,
+            vec![RespValue::Array(Some(vec![ok(), ok()]))]
+        );
+        // The SELECT-scoped write landed in db1, not db0.
+        assert_eq!(
+            dispatch(&mut session, &["select", "0"]).await,
+            vec![ok()]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["get", "multi_select_key"]).await,
+            vec![RespValue::BulkString(None)]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["select", "1"]).await,
+            vec![ok()]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["get", "multi_select_key"]).await,
+            vec![bulk("v")]
+        );
+    }
+
+    #[tokio::test]
+    async fn bitmap_commands_through_dispatch() {
+        let mut session = test_session();
+        assert_eq!(
+            dispatch(&mut session, &["setbit", "bm", "0", "1"]).await,
+            vec![int(0)]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["getbit", "bm", "0"]).await,
+            vec![int(1)]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["setbit", "bm", "0", "1"]).await,
+            vec![int(1)]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["getbit", "bm", "7"]).await,
+            vec![int(0)]
+        );
+        // Extends past first byte.
+        assert_eq!(
+            dispatch(&mut session, &["setbit", "bm", "8", "1"]).await,
+            vec![int(0)]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["getbit", "bm", "8"]).await,
+            vec![int(1)]
+        );
+        // BITCOUNT: byte 0 has bits 0 set only → 1; with byte range [0,0] → 1.
+        assert_eq!(
+            dispatch(&mut session, &["bitcount", "bm"]).await,
+            vec![int(2)]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["bitcount", "bm", "0", "0"]).await,
+            vec![int(1)]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["bitcount", "bm", "0", "0", "bit"]).await,
+            vec![int(1)]
+        );
+        // BITPOS: first 1 is bit 0.
+        assert_eq!(
+            dispatch(&mut session, &["bitpos", "bm", "1"]).await,
+            vec![int(0)]
+        );
+        // BITPOS for 0 on a key with a zero byte: first zero is bit 1 within byte 0.
+        assert_eq!(
+            dispatch(&mut session, &["bitpos", "bm", "0"]).await,
+            vec![int(1)]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["bitpos", "bm_nonexist", "0"]).await,
+            vec![int(0)]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["bitpos", "bm_nonexist", "1"]).await,
+            vec![int(-1)]
+        );
+        // BITOP AND/OR/XOR returns the length of the longest source.
+        dispatch(&mut session, &["setbit", "src_a", "0", "1"]).await;
+        dispatch(&mut session, &["setbit", "src_b", "1", "1"]).await;
+        assert_eq!(
+            dispatch(&mut session, &["bitop", "AND", "dest", "src_a", "src_b"]).await,
+            vec![int(1)]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["getbit", "dest", "0"]).await,
+            vec![int(0)]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["bitop", "OR", "dest", "src_a", "src_b"]).await,
+            vec![int(1)]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["getbit", "dest", "0"]).await,
+            vec![int(1)]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["getbit", "dest", "1"]).await,
+            vec![int(1)]
+        );
+    }
+
+    #[tokio::test]
+    async fn bitmap_commands_error_handling() {
+        let mut session = test_session();
+        assert_eq!(
+            dispatch(&mut session, &["setbit", "k", "0"]).await,
+            vec![RespValue::Error(Bytes::from_static(
+                b"ERR wrong number of arguments for 'setbit' command"
+            ))]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["setbit", "k", "-1", "1"]).await,
+            vec![RespValue::Error(Bytes::from_static(
+                b"ERR bit offset is not an integer or out of range"
+            ))]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["setbit", "k", "0", "2"]).await,
+            vec![RespValue::Error(Bytes::from_static(
+                b"ERR bit is not an integer or out of range"
+            ))]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["setbit", "k", "x", "1"]).await,
+            vec![RespValue::Error(Bytes::from_static(
+                b"ERR value is not an integer or out of range"
+            ))]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["getbit", "k"]).await,
+            vec![RespValue::Error(Bytes::from_static(
+                b"ERR wrong number of arguments for 'getbit' command"
+            ))]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["getbit", "k", "-5"]).await,
+            vec![RespValue::Error(Bytes::from_static(
+                b"ERR bit offset is not an integer or out of range"
+            ))]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["bitpos", "k", "2"]).await,
+            vec![RespValue::Error(Bytes::from_static(
+                b"ERR bit is not an integer or out of range"
+            ))]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["bitcount"]).await,
+            vec![RespValue::Error(Bytes::from_static(
+                b"ERR wrong number of arguments for 'bitcount' command"
+            ))]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["bitcount", "k", "0", "0", "words"]).await,
+            vec![RespValue::Error(Bytes::from_static(b"ERR syntax error"))]
+        );
+        // Start without end is a syntax error for BITCOUNT.
+        assert_eq!(
+            dispatch(&mut session, &["bitcount", "k", "0"]).await,
+            vec![RespValue::Error(Bytes::from_static(b"ERR syntax error"))]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["bitop", "BAD", "dest", "op"]).await,
+            vec![RespValue::Error(Bytes::from_static(b"ERR syntax error"))]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["bitop", "AND", "dest"]).await,
+            vec![RespValue::Error(Bytes::from_static(
+                b"ERR wrong number of arguments for 'bitop' command"
+            ))]
+        );
+        // NOT takes exactly one source key.
+        assert_eq!(
+            dispatch(&mut session, &["bitop", "NOT", "dest", "a", "b"]).await,
+            vec![RespValue::Error(Bytes::from_static(
+                b"ERR wrong number of arguments for 'bitop' command"
+            ))]
         );
     }
 }

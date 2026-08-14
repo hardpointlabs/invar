@@ -1400,8 +1400,8 @@ impl DbOp for ZAddOp {
                 ));
             }
 
-            let mut count = match read_sentinel(tx, &node.public_key).await {
-                Ok(count) => count,
+            let (mut count, is_new_key) = match read_sentinel(tx, &node.public_key).await {
+                Ok(count) => (count, false),
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
                     if xx {
                         let result: DbResult = Box::new(ZAddResult {
@@ -1410,7 +1410,7 @@ impl DbOp for ZAddOp {
                         });
                         return Ok(result);
                     }
-                    0
+                    (0, true)
                 }
                 Err(e) => return Err(e),
             };
@@ -1441,7 +1441,26 @@ impl DbOp for ZAddOp {
                     }
                     Err(e) => return Err(e.into()),
                     Ok(item) => {
-                        // Member exists.
+                        // Member key exists. If the sentinel was missing (is_new_key), this is an
+                        // orphaned private key left behind by a DEL that only removed the sentinel.
+                        // Treat it as a new member: delete the stale score index entry and re-add.
+                        if is_new_key {
+                            let val = item.value();
+                            if val.len() >= 8 {
+                                let stale_score = f64::from_bits(u64::from_be_bytes(
+                                    val[0..8].try_into().expect("slice in range"),
+                                ));
+                                let _ = tx.delete(&node.score_key(stale_score, &member));
+                            }
+                            if !xx {
+                                tx.set(Entry::new(node.score_key(score, &member), Vec::new()))?;
+                                tx.set(Entry::new(member_key, score_bytes(score)))?;
+                                count += 1;
+                                added += 1;
+                            }
+                            continue;
+                        }
+                        // Normal case: member exists in a live set.
                         if nx {
                             continue;
                         }

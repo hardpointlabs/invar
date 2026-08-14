@@ -17,7 +17,7 @@ use crate::common::session::Session;
 use crate::common::ValueType;
 use crate::resp::RespValue;
 
-/// The current unix time in whole seconds, matching Go's `time.Now().Unix()`.
+/// The current UNIX time in whole seconds, matching Go's `time.Now().Unix()`.
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
