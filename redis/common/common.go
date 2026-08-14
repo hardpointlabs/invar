@@ -46,6 +46,7 @@ const (
 // It also exposes key derivation methods for command implementations to use
 // when they need to create & read entries, without leaking internal key layout
 type Session struct {
+<<<<<<< HEAD
 	kvs         kv.KeyValueStore
 	Id          uint64      // Redis connection ID
 	currentDB   int32       // Current Redis DB this connection is operating on
@@ -54,6 +55,17 @@ type Session struct {
 	dirtyExec   bool        // set when a command failed while queuing, aborting EXEC
 	inScript    bool        // true while a Lua script is executing via redis.call
 	trackedConn redcon.Conn // per-connection wrapper used to flag dirty transactions
+=======
+	kvs        kv.KeyValueStore
+	Id         uint64     // Redis connection ID
+	currentDB  int32      // Current Redis DB this connection is operating on
+	queue      []QueuedOp // nil when not in MULTI
+	inMulti    bool
+	inScript   bool   // true while a Lua script is executing via redis.call
+	ClientName string // name set via CLIENT SETNAME / HELLO SETNAME
+	LibName    string // client library name via CLIENT SETINFO LIB-NAME
+	LibVer     string // client library version via CLIENT SETINFO LIB-VER
+>>>>>>> server-cmds
 }
 
 func NewSession(kvs kv.KeyValueStore) *Session {

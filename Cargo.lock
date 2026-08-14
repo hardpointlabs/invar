@@ -1282,6 +1282,7 @@ dependencies = [
  "dashmap",
  "futures",
  "kv",
+ "rand",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",

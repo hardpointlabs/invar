@@ -15,6 +15,7 @@ use crate::json;
 use crate::keys;
 use crate::list;
 use crate::resp::RespValue;
+use crate::server;
 use crate::set;
 use crate::strings;
 use crate::zset;
@@ -96,7 +97,19 @@ pub async fn dispatch_command(session: &mut Session, args: &[Bytes]) -> Vec<Resp
             Err(_) => error(session, &mut replies, "DISCARD without MULTI"),
         },
         b"client" => {
-            if let Some(queued) = session.enqueue_op(conn::client(session, args)) {
+            let op = server::client(session, args);
+            if let Some(queued) = session.enqueue_op(op) {
+                replies.push(queued);
+            }
+        }
+        b"info" => {
+            if let Some(queued) = session.enqueue_op(server::info()) {
+                replies.push(queued);
+            }
+        }
+        b"hello" => {
+            let op = server::hello(session, args);
+            if let Some(queued) = session.enqueue_op(op) {
                 replies.push(queued);
             }
         }
@@ -4464,19 +4477,20 @@ mod tests {
             dispatch(&mut session, &["client", "id"]).await,
             vec![int(session.id() as i64)]
         );
-        // CLIENT INFO is a bulk with id and db.
+        // CLIENT INFO is a bulk string starting with id and db.
         match &dispatch(&mut session, &["client", "info"]).await[0] {
             RespValue::BulkString(Some(info)) => {
                 let info = String::from_utf8_lossy(info).to_string();
-                assert_eq!(info, format!("id={} db=0\r\n", session.id()));
+                assert!(info.starts_with(&format!("id={} addr=", session.id())), "got {info:?}");
+                assert!(info.contains("db=0"), "got {info:?}");
             }
             other => panic!("expected bulk string, got {other:?}"),
         }
-        // Unknown CLIENT subcommand (no ERR prefix, matching Go).
+        // Unknown CLIENT subcommand.
         assert_eq!(
             dispatch(&mut session, &["client", "setname"]).await,
             vec![RespValue::Error(Bytes::from_static(
-                b"subcommand not supported"
+                b"ERR wrong number of arguments for 'client|setname' command"
             ))]
         );
         // SYNC / PSYNC / WAIT reply +OK.

@@ -18,6 +18,7 @@ pub mod listener;
 pub mod pubsub;
 pub mod pubsub_cmds;
 pub mod resp;
+pub mod server;
 pub mod set;
 pub mod strings;
 pub mod zset;

@@ -70,14 +70,19 @@ impl RedisListener {
     /// its own Tokio task.
     pub async fn serve(self) -> std::io::Result<()> {
         let listener = TcpListener::bind(self.addr).await?;
-        println!("invar: redis listener on {}", self.addr);
+        let actual = listener.local_addr()?;
+        crate::server::set_addr(actual);
+        println!("invar: redis listener on {actual}");
         loop {
             let (socket, _peer) = listener.accept().await?;
+            crate::server::conn_opened();
             let store = self.store.clone();
             let registry = self.registry.clone();
             let pubsub = self.pubsub.clone();
             tokio::spawn(async move {
-                if let Err(e) = handle_connection(socket, store, registry, pubsub).await {
+                let result = handle_connection(socket, store, registry, pubsub).await;
+                crate::server::conn_closed();
+                if let Err(e) = result {
                     eprintln!("invar: connection error: {e}");
                 }
             });
@@ -99,6 +104,9 @@ async fn handle_connection(
     pubsub: Arc<PubSubRegistry>,
 ) -> Result<(), RespError> {
     let mut session = Session::new_with_pubsub(store, registry, pubsub.clone());
+    if let Ok(peer) = socket.peer_addr() {
+        session.set_peer_addr(peer);
+    }
     let mut framed = Framed::new(socket, RespDecoder::new());
     let mut subs = ConnectionSubs::new(pubsub.clone());
 

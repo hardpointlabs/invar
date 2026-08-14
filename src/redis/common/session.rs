@@ -49,6 +49,16 @@ pub struct Session {
     /// Set by `QUIT`: the listener should close the connection after the
     /// replies are flushed.
     should_close: bool,
+    /// The client-reported connection name, set via `CLIENT SETNAME` or
+    /// `HELLO SETNAME`.
+    client_name: String,
+    /// The client library name, set via `CLIENT SETINFO LIB-NAME`.
+    lib_name: String,
+    /// The client library version, set via `CLIENT SETINFO LIB-VER`.
+    lib_ver: String,
+    /// The peer address of the socket, reported by `CLIENT INFO`/`CLIENT
+    /// LIST`. `None` when the session was built without a socket (tests).
+    peer_addr: Option<std::net::SocketAddr>,
     store: Arc<dyn RedisStore>,
     registry: Arc<WatchRegistry>,
     pubsub: Arc<PubSubRegistry>,
@@ -64,6 +74,10 @@ impl Session {
             dirty_exec: false,
             in_script: false,
             should_close: false,
+            client_name: String::new(),
+            lib_name: String::new(),
+            lib_ver: String::new(),
+            peer_addr: None,
             store,
             registry,
             pubsub: Arc::new(PubSubRegistry::new()),
@@ -85,6 +99,10 @@ impl Session {
             dirty_exec: false,
             in_script: false,
             should_close: false,
+            client_name: String::new(),
+            lib_name: String::new(),
+            lib_ver: String::new(),
+            peer_addr: None,
             store,
             registry,
             pubsub,
@@ -104,6 +122,46 @@ impl Session {
     /// Switches this connection to another Redis DB.
     pub fn switch_db(&mut self, db: i32) {
         self.current_db = db;
+    }
+
+    /// The client-reported connection name (`CLIENT SETNAME`).
+    pub fn client_name(&self) -> &str {
+        &self.client_name
+    }
+
+    /// Sets the client-reported connection name.
+    pub fn set_client_name(&mut self, name: String) {
+        self.client_name = name;
+    }
+
+    /// The client library name (`CLIENT SETINFO LIB-NAME`).
+    pub fn lib_name(&self) -> &str {
+        &self.lib_name
+    }
+
+    /// Sets the client library name.
+    pub fn set_lib_name(&mut self, name: String) {
+        self.lib_name = name;
+    }
+
+    /// The client library version (`CLIENT SETINFO LIB-VER`).
+    pub fn lib_ver(&self) -> &str {
+        &self.lib_ver
+    }
+
+    /// Sets the client library version.
+    pub fn set_lib_ver(&mut self, version: String) {
+        self.lib_ver = version;
+    }
+
+    /// The peer address of the connection socket, if known.
+    pub fn peer_addr(&self) -> Option<std::net::SocketAddr> {
+        self.peer_addr
+    }
+
+    /// Records the peer address of the connection socket.
+    pub fn set_peer_addr(&mut self, addr: std::net::SocketAddr) {
+        self.peer_addr = Some(addr);
     }
 
     /// Enters a `MULTI` block.

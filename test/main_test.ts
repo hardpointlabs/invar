@@ -40,6 +40,8 @@ function compareResult(actual: unknown, expected: unknown, type: string): boolea
       return actual === expected;
     case "bulk_string_startswith":
       return typeof actual === "string" && actual.startsWith(expected as string);
+    case "bulk_string_contains":
+      return typeof actual === "string" && actual.includes(expected as string);
     case "integer":
       return Number(actual) === Number(expected);
     case "integer_gt":
@@ -183,14 +185,7 @@ async function executeCommand(client: RedisClientType, cmd: string[]): Promise<u
           return 0;
         }
       case "client":
-        if (args[0].toLowerCase() === "id") {
-          const result = await client.sendCommand(["CLIENT", ...args]);
-          return result;
-        } else if (args[0].toLowerCase() === "info") {
-          const result = await client.sendCommand(["CLIENT", ...args]);
-          return result;
-        }
-        return null;
+        return await client.sendCommand(["CLIENT", ...args]);
       case "bgsave":
         await client.bgSave();
         return "OK";

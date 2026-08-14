@@ -27,20 +27,6 @@ use crate::resp::RespValue;
 pub const VERSION: &str = "dev";
 pub const COMMIT: &str = "unknown";
 
-/// `CLIENT [ID | INFO]` — connection introspection. Anything but `ID` or
-/// `INFO` replies `subcommand not supported`, mirroring Go.
-pub fn client(session: &Session, args: &[Bytes]) -> QueuedOp {
-    QueuedOp {
-        db_op: Box::new(NoOp),
-        wire_op: Box::new(ClientWire {
-            args: args.to_vec(),
-            id: session.id(),
-            db: session.current_db(),
-        }),
-        is_mutating: false,
-    }
-}
-
 /// `SYNC`/`PSYNC` — stubbed, since Invar runs single-writer without
 /// replication. Replies `+OK`.
 pub fn sync() -> QueuedOp {
@@ -137,35 +123,6 @@ struct OkWire;
 impl WireOp for OkWire {
     fn reply(&self, _result: Result<DbResult, DbError>) -> RespValue {
         RespValue::SimpleString(Bytes::from_static(b"OK"))
-    }
-}
-
-struct ClientWire {
-    args: Vec<Bytes>,
-    id: u64,
-    db: i32,
-}
-
-impl WireOp for ClientWire {
-    fn reply(&self, _result: Result<DbResult, DbError>) -> RespValue {
-        if self.args.len() < 2 {
-            return RespValue::Error(Bytes::from(format!(
-                "ERR wrong number of arguments for '{}' command",
-                String::from_utf8_lossy(&self.args[0])
-            )));
-        }
-        let sub: Vec<u8> = self.args[1]
-            .iter()
-            .map(u8::to_ascii_lowercase)
-            .collect();
-        match sub.as_slice() {
-            b"id" => RespValue::Integer(self.id as i64),
-            b"info" => RespValue::BulkString(Some(Bytes::from(format!(
-                "id={} db={}\r\n",
-                self.id, self.db
-            )))),
-            _ => RespValue::Error(Bytes::from_static(b"subcommand not supported")),
-        }
     }
 }
 
@@ -317,49 +274,6 @@ mod tests {
             RespValue::Error(e) => e.clone(),
             other => panic!("expected error, got {other:?}"),
         }
-    }
-
-    #[tokio::test]
-    async fn client_id_and_info() {
-        let session = test_session();
-        let reply = exec(&session, client(
-            &session,
-            &[Bytes::from_static(b"client"), Bytes::from_static(b"id")],
-        ))
-        .await;
-        match reply {
-            RespValue::Integer(id) => assert_eq!(id, session.id() as i64),
-            other => panic!("expected integer, got {other:?}"),
-        }
-
-        let reply = exec(&session, client(
-            &session,
-            &[Bytes::from_static(b"client"), Bytes::from_static(b"info")],
-        ))
-        .await;
-        match reply {
-            RespValue::BulkString(Some(info)) => {
-                let info = String::from_utf8_lossy(&info).to_string();
-                assert!(info.starts_with(&format!("id={} db=0\r\n", session.id())));
-            }
-            other => panic!("expected bulk, got {other:?}"),
-        }
-
-        // Unknown subcommand: no "ERR " prefix, matching Go.
-        assert_eq!(
-            expect_err(&exec(&session, client(
-                &session,
-                &[Bytes::from_static(b"client"), Bytes::from_static(b"setname")],
-            ))
-            .await),
-            Bytes::from_static(b"subcommand not supported")
-        );
-
-        // Wrong arity.
-        assert_eq!(
-            expect_err(&exec(&session, client(&session, &[Bytes::from_static(b"client")])).await),
-            Bytes::from_static(b"ERR wrong number of arguments for 'client' command")
-        );
     }
 
     #[tokio::test]
