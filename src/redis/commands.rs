@@ -7,6 +7,7 @@ use bytes::Bytes;
 use crate::bloom;
 use crate::common::op::WireOp;
 use crate::common::session::Session;
+use crate::json;
 use crate::keys;
 use crate::list;
 use crate::resp::RespValue;
@@ -635,6 +636,421 @@ pub async fn dispatch_command(session: &mut Session, args: &[Bytes]) -> Vec<Resp
                 return replies;
             };
             if let Some(queued) = session.enqueue_op(bloom::info(session, key)) {
+                replies.push(queued);
+            }
+        }
+        b"json.set" => {
+            if args.len() < 4 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'json.set' command",
+                );
+                return replies;
+            }
+            let Some(value) = json::parse_json(&args[3]) else {
+                error(session, &mut replies, "ERR invalid JSON");
+                return replies;
+            };
+            let mut nx = false;
+            let mut xx = false;
+            let mut ft = json::FphaType::None;
+            let mut i = 4;
+            while i < args.len() {
+                if args[i].eq_ignore_ascii_case(b"nx") {
+                    nx = true;
+                } else if args[i].eq_ignore_ascii_case(b"xx") {
+                    xx = true;
+                } else if args[i].eq_ignore_ascii_case(b"fpha") {
+                    if i + 1 >= args.len() {
+                        error(session, &mut replies, "ERR syntax error");
+                        return replies;
+                    }
+                    i += 1;
+                    match json::parse_fpha(&args[i]) {
+                        Some(parsed) => ft = parsed,
+                        None => {
+                            error(session, &mut replies, "ERR syntax error");
+                            return replies;
+                        }
+                    }
+                } else {
+                    error(session, &mut replies, "ERR syntax error");
+                    return replies;
+                }
+                i += 1;
+            }
+            if nx && xx {
+                error(session, &mut replies, "ERR NX and XX are mutually exclusive");
+                return replies;
+            }
+            if ft != json::FphaType::None {
+                if let Err(e) = json::validate_fpha(&value, ft) {
+                    error(session, &mut replies, e);
+                    return replies;
+                }
+            }
+            if let Some(queued) = session.enqueue_op(json::set(session, &args[1], &args[2], value, nx, xx)) {
+                replies.push(queued);
+            }
+        }
+        b"json.get" => {
+            if args.len() < 2 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'json.get' command",
+                );
+                return replies;
+            }
+            let paths: Vec<String> = args[2..]
+                .iter()
+                .map(|p| String::from_utf8_lossy(p).into_owned())
+                .collect();
+            if let Some(queued) = session.enqueue_op(json::get(session, &args[1], paths)) {
+                replies.push(queued);
+            }
+        }
+        b"json.del" => {
+            if args.len() < 2 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'json.del' command",
+                );
+                return replies;
+            }
+            let paths: Vec<String> = args[2..]
+                .iter()
+                .map(|p| String::from_utf8_lossy(p).into_owned())
+                .collect();
+            if let Some(queued) = session.enqueue_op(json::del(session, &args[1], paths)) {
+                replies.push(queued);
+            }
+        }
+        b"json.type" => {
+            if args.len() < 2 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'json.type' command",
+                );
+                return replies;
+            }
+            let path: Vec<u8> = if args.len() >= 3 {
+                args[2].to_vec()
+            } else {
+                b"$".to_vec()
+            };
+            if let Some(queued) = session.enqueue_op(json::json_type(session, &args[1], &path)) {
+                replies.push(queued);
+            }
+        }
+        b"json.arrappend" => {
+            if args.len() < 4 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'json.arrappend' command",
+                );
+                return replies;
+            }
+            let mut values = Vec::with_capacity(args.len() - 3);
+            for v in &args[3..] {
+                match json::parse_json(v) {
+                    Some(jv) => values.push(jv),
+                    None => {
+                        error(session, &mut replies, "ERR invalid JSON");
+                        return replies;
+                    }
+                }
+            }
+            if let Some(queued) = session.enqueue_op(json::arr_append(session, &args[1], &args[2], values)) {
+                replies.push(queued);
+            }
+        }
+        b"json.arrindex" => {
+            if args.len() < 4 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'json.arrindex' command",
+                );
+                return replies;
+            }
+            let Some(value) = json::parse_json(&args[3]) else {
+                error(session, &mut replies, "ERR invalid JSON");
+                return replies;
+            };
+            if let Some(queued) = session.enqueue_op(json::arr_index(session, &args[1], &args[2], value)) {
+                replies.push(queued);
+            }
+        }
+        b"json.arrlen" => {
+            if args.len() < 2 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'json.arrlen' command",
+                );
+                return replies;
+            }
+            let path: Vec<u8> = if args.len() >= 3 {
+                args[2].to_vec()
+            } else {
+                b"$".to_vec()
+            };
+            if let Some(queued) = session.enqueue_op(json::arr_len(session, &args[1], &path)) {
+                replies.push(queued);
+            }
+        }
+        b"json.numincrby" => {
+            if args.len() < 4 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'json.numincrby' command",
+                );
+                return replies;
+            }
+            let Some(delta) = parse_f64(&args[3]) else {
+                error(session, &mut replies, "ERR value is not a number");
+                return replies;
+            };
+            if let Some(queued) = session.enqueue_op(json::num_incr_by(session, &args[1], &args[2], delta)) {
+                replies.push(queued);
+            }
+        }
+        b"json.nummultby" => {
+            if args.len() < 4 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'json.nummultby' command",
+                );
+                return replies;
+            }
+            let Some(factor) = parse_f64(&args[3]) else {
+                error(session, &mut replies, "ERR value is not a number");
+                return replies;
+            };
+            if let Some(queued) = session.enqueue_op(json::num_mult_by(session, &args[1], &args[2], factor)) {
+                replies.push(queued);
+            }
+        }
+        b"json.objkeys" => {
+            if args.len() < 2 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'json.objkeys' command",
+                );
+                return replies;
+            }
+            let path: Vec<u8> = if args.len() >= 3 {
+                args[2].to_vec()
+            } else {
+                b"$".to_vec()
+            };
+            if let Some(queued) = session.enqueue_op(json::obj_keys(session, &args[1], &path)) {
+                replies.push(queued);
+            }
+        }
+        b"json.objlen" => {
+            if args.len() < 2 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'json.objlen' command",
+                );
+                return replies;
+            }
+            let path: Vec<u8> = if args.len() >= 3 {
+                args[2].to_vec()
+            } else {
+                b"$".to_vec()
+            };
+            if let Some(queued) = session.enqueue_op(json::obj_len(session, &args[1], &path)) {
+                replies.push(queued);
+            }
+        }
+        b"json.strappend" => {
+            if args.len() < 3 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'json.strappend' command",
+                );
+                return replies;
+            }
+            let (path, value_idx) = if args.len() == 4 {
+                (args[2].clone(), 3)
+            } else if args.len() == 3 {
+                (Bytes::from_static(b"$"), 2)
+            } else {
+                (Bytes::from_static(b"$"), 3)
+            };
+            let Some(suffix) = json::parse_json_string(&args[value_idx]) else {
+                error(session, &mut replies, "ERR invalid JSON string");
+                return replies;
+            };
+            if let Some(queued) =
+                session.enqueue_op(json::str_append(session, &args[1], &path, suffix))
+            {
+                replies.push(queued);
+            }
+        }
+        b"json.strlen" => {
+            if args.len() < 2 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'json.strlen' command",
+                );
+                return replies;
+            }
+            let path: Vec<u8> = if args.len() >= 3 {
+                args[2].to_vec()
+            } else {
+                b"$".to_vec()
+            };
+            if let Some(queued) = session.enqueue_op(json::str_len(session, &args[1], &path)) {
+                replies.push(queued);
+            }
+        }
+        b"json.mget" => {
+            if args.len() < 3 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'json.mget' command",
+                );
+                return replies;
+            }
+            let last = args.len() - 1;
+            let path = String::from_utf8_lossy(&args[last]).into_owned();
+            let keys: Vec<Vec<u8>> = args[1..last].iter().map(|k| k.to_vec()).collect();
+            if let Some(queued) = session.enqueue_op(json::mget(session, keys, path)) {
+                replies.push(queued);
+            }
+        }
+        b"json.resp" => {
+            if args.len() < 2 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'json.resp' command",
+                );
+                return replies;
+            }
+            let path = if args.len() >= 3 {
+                String::from_utf8_lossy(&args[2]).into_owned()
+            } else {
+                String::new()
+            };
+            if let Some(queued) = session.enqueue_op(json::resp(session, &args[1], path)) {
+                replies.push(queued);
+            }
+        }
+        b"json.clear" => {
+            if args.len() < 2 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'json.clear' command",
+                );
+                return replies;
+            }
+            let path: Vec<u8> = if args.len() >= 3 {
+                args[2].to_vec()
+            } else {
+                b"$".to_vec()
+            };
+            if let Some(queued) = session.enqueue_op(json::clear(session, &args[1], &path)) {
+                replies.push(queued);
+            }
+        }
+        b"json.arrpop" => {
+            if args.len() < 2 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'json.arrpop' command",
+                );
+                return replies;
+            }
+            let path: Vec<u8> = if args.len() >= 3 {
+                args[2].to_vec()
+            } else {
+                b"$".to_vec()
+            };
+            let mut idx = -1i64;
+            if args.len() >= 4 {
+                match parse_i64(&args[3]) {
+                    Some(v) => idx = v,
+                    None => {
+                        error(session, &mut replies, "value is not an integer or out of range");
+                        return replies;
+                    }
+                }
+            }
+            if let Some(queued) = session.enqueue_op(json::arr_pop(session, &args[1], &path, idx)) {
+                replies.push(queued);
+            }
+        }
+        b"json.arrtrim" => {
+            if args.len() < 4 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'json.arrtrim' command",
+                );
+                return replies;
+            }
+            let Some(start) = parse_i64(&args[3]) else {
+                error(session, &mut replies, "value is not an integer or out of range");
+                return replies;
+            };
+            let mut stop = -1i64;
+            if args.len() >= 5 {
+                match parse_i64(&args[4]) {
+                    Some(v) => stop = v,
+                    None => {
+                        error(session, &mut replies, "value is not an integer or out of range");
+                        return replies;
+                    }
+                }
+            }
+            if let Some(queued) =
+                session.enqueue_op(json::arr_trim(session, &args[1], &args[2], start, stop))
+            {
+                replies.push(queued);
+            }
+        }
+        b"json.arrinsert" => {
+            if args.len() < 5 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'json.arrinsert' command",
+                );
+                return replies;
+            }
+            let Some(index) = parse_i64(&args[3]) else {
+                error(session, &mut replies, "ERR value is not an integer or out of range");
+                return replies;
+            };
+            let mut values = Vec::with_capacity(args.len() - 4);
+            for v in &args[4..] {
+                match json::parse_json(v) {
+                    Some(jv) => values.push(jv),
+                    None => {
+                        error(session, &mut replies, "ERR invalid JSON");
+                        return replies;
+                    }
+                }
+            }
+            if let Some(queued) = session.enqueue_op(json::arr_insert(session, &args[1], &args[2], index, values)) {
                 replies.push(queued);
             }
         }
@@ -2820,6 +3236,358 @@ mod tests {
                 RespValue::Integer(1),
                 RespValue::Integer(1),
             ]))]
+        );
+    }
+
+    fn bulk(s: &str) -> RespValue {
+        RespValue::BulkString(Some(Bytes::copy_from_slice(s.as_bytes())))
+    }
+
+    async fn json_bulk(session: &mut Session, cmd: &[&str]) -> String {
+        match &dispatch(session, cmd).await[0] {
+            RespValue::BulkString(Some(b)) => String::from_utf8_lossy(b).to_string(),
+            other => panic!("expected bulk string, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn json_set_get_roundtrip() {
+        let mut session = test_session();
+        assert_eq!(
+            dispatch(&mut session, &["json.set", "doc", "$", r#"{"name":"Alice","age":30}"#])
+                .await,
+            vec![ok()]
+        );
+        assert_eq!(
+            json_bulk(&mut session, &["json.get", "doc"]).await,
+            r#"{"age":30,"name":"Alice"}"#
+        );
+        // Single path.
+        assert_eq!(
+            json_bulk(&mut session, &["json.get", "doc", "$.name"]).await,
+            r#""Alice""#
+        );
+        // Missing key -> RESP null.
+        assert_eq!(
+            dispatch(&mut session, &["json.get", "nokey", "$.name"]).await,
+            vec![RespValue::BulkString(None)]
+        );
+    }
+
+    #[tokio::test]
+    async fn json_get_multi_path() {
+        let mut session = test_session();
+        dispatch(
+            &mut session,
+            &["json.set", "doc", "$", r#"{"a":1,"b":2}"#],
+        )
+        .await;
+        assert_eq!(
+            json_bulk(&mut session, &["json.get", "doc", "$.a", "$.b"]).await,
+            r#"{"$.a":1,"$.b":2}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn json_set_nx_xx() {
+        let mut session = test_session();
+        assert_eq!(
+            dispatch(&mut session, &["json.set", "doc", "$", "1", "NX"]).await,
+            vec![ok()]
+        );
+        // NX on an existing key -> null.
+        assert_eq!(
+            dispatch(&mut session, &["json.set", "doc", "$", "2", "NX"]).await,
+            vec![RespValue::BulkString(None)]
+        );
+        // XX on a missing key -> null.
+        assert_eq!(
+            dispatch(&mut session, &["json.set", "other", "$", "2", "XX"]).await,
+            vec![RespValue::BulkString(None)]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["json.set", "doc", "$", "2", "XX"]).await,
+            vec![ok()]
+        );
+        // NX and XX together are rejected at parse time.
+        assert_eq!(
+            dispatch(&mut session, &["json.set", "doc", "$", "2", "NX", "XX"]).await,
+            vec![RespValue::Error(Bytes::from_static(
+                b"ERR NX and XX are mutually exclusive"
+            ))]
+        );
+    }
+
+    #[tokio::test]
+    async fn json_set_rejects_bad_input() {
+        let mut session = test_session();
+        // Invalid JSON value.
+        assert!(matches!(
+            dispatch(&mut session, &["json.set", "doc", "$", "notjson"]).await[0],
+            RespValue::Error(_)
+        ));
+        // Unknown flag -> syntax error.
+        assert!(matches!(
+            dispatch(&mut session, &["json.set", "doc", "$", "1", "BOGUS"]).await[0],
+            RespValue::Error(_)
+        ));
+        // Bad FPHA type -> syntax error.
+        assert!(matches!(
+            dispatch(&mut session, &["json.set", "doc", "$", "1", "FPHA", "X"]).await[0],
+            RespValue::Error(_)
+        ));
+        // FPHA with a value out of range.
+        assert!(matches!(
+            dispatch(&mut session, &["json.set", "doc", "$", "1e40", "FPHA", "FP16"]).await[0],
+            RespValue::Error(_)
+        ));
+        // Wrong arity.
+        assert!(matches!(
+            dispatch(&mut session, &["json.set", "doc"]).await[0],
+            RespValue::Error(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn json_type_del_len() {
+        let mut session = test_session();
+        dispatch(
+            &mut session,
+            &[
+                "json.set",
+                "doc",
+                "$",
+                r#"{"s":"x","n":1,"arr":[1],"o":{"k":1},"b":true,"nil":null}"#,
+            ],
+        )
+        .await;
+
+        for (path, want) in [
+            ("$.s", "string"),
+            ("$.n", "number"),
+            ("$.arr", "array"),
+            ("$.o", "object"),
+            ("$.b", "boolean"),
+            ("$.nil", "null"),
+            ("$", "object"),
+        ] {
+            assert_eq!(
+                json_bulk(&mut session, &["json.type", "doc", path]).await,
+                want.to_string()
+            );
+        }
+        // Missing key -> null.
+        assert_eq!(
+            dispatch(&mut session, &["json.type", "nokey", "$"]).await,
+            vec![RespValue::BulkString(None)]
+        );
+
+        // JSON.DEL removes a path and reports the count.
+        assert_eq!(
+            dispatch(&mut session, &["json.del", "doc", "$.s"]).await,
+            vec![RespValue::Integer(1)]
+        );
+        // A deleted path resolves to RESP null (not the JSON value null).
+        assert_eq!(
+            dispatch(&mut session, &["json.get", "doc", "$.s"]).await,
+            vec![RespValue::BulkString(None)]
+        );
+        // Deleting the whole key reports 1 even when missing.
+        assert_eq!(
+            dispatch(&mut session, &["json.del", "doc"]).await,
+            vec![RespValue::Integer(1)]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["json.del", "nokey"]).await,
+            vec![RespValue::Integer(1)]
+        );
+    }
+
+    #[tokio::test]
+    async fn json_arr_commands_through_dispatch() {
+        let mut session = test_session();
+        dispatch(
+            &mut session,
+            &["json.set", "doc", "$", r#"{"arr":[1,2,3]}"#],
+        )
+        .await;
+
+        assert_eq!(
+            dispatch(&mut session, &["json.arrappend", "doc", "$.arr", "4", "5"]).await,
+            vec![RespValue::Integer(5)]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["json.arrindex", "doc", "$.arr", "4"]).await,
+            vec![RespValue::Integer(3)]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["json.arrindex", "doc", "$.arr", "99"]).await,
+            vec![RespValue::Integer(-1)]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["json.arrlen", "doc", "$.arr"]).await,
+            vec![RespValue::Integer(5)]
+        );
+        // Missing path -> null.
+        assert_eq!(
+            dispatch(&mut session, &["json.arrlen", "doc", "$.nope"]).await,
+            vec![RespValue::BulkString(None)]
+        );
+        // ARRPOP / ARRTRIM / ARRINSERT mutate in place.
+        assert_eq!(
+            dispatch(&mut session, &["json.arrpop", "doc", "$.arr", "1"]).await,
+            vec![bulk("2")]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["json.arrtrim", "doc", "$.arr", "0", "1"]).await,
+            vec![RespValue::Integer(2)]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["json.arrinsert", "doc", "$.arr", "1", "99"]).await,
+            vec![RespValue::Integer(3)]
+        );
+        assert_eq!(
+            json_bulk(&mut session, &["json.get", "doc", "$.arr"]).await,
+            "[1,99,3]".to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn json_number_obj_string_commands() {
+        let mut session = test_session();
+        dispatch(
+            &mut session,
+            &["json.set", "doc", "$", r#"{"n":10,"o":{"a":1,"b":2},"s":"hello"}"#],
+        )
+        .await;
+
+        assert_eq!(
+            dispatch(&mut session, &["json.numincrby", "doc", "$.n", "5"]).await,
+            vec![bulk("15")]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["json.nummultby", "doc", "$.n", "3"]).await,
+            vec![bulk("45")]
+        );
+
+        // OBJKEYS returns sorted keys.
+        assert_eq!(
+            dispatch(&mut session, &["json.objkeys", "doc", "$.o"]).await,
+            vec![RespValue::Array(Some(vec![bulk("a"), bulk("b")]))]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["json.objlen", "doc", "$.o"]).await,
+            vec![RespValue::Integer(2)]
+        );
+
+        assert_eq!(
+            dispatch(&mut session, &["json.strappend", "doc", "$.s", r#"" world""#]).await,
+            vec![RespValue::Integer(11)]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["json.strlen", "doc", "$.s"]).await,
+            vec![RespValue::Integer(11)]
+        );
+        // STRAPPEND with no path appends to the root string.
+        dispatch(&mut session, &["json.set", "sdoc", "$", r#""foo""#]).await;
+        assert_eq!(
+            dispatch(&mut session, &["json.strappend", "sdoc", r#""bar""#]).await,
+            vec![RespValue::Integer(6)]
+        );
+    }
+
+    #[tokio::test]
+    async fn json_mget_resp_clear() {
+        let mut session = test_session();
+        dispatch(&mut session, &["json.set", "k1", "$", r#"{"v":1}"#]).await;
+        dispatch(&mut session, &["json.set", "k2", "$", r#"{"v":2}"#]).await;
+
+        assert_eq!(
+            dispatch(&mut session, &["json.mget", "k1", "k2", "k3", "$.v"]).await,
+            vec![RespValue::Array(Some(vec![
+                bulk("1"),
+                bulk("2"),
+                RespValue::BulkString(None),
+            ]))]
+        );
+
+        dispatch(
+            &mut session,
+            &["json.set", "doc", "$", r#"{"n":1,"b":true}"#],
+        )
+        .await;
+        // JSON.RESP numbers are bulk strings, booleans become 1/0 integers.
+        assert_eq!(
+            dispatch(&mut session, &["json.resp", "doc", "$.n"]).await,
+            vec![bulk("1")]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["json.resp", "doc", "$.b"]).await,
+            vec![RespValue::Integer(1)]
+        );
+
+        dispatch(&mut session, &["json.set", "doc", "$", r#"{"a":{"x":1}}"#]).await;
+        assert_eq!(
+            dispatch(&mut session, &["json.clear", "doc", "$.a"]).await,
+            vec![RespValue::Integer(1)]
+        );
+        assert_eq!(
+            json_bulk(&mut session, &["json.get", "doc", "$.a"]).await,
+            "{}".to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn json_command_arity_and_type_errors() {
+        let mut session = test_session();
+        for bad in [
+            &["json.get"][..],
+            &["json.del"][..],
+            &["json.arrlen"][..],
+            &["json.mget", "k1"][..],
+            &["json.arrtrim", "doc", "$.arr"][..],
+            &["json.arrinsert", "doc", "$.arr"][..],
+        ] {
+            assert!(
+                matches!(dispatch(&mut session, bad).await[0], RespValue::Error(_)),
+                "expected error for {bad:?}"
+            );
+        }
+        // ARRPOP with a non-integer index (no ERR prefix, matching Go).
+        assert_eq!(
+            dispatch(&mut session, &["json.arrpop", "doc", "$", "x"]).await,
+            vec![RespValue::Error(Bytes::from_static(
+                b"value is not an integer or out of range"
+            ))]
+        );
+        // STRAPPEND with a non-string JSON value.
+        assert!(matches!(
+            dispatch(&mut session, &["json.strappend", "doc", "$", "42"]).await[0],
+            RespValue::Error(_)
+        ));
+        // Commands against a non-JSON key report WRONGTYPE.
+        dispatch(&mut session, &["set", "strkey", "plain"]).await;
+        assert!(matches!(
+            &dispatch(&mut session, &["json.get", "strkey"]).await[0],
+            RespValue::Error(b) if b.starts_with(b"WRONGTYPE")
+        ));
+    }
+
+    #[tokio::test]
+    async fn json_commands_work_inside_multi() {
+        let mut session = test_session();
+        dispatch(&mut session, &["multi"]).await;
+        assert_eq!(
+            dispatch(&mut session, &["json.set", "doc", "$", "1"]).await,
+            vec![RespValue::SimpleString(Bytes::from_static(b"QUEUED"))]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["json.get", "doc"]).await,
+            vec![RespValue::SimpleString(Bytes::from_static(b"QUEUED"))]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["exec"]).await,
+            vec![RespValue::Array(Some(vec![ok(), bulk("1")]))]
         );
     }
 }

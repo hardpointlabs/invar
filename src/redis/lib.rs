@@ -6,6 +6,7 @@
 
 pub mod bloom;
 pub mod commands;
+pub mod json;
 pub mod common;
 pub mod keys;
 pub mod list;
