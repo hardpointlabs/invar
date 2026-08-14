@@ -345,7 +345,7 @@ in this implementation.
 | RENAME | ✅ | |
 | RENAMENX | ✅ | |
 | RESTORE | 🚫 | |
-| SCAN | 🚫 | |
+| SCAN | ✅ | MATCH, COUNT, and TYPE options supported |
 | SORT | 🚫 | |
 | SORT_RO | 🚫 | |
 | TOUCH | 🚫 | |

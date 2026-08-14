@@ -14,6 +14,7 @@
 //! isolation with write-write conflict detection surfaced as
 //! [`Error::Conflict`].
 
+use std::collections::Bound;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -256,7 +257,19 @@ impl Tx for FjallTx {
         Ok(())
     }
 
-    async fn new_iterator(&self, prefix: &[u8]) -> Result<Box<dyn KeyValueIterator>, Error> {
+    async fn new_range_iterator(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<Box<dyn KeyValueIterator>, Error> {
+        let range = (start, end);
+        let tx = self.tx.lock().expect("fjall tx mutex poisoned");
+        let iter = tx.range::<&[u8], _>(&self.keyspace, range);
+        drop(tx);
+        Ok(Box::new(FjallIterator{
+            iter: Some(Mutex::new(iter)),
+            cur: None,
+            err: None,
+        }))
+    }
+
+    async fn new_prefix_iterator(&self, prefix: &[u8]) -> Result<Box<dyn KeyValueIterator>, Error> {
         let tx = self.tx.lock().expect("fjall tx mutex poisoned");
         let iter = tx.prefix(&self.keyspace, prefix);
         drop(tx);
@@ -862,7 +875,7 @@ mod tests {
             .expect("set failed");
 
         let tx = store.begin(false).await.expect("begin");
-        let mut it = tx.new_iterator(b"user:").await.expect("iterator");
+        let mut it = tx.new_prefix_iterator(b"user:").await.expect("iterator");
         let mut keys = Vec::new();
         while it.next().await {
             keys.push(it.item().expect("item after next").key().to_vec());
@@ -872,6 +885,115 @@ mod tests {
             keys,
             vec![b"user:1".to_vec(), b"user:2".to_vec(), b"user:3".to_vec()]
         );
+        tx.discard();
+        store.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn new_range_iterator_inclusive_start_exclusive_end() {
+        let store = temp_store();
+        for (k, v) in [("a", "1"), ("b", "2"), ("c", "3"), ("d", "4")] {
+            write(&store, k.as_bytes(), v.as_bytes()).await;
+        }
+
+        let tx = store.begin(false).await.expect("begin");
+        let mut it = tx
+            .new_range_iterator(Bound::Included(b"b"), Bound::Excluded(b"d"))
+            .await
+            .expect("iterator");
+        let mut keys = Vec::new();
+        while it.next().await {
+            keys.push(it.item().expect("item after next").key().to_vec());
+        }
+        assert!(it.err().is_none());
+        assert_eq!(keys, vec![b"b".to_vec(), b"c".to_vec()]);
+        tx.discard();
+        store.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn new_range_iterator_unbounded_bounds_yield_all_keys() {
+        let store = temp_store();
+        for (k, v) in [("a", "1"), ("b", "2"), ("c", "3")] {
+            write(&store, k.as_bytes(), v.as_bytes()).await;
+        }
+
+        let tx = store.begin(false).await.expect("begin");
+        let mut it = tx
+            .new_range_iterator(Bound::Unbounded, Bound::Unbounded)
+            .await
+            .expect("iterator");
+        let mut keys = Vec::new();
+        while it.next().await {
+            keys.push(it.item().expect("item after next").key().to_vec());
+        }
+        assert!(it.err().is_none());
+        assert_eq!(
+            keys,
+            vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
+        );
+        tx.discard();
+        store.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn new_range_iterator_exclusive_start_resumes_after_cursor() {
+        let store = temp_store();
+        for (k, v) in [("a", "1"), ("b", "2"), ("c", "3"), ("d", "4")] {
+            write(&store, k.as_bytes(), v.as_bytes()).await;
+        }
+
+        let tx = store.begin(false).await.expect("begin");
+        let mut it = tx
+            .new_range_iterator(Bound::Excluded(b"b"), Bound::Unbounded)
+            .await
+            .expect("iterator");
+        let mut keys = Vec::new();
+        while it.next().await {
+            keys.push(it.item().expect("item after next").key().to_vec());
+        }
+        assert!(it.err().is_none());
+        assert_eq!(keys, vec![b"c".to_vec(), b"d".to_vec()]);
+        tx.discard();
+        store.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn new_range_iterator_prefix_end_excludes_following_keys() {
+        let store = temp_store();
+        for (k, v) in [("user:1", "a"), ("user:2", "b"), ("other", "c")] {
+            write(&store, k.as_bytes(), v.as_bytes()).await;
+        }
+
+        // The end bound must be exclusive: only user:* keys are in range.
+        let tx = store.begin(false).await.expect("begin");
+        let mut it = tx
+            .new_range_iterator(Bound::Included(b"user:"), Bound::Excluded(b"user;"))
+            .await
+            .expect("iterator");
+        let mut keys = Vec::new();
+        while it.next().await {
+            keys.push(it.item().expect("item after next").key().to_vec());
+        }
+        assert!(it.err().is_none());
+        assert_eq!(keys, vec![b"user:1".to_vec(), b"user:2".to_vec()]);
+        tx.discard();
+        store.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn new_range_iterator_no_matches_is_empty() {
+        let store = temp_store();
+        write(&store, b"a", b"1").await;
+        write(&store, b"b", b"2").await;
+
+        let tx = store.begin(false).await.expect("begin");
+        let mut it = tx
+            .new_range_iterator(Bound::Included(b"x"), Bound::Unbounded)
+            .await
+            .expect("iterator");
+        assert!(!it.next().await);
+        assert!(it.err().is_none());
         tx.discard();
         store.close().await.expect("close");
     }

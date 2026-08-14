@@ -18,7 +18,6 @@ import (
 	redisjson "github.com/hardpointlabs/invar/redis/json"
 	"github.com/hardpointlabs/invar/redis/keys"
 	"github.com/hardpointlabs/invar/redis/list"
-	"github.com/hardpointlabs/invar/redis/server"
 	"github.com/hardpointlabs/invar/redis/set"
 	redisstrings "github.com/hardpointlabs/invar/redis/strings"
 	"github.com/hardpointlabs/invar/redis/zset"
@@ -1648,13 +1647,7 @@ func dispatchCommand(session *common.Session, conn redcon.Conn, cmd redcon.Comma
 
 func serve(ln net.Listener, kv kv.KeyValueStore) error {
 	var ps redcon.PubSub
-<<<<<<< HEAD
 	log.Info().Msgf("started RESP protocol listener at %s", ln.Addr())
-=======
-	kvs := kv.WrapBadger(db)
-	server.SetAddr(addr)
-	log.Info().Msgf("started RESP protocol listener at %s", addr)
->>>>>>> server-cmds
 	err := redcon.Serve(ln,
 		func(conn redcon.Conn, cmd redcon.Command) {
 			session := upsertSession(conn, kv)
@@ -1663,13 +1656,11 @@ func serve(ln net.Listener, kv kv.KeyValueStore) error {
 		func(conn redcon.Conn) bool {
 			// Use this function to accept or deny the connection.
 			// log.Printf("accept: %s", conn.RemoteAddr())
-			server.ConnOpened()
 			return true
 		},
 		func(conn redcon.Conn, err error) {
 			// This is called when the connection has been closed
 			// log.Printf("closed: %s, err: %v", conn.RemoteAddr(), err)
-			server.ConnClosed()
 		},
 	)
 	return err

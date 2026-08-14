@@ -213,7 +213,14 @@ pub trait Tx: Send + Sync + 'static {
 
     fn delete(&self, key: &[u8]) -> Result<(), Error>;
 
-    async fn new_iterator(&self, prefix: &[u8]) -> Result<Box<dyn KeyValueIterator>, Error>;
+    /// Create a KeyValueIterator with an arbitrary start and end key
+    /// An unbounded start key means starting from the beginning of the keyspace
+    /// An unbounded end key means this iterator will run through the whole keyspace (assuming
+    /// caller keeps iterating).
+    async fn new_range_iterator(&self, start: std::ops::Bound<&[u8]>, end: std::ops::Bound<&[u8]>) -> Result<Box<dyn KeyValueIterator>, Error>;
+
+    /// Create a KeyValueIterator with an arbitrary start key prefix
+    async fn new_prefix_iterator(&self, prefix: &[u8]) -> Result<Box<dyn KeyValueIterator>, Error>;
 
     async fn commit(self: Box<Self>) -> Result<(), Error>;
 

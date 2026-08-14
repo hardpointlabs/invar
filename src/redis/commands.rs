@@ -2226,6 +2226,73 @@ pub async fn dispatch_command(session: &mut Session, args: &[Bytes]) -> Vec<Resp
                 replies.push(queued);
             }
         }
+        b"scan" => {
+            if args.len() < 2 {
+                error(
+                    session,
+                    &mut replies,
+                    "ERR wrong number of arguments for 'scan' command",
+                );
+                return replies;
+            }
+            let mut count = 10usize;
+            let mut pattern: Option<Vec<u8>> = None;
+            let mut type_filter: Option<u8> = None;
+            let mut i = 2;
+            while i < args.len() {
+                if args[i].eq_ignore_ascii_case(b"match") {
+                    if i + 1 >= args.len() {
+                        error(session, &mut replies, "ERR syntax error");
+                        return replies;
+                    }
+                    pattern = Some(args[i + 1].to_vec());
+                    i += 2;
+                } else if args[i].eq_ignore_ascii_case(b"count") {
+                    if i + 1 >= args.len() {
+                        error(session, &mut replies, "ERR syntax error");
+                        return replies;
+                    }
+                    let Some(n) = parse_i64(&args[i + 1]) else {
+                        error(
+                            session,
+                            &mut replies,
+                            "ERR value is not an integer or out of range",
+                        );
+                        return replies;
+                    };
+                    if n < 1 {
+                        error(session, &mut replies, "ERR syntax error");
+                        return replies;
+                    }
+                    count = n as usize;
+                    i += 2;
+                } else if args[i].eq_ignore_ascii_case(b"type") {
+                    if i + 1 >= args.len() {
+                        error(session, &mut replies, "ERR syntax error");
+                        return replies;
+                    }
+                    // Unknown type names match nothing (Redis 7.x behaviour).
+                    type_filter = keys::type_byte(&args[i + 1]);
+                    i += 2;
+                } else {
+                    error(session, &mut replies, "ERR syntax error");
+                    return replies;
+                }
+            }
+            let pattern = match pattern {
+                Some(p) if p == b"*" => None,
+                other => other,
+            };
+            if let Some(queued) = session.enqueue_op(keys::scan(
+                session,
+                &args[1],
+                count,
+                pattern,
+                type_filter,
+            )) {
+                replies.push(queued);
+            }
+        }
         b"zrange" => {
             if args.len() < 4 {
                 error(

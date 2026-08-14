@@ -2448,5 +2448,78 @@
     "type": "bulk_string",
     "version": "7.2.0",
     "description": "CLIENT GETINFO LIB-VER returns the stored library version"
+  },
+  {
+    "name": "SCAN empty MATCH returns no keys",
+    "command": ["SCAN", "0", "MATCH", "invar_scan_a_*", "COUNT", "1000000"],
+    "expected": ["0", []],
+    "type": "array",
+    "version": "7.2.0",
+    "description": "SCAN with a MATCH pattern matching no keys returns an empty key list and a zero cursor once the keyspace is exhausted"
+  },
+  {
+    "name": "SCAN returns matching keys and zero cursor",
+    "command": ["SCAN", "0", "MATCH", "invar_scan_b_*", "COUNT", "1000000"],
+    "expected": ["0", ["invar_scan_b_1", "invar_scan_b_2"]],
+    "type": "array",
+    "version": "7.2.0",
+    "description": "SCAN returns all keys matching the pattern (filtering out non-matching ones) and a zero cursor when done",
+    "setup": [
+      ["SET", "invar_scan_b_1", "one"],
+      ["SET", "invar_scan_b_2", "two"],
+      ["SET", "invar_scan_b2_decoy", "three"]
+    ]
+  },
+  {
+    "name": "SCAN COUNT pages through keys",
+    "command": ["SCAN", "invar_scan_c_1", "MATCH", "invar_scan_c_*", "COUNT", "1"],
+    "expected": ["invar_scan_c_2", ["invar_scan_c_2"]],
+    "type": "array",
+    "version": "7.2.0",
+    "description": "SCAN with COUNT 1 returns one key plus the key name as the next cursor",
+    "setup": [
+      ["SET", "invar_scan_c_1", "one"],
+      ["SET", "invar_scan_c_2", "two"],
+      ["SET", "invar_scan_c_3", "three"],
+      ["SET", "invar_scan_z_tail", "z"]
+    ]
+  },
+  {
+    "name": "SCAN resumes from the returned cursor",
+    "command": ["SCAN", "invar_scan_c_2", "MATCH", "invar_scan_c_*", "COUNT", "1"],
+    "expected": ["invar_scan_c_3", ["invar_scan_c_3"]],
+    "type": "array",
+    "version": "7.2.0",
+    "description": "SCAN resumes the iteration from the cursor returned by the previous page",
+    "setup": [
+      ["SET", "invar_scan_c_1", "one"],
+      ["SET", "invar_scan_c_2", "two"],
+      ["SET", "invar_scan_c_3", "three"],
+      ["SET", "invar_scan_z_tail", "z"]
+    ]
+  },
+  {
+    "name": "SCAN with no arguments errors",
+    "command": ["SCAN"],
+    "expected": {"error": true},
+    "type": "error",
+    "version": "7.2.0",
+    "description": "SCAN requires at least a cursor argument"
+  },
+  {
+    "name": "SCAN rejects COUNT below one",
+    "command": ["SCAN", "0", "COUNT", "0"],
+    "expected": {"error": true},
+    "type": "error",
+    "version": "7.2.0",
+    "description": "SCAN COUNT must be a positive integer"
+  },
+  {
+    "name": "SCAN rejects unknown options",
+    "command": ["SCAN", "0", "NOSUCHOPT"],
+    "expected": {"error": true},
+    "type": "error",
+    "version": "7.2.0",
+    "description": "SCAN rejects unknown option tokens"
   }
 ]

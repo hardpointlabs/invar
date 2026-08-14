@@ -68,6 +68,9 @@ function compareResult(actual: unknown, expected: unknown, type: string): boolea
           if (!(actual[i] instanceof Error)) return false;
         } else if (exp === null) {
           if (actual[i] !== null) return false;
+        } else if (Array.isArray(exp)) {
+          // nested array (e.g. the keys list in a SCAN reply): recurse
+          if (!compareResult(actual[i], exp, "array")) return false;
         } else {
           if (actual[i] !== exp) return false;
         }

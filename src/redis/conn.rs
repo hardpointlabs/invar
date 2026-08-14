@@ -201,7 +201,7 @@ impl DbOp for DbSizeOp {
     fn run<'a>(&'a self, tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
         let prefix = self.prefix.clone();
         Box::pin(async move {
-            let mut it = tx.new_iterator(&prefix).await?;
+            let mut it = tx.new_prefix_iterator(&prefix).await?;
             let mut count: i64 = 0;
             while it.next().await {
                 count += 1;

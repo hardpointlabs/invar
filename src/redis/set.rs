@@ -157,7 +157,7 @@ async fn load_set_members(
     if set_count(tx, public_key).await?.is_none() {
         return Ok(HashSet::new());
     }
-    let mut it = tx.new_iterator(&members_prefix(node_prefix)).await?;
+    let mut it = tx.new_prefix_iterator(&members_prefix(node_prefix)).await?;
     let mut members = HashSet::new();
     while it.next().await {
         if let Some(item) = it.item() {
@@ -177,7 +177,7 @@ async fn load_set_members(
 /// (mirroring Go's `ClearPrefixedKeys`). Used by the `*STORE` commands to
 /// clear a destination before writing its new result.
 async fn clear_set(tx: &dyn Tx, public_key: &[u8], node_prefix: &[u8]) -> Result<(), DbError> {
-    let mut it = tx.new_iterator(&members_prefix(node_prefix)).await?;
+    let mut it = tx.new_prefix_iterator(&members_prefix(node_prefix)).await?;
     let mut keys = Vec::new();
     while it.next().await {
         if let Some(item) = it.item() {
@@ -570,7 +570,7 @@ impl DbOp for SPopOp {
                 Err(e) => return Err(e),
             };
             let idx = rand_index(count);
-            let mut it = match tx.new_iterator(&members_prefix(&node_prefix)).await {
+            let mut it = match tx.new_prefix_iterator(&members_prefix(&node_prefix)).await {
                 Ok(it) => it,
                 Err(e) => return Err(e.into()),
             };

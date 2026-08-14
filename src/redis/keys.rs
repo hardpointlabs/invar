@@ -1,12 +1,15 @@
 //! Redis keyspace commands: `EXISTS`, `MGET`, `MOVE`, `RENAME`, `RENAMENX`,
-//! `EXPIRE`, `TTL`, `PTTL`, `TYPE`, and `DEL`/`UNLINK`.
+//! `EXPIRE`, `TTL`, `PTTL`, `TYPE`, `DEL`/`UNLINK`, and `SCAN`.
 //!
 //! Port of the Go `redis/keys` package. These commands operate on the public
 //! key of whatever value type happens to be stored there: they deliberately
 //! do **not** inspect the metadata byte (so `MGET` on a list key returns its
 //! raw stored bytes, and `DEL` removes just the public key without cleaning
-//! up any internal node keys), mirroring Go.
+//! up any internal node keys), mirroring Go. `SCAN` is the exception: it
+//! iterates the current DB's public keyspace via a range iterator, filtering
+//! out internal (`-`-prefixed) keys.
 
+use std::ops::Bound;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
@@ -15,6 +18,7 @@ use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, NoOp, QueuedOp, WireOp};
 use crate::common::session::Session;
 use crate::common::ValueType;
+use crate::pubsub::redis_glob_match;
 use crate::resp::RespValue;
 
 /// The current UNIX time in whole seconds, matching Go's `time.Now().Unix()`.
@@ -147,6 +151,42 @@ pub fn del(session: &Session, keys: &[Bytes]) -> QueuedOp {
         }),
         wire_op: Box::new(IntWire),
         is_mutating: true,
+    }
+}
+
+/// `SCAN cursor [MATCH pattern] [COUNT count] [TYPE type]` — iterates the
+/// public keys of the current DB. A `0` cursor starts the iteration; each
+/// reply carries the next cursor, which must be passed back on the following
+/// call, and a `0` cursor when the iteration is complete.
+///
+/// Every call executes against a fresh snapshot (`is_mutating: false`), so
+/// keys written after a given page may or may not show up in later pages —
+/// matching Redis's guarantee that the full iteration reflects "mostly" the
+/// state at the start. Internal (`-`-prefixed) keys are never returned.
+/// `MATCH` applies Redis globbing; `COUNT` is a page-size hint; `TYPE` filters
+/// on the value type (an unknown type name matches nothing).
+pub fn scan(
+    session: &Session,
+    cursor: &[u8],
+    count: usize,
+    pattern: Option<Vec<u8>>,
+    type_filter: Option<u8>,
+) -> QueuedOp {
+    let cursor = if cursor == b"0" {
+        Vec::new()
+    } else {
+        cursor.to_vec()
+    };
+    QueuedOp {
+        db_op: Box::new(ScanOp {
+            prefix: session.prefix(),
+            cursor,
+            count,
+            pattern,
+            type_filter,
+        }),
+        wire_op: Box::new(ScanWire),
+        is_mutating: false,
     }
 }
 
@@ -423,6 +463,101 @@ impl DbOp for DelOp {
     }
 }
 
+/// The result of a `SCAN` page: the next cursor (`Vec::new()` means the
+/// iteration is complete, i.e. cursor `0`) and the public key names returned.
+struct ScanResult {
+    cursor: Vec<u8>,
+    keys: Vec<Vec<u8>>,
+}
+
+struct ScanOp {
+    prefix: Vec<u8>,
+    cursor: Vec<u8>,
+    count: usize,
+    pattern: Option<Vec<u8>>,
+    type_filter: Option<u8>,
+}
+
+impl DbOp for ScanOp {
+    fn run<'a>(&'a self, tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
+        let prefix = self.prefix.clone();
+        let cursor = self.cursor.clone();
+        let count = self.count.max(1);
+        let pattern = self.pattern.clone();
+        let type_filter = self.type_filter;
+        Box::pin(async move {
+            let mut start = prefix.clone();
+            if !cursor.is_empty() {
+                start.extend_from_slice(&cursor);
+            }
+            let mut it = tx
+                .new_range_iterator(
+                    if cursor.is_empty() {
+                        Bound::Included(prefix.as_slice())
+                    } else {
+                        Bound::Excluded(start.as_slice())
+                    },
+                    Bound::Unbounded,
+                )
+                .await?;
+
+            let mut keys: Vec<Vec<u8>> = Vec::new();
+            let mut last_seen: Vec<u8> = Vec::new();
+            let mut exhausted = false;
+            while keys.len() < count {
+                if !it.next().await {
+                    exhausted = true;
+                    break;
+                }
+                let item = match it.item() {
+                    Some(item) => item,
+                    None => {
+                        exhausted = true;
+                        break;
+                    }
+                };
+                let full = item.key();
+                if !full.starts_with(prefix.as_slice()) {
+                    exhausted = true;
+                    break;
+                }
+                let name = &full[prefix.len()..];
+                last_seen = name.to_vec();
+                if let Some(pattern) = &pattern {
+                    if !redis_glob_match(pattern, name, false) {
+                        continue;
+                    }
+                }
+                if let Some(want) = type_filter {
+                    if item.metadata() != want {
+                        continue;
+                    }
+                }
+                keys.push(name.to_vec());
+            }
+
+            if !exhausted && keys.len() == count {
+                if !it.next().await {
+                    exhausted = true;
+                } else if it.item().map_or(true, |i| !i.key().starts_with(prefix.as_slice())) {
+                    exhausted = true;
+                }
+            }
+
+            // When the page ended without exhausting the keyspace, resume from
+            // the last key returned (or the last key examined, when the page
+            // contained no matches) so filtered-out keys are not revisited.
+            let cursor = if exhausted {
+                Vec::new()
+            } else {
+                keys.last().cloned().unwrap_or(last_seen)
+            };
+            let result: DbResult = Box::new(ScanResult { cursor, keys });
+            Ok(result)
+        })
+    }
+}
+
 /// The Redis type name for a metadata byte, mirroring Go's `typeName`.
 fn type_name(meta: u8) -> &'static str {
     match meta {
@@ -437,6 +572,24 @@ fn type_name(meta: u8) -> &'static str {
         b if b == ValueType::Json as u8 => "json",
         _ => "unknown",
     }
+}
+
+/// The metadata byte for a Redis type name, or `None` for names not produced
+/// by [`type_name`] (a `SCAN ... TYPE` filter with such a name matches
+/// nothing, matching Redis).
+pub fn type_byte(name: &[u8]) -> Option<u8> {
+    Some(match name {
+        b"string" => ValueType::String as u8,
+        b"list" => ValueType::List as u8,
+        b"set" => ValueType::Set as u8,
+        b"zset" => ValueType::SortedSet as u8,
+        b"hash" => ValueType::Hash as u8,
+        b"stream" => ValueType::Stream as u8,
+        b"vectorset" => ValueType::VectorSet as u8,
+        b"bloom" => ValueType::Bloom as u8,
+        b"json" => ValueType::Json as u8,
+        _ => return None,
+    })
 }
 
 // --- WireOp halves ---
@@ -533,6 +686,38 @@ impl WireOp for TypeWire {
                 Ok(name) => RespValue::SimpleString(Bytes::copy_from_slice(name.as_bytes())),
                 Err(_) => {
                     RespValue::Error(Bytes::from_static(b"ERR internal error: bad type result"))
+                }
+            },
+            Err(e) => err_resp(&e),
+        }
+    }
+}
+
+/// Replies the two-element `SCAN` array: `[next cursor, [key ...]]`.
+struct ScanWire;
+
+impl WireOp for ScanWire {
+    fn reply(&self, result: Result<DbResult, DbError>) -> RespValue {
+        match result {
+            Ok(res) => match res.downcast::<ScanResult>() {
+                Ok(boxed) => {
+                    let cursor = if boxed.cursor.is_empty() {
+                        Bytes::from_static(b"0")
+                    } else {
+                        Bytes::copy_from_slice(&boxed.cursor)
+                    };
+                    let keys = boxed
+                        .keys
+                        .iter()
+                        .map(|k| RespValue::BulkString(Some(Bytes::copy_from_slice(k))))
+                        .collect();
+                    RespValue::Array(Some(vec![
+                        RespValue::BulkString(Some(cursor)),
+                        RespValue::Array(Some(keys)),
+                    ]))
+                }
+                Err(_) => {
+                    RespValue::Error(Bytes::from_static(b"ERR internal error: bad scan result"))
                 }
             },
             Err(e) => err_resp(&e),
@@ -779,5 +964,142 @@ mod tests {
         let keys = [Bytes::from_static(b"k1"), Bytes::from_static(b"k2")];
         let reply = exec(&session, exists(&session, &keys)).await;
         assert_eq!(expect_int(&reply), 0);
+    }
+
+    /// Runs a SCAN op and extracts `(cursor, keys)` from the reply.
+    async fn run_scan(
+        session: &Session,
+        cursor: &[u8],
+        count: usize,
+        pattern: Option<&[u8]>,
+    ) -> (Vec<u8>, Vec<Vec<u8>>) {
+        let reply = exec(
+            session,
+            scan(session, cursor, count, pattern.map(|p| p.to_vec()), None),
+        )
+        .await;
+        match reply {
+            RespValue::Array(Some(items)) if items.len() == 2 => {
+                let cursor = match &items[0] {
+                    RespValue::BulkString(Some(c)) => c.to_vec(),
+                    other => panic!("expected bulk cursor, got {other:?}"),
+                };
+                let keys = match &items[1] {
+                    RespValue::Array(Some(keys)) => keys
+                        .iter()
+                        .map(|k| match k {
+                            RespValue::BulkString(Some(k)) => k.to_vec(),
+                            other => panic!("expected bulk key, got {other:?}"),
+                        })
+                        .collect(),
+                    other => panic!("expected key array, got {other:?}"),
+                };
+                (cursor, keys)
+            }
+            other => panic!("expected scan array, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn scan_empty_keyspace_returns_zero_cursor() {
+        let session = test_session();
+        let (cursor, keys) = run_scan(&session, b"0", 10, None).await;
+        assert_eq!(cursor, b"0".to_vec());
+        assert!(keys.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scan_returns_all_public_keys() {
+        let session = test_session();
+        for k in [b"a".as_slice(), b"b", b"c", b"d", b"e"] {
+            seed_string(&session, k, b"v").await;
+        }
+
+        let (cursor, keys) = run_scan(&session, b"0", 10, None).await;
+        assert_eq!(cursor, b"0".to_vec());
+        assert_eq!(keys, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec(), b"e".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn scan_paginates_with_cursor() {
+        let session = test_session();
+        for k in [b"k1".as_slice(), b"k2", b"k3"] {
+            seed_string(&session, k, b"v").await;
+        }
+
+        let (cursor, keys) = run_scan(&session, b"0", 2, None).await;
+        assert_eq!(keys, vec![b"k1".to_vec(), b"k2".to_vec()]);
+        assert_eq!(cursor, b"k2".to_vec());
+
+        let (cursor, keys) = run_scan(&session, &cursor, 2, None).await;
+        assert_eq!(keys, vec![b"k3".to_vec()]);
+        assert_eq!(cursor, b"0".to_vec());
+    }
+
+    #[tokio::test]
+    async fn scan_hides_internal_keys() {
+        let session = test_session();
+        seed_string(&session, b"pub", b"v").await;
+
+        let store = session.store();
+        let tx = store.begin(true).await.expect("tx");
+        tx.set(Entry::new(b"-0:internal".to_vec(), b"v".to_vec()).metadata(ValueType::String as u8))
+            .expect("seed internal");
+        tx.commit().await.expect("commit");
+
+        let (cursor, keys) = run_scan(&session, b"0", 10, None).await;
+        assert_eq!(cursor, b"0".to_vec());
+        assert_eq!(keys, vec![b"pub".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn scan_matches_pattern() {
+        let session = test_session();
+        for k in [b"foo1".as_slice(), b"bar", b"foo2"] {
+            seed_string(&session, k, b"v").await;
+        }
+
+        let (cursor, keys) = run_scan(&session, b"0", 10, Some(b"foo*")).await;
+        assert_eq!(cursor, b"0".to_vec());
+        assert_eq!(keys, vec![b"foo1".to_vec(), b"foo2".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn scan_filters_by_type() {
+        let session = test_session();
+        seed_string(&session, b"s", b"v").await;
+        let store = session.store();
+        let tx = store.begin(true).await.expect("tx");
+        tx.set(
+            Entry::new(session.public_key(b"l"), b"v".to_vec()).metadata(ValueType::List as u8),
+        )
+        .expect("seed list");
+        tx.commit().await.expect("commit");
+
+        let reply = exec(
+            &session,
+            scan(&session, b"0", 10, None, Some(ValueType::String as u8)),
+        )
+        .await;
+        let (cursor, keys) = match reply {
+            RespValue::Array(Some(items)) if items.len() == 2 => match &items[1] {
+                RespValue::Array(Some(keys)) => (
+                    match &items[0] {
+                        RespValue::BulkString(Some(c)) => c.to_vec(),
+                        other => panic!("expected bulk cursor, got {other:?}"),
+                    },
+                    keys.iter()
+                        .map(|k| match k {
+                            RespValue::BulkString(Some(k)) => k.to_vec(),
+                            other => panic!("expected bulk key, got {other:?}"),
+                        })
+                        .collect::<Vec<Vec<u8>>>(),
+                ),
+                other => panic!("expected key array, got {other:?}"),
+            },
+            other => panic!("expected scan array, got {other:?}"),
+        };
+        assert_eq!(cursor, b"0".to_vec());
+        assert_eq!(keys, vec![b"s".to_vec()]);
     }
 }

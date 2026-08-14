@@ -211,7 +211,7 @@ async fn load_all_members(tx: &dyn Tx, node: &NodeRef) -> Result<Vec<MemberScore
         return Ok(Vec::new());
     }
     let prefix = node.score_prefix();
-    let mut it = tx.new_iterator(&prefix).await?;
+    let mut it = tx.new_prefix_iterator(&prefix).await?;
     let mut result = Vec::new();
     while it.next().await {
         if let Some(item) = it.item() {
@@ -238,7 +238,7 @@ async fn load_all_members(tx: &dyn Tx, node: &NodeRef) -> Result<Vec<MemberScore
 async fn clear_internal_keys(tx: &dyn Tx, node: &NodeRef) -> Result<(), DbError> {
     let mut score_keys = Vec::new();
     {
-        let mut it = tx.new_iterator(&node.score_prefix()).await?;
+        let mut it = tx.new_prefix_iterator(&node.score_prefix()).await?;
         while it.next().await {
             if let Some(item) = it.item() {
                 score_keys.push(item.key().to_vec());
@@ -253,7 +253,7 @@ async fn clear_internal_keys(tx: &dyn Tx, node: &NodeRef) -> Result<(), DbError>
     }
     let mut member_keys = Vec::new();
     {
-        let mut it = tx.new_iterator(&node.member_prefix()).await?;
+        let mut it = tx.new_prefix_iterator(&node.member_prefix()).await?;
         while it.next().await {
             if let Some(item) = it.item() {
                 member_keys.push(item.key().to_vec());

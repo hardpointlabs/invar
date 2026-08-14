@@ -581,7 +581,7 @@ impl DbOp for HKeysOp {
                 Err(e) => return Err(e.into()),
             }
 
-            let mut it = tx.new_iterator(&fields_prefix(&node_prefix)).await?;
+            let mut it = tx.new_prefix_iterator(&fields_prefix(&node_prefix)).await?;
             let mut keys: Vec<Vec<u8>> = Vec::new();
             while it.next().await {
                 if let Some(item) = it.item() {
@@ -620,7 +620,7 @@ impl DbOp for HValsOp {
                 Err(e) => return Err(e.into()),
             }
 
-            let mut it = tx.new_iterator(&fields_prefix(&node_prefix)).await?;
+            let mut it = tx.new_prefix_iterator(&fields_prefix(&node_prefix)).await?;
             let mut vals: Vec<Vec<u8>> = Vec::new();
             while it.next().await {
                 if let Some(item) = it.item() {
@@ -659,7 +659,7 @@ impl DbOp for HGetAllOp {
                 Err(e) => return Err(e.into()),
             }
 
-            let mut it = tx.new_iterator(&fields_prefix(&node_prefix)).await?;
+            let mut it = tx.new_prefix_iterator(&fields_prefix(&node_prefix)).await?;
             let mut pairs: Vec<Vec<u8>> = Vec::new();
             while it.next().await {
                 if let Some(item) = it.item() {
@@ -810,7 +810,7 @@ impl DbOp for HRandFieldOp {
                 Err(e) => return Err(e.into()),
             }
 
-            let mut it = tx.new_iterator(&fields_prefix(&node_prefix)).await?;
+            let mut it = tx.new_prefix_iterator(&fields_prefix(&node_prefix)).await?;
             let mut field_list: Vec<Vec<u8>> = Vec::new();
             let mut val_list: Vec<Vec<u8>> = Vec::new();
             while it.next().await {
@@ -933,7 +933,7 @@ impl DbOp for HScanOp {
             }
 
             let match_pattern = !pattern.is_empty();
-            let mut it = tx.new_iterator(&fields_prefix(&node_prefix)).await?;
+            let mut it = tx.new_prefix_iterator(&fields_prefix(&node_prefix)).await?;
             let mut pairs: Vec<Vec<u8>> = Vec::new();
             while it.next().await {
                 if let Some(item) = it.item() {
