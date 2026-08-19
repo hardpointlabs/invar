@@ -36,7 +36,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_stream::StreamExt as TokioStreamExt;
 use tokio_util::codec::Framed;
 
-use crate::commands::dispatch_command;
+use crate::commands::enqueue_command;
 use crate::common::{RedisStore, Session, WatchRegistry};
 use crate::pubsub::{
     message_resp, pmessage_resp, psubscribe_resp, punsubscribe_resp, ssubscribe_resp,
@@ -233,7 +233,7 @@ async fn handle_connection(
                     if is_sub_cmd && session.in_multi() {
                         // Inside MULTI: route through dispatch_command which will
                         // dirty the transaction and return an error.
-                        let replies = dispatch_command(&mut session, &args).await;
+                        let replies = enqueue_command(&mut session, &args).await;
                         for reply in replies {
                             framed.send(reply).await?;
                         }
@@ -268,7 +268,7 @@ async fn handle_connection(
                             }
                             _ => {
                                 // Normal command dispatch.
-                                let replies = dispatch_command(&mut session, &args).await;
+                                let replies = enqueue_command(&mut session, &args).await;
                                 for reply in replies {
                                     framed.send(reply).await?;
                                 }

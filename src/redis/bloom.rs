@@ -509,6 +509,7 @@ pub fn reserve(
         }),
         wire_op: Box::new(OkWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 
@@ -522,6 +523,7 @@ pub fn add(session: &Session, key: &[u8], item: &[u8]) -> QueuedOp {
         }),
         wire_op: Box::new(IntWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 
@@ -535,6 +537,7 @@ pub fn exists(session: &Session, key: &[u8], item: &[u8]) -> QueuedOp {
         }),
         wire_op: Box::new(BoolIntWire),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 
@@ -548,6 +551,7 @@ pub fn madd(session: &Session, key: &[u8], items: &[Bytes]) -> QueuedOp {
         }),
         wire_op: Box::new(IntArrayWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 
@@ -561,6 +565,7 @@ pub fn mexists(session: &Session, key: &[u8], items: &[Bytes]) -> QueuedOp {
         }),
         wire_op: Box::new(IntArrayWire),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 
@@ -586,6 +591,7 @@ pub fn insert(session: &Session, key: &[u8], info: InsertInfo) -> QueuedOp {
         }),
         wire_op: Box::new(IntArrayWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 
@@ -597,6 +603,7 @@ pub fn info(session: &Session, key: &[u8]) -> QueuedOp {
         }),
         wire_op: Box::new(InfoWire),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 

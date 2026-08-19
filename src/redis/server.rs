@@ -7,14 +7,15 @@
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use bytes::Bytes;
-
-use crate::common::op::{DbError, DbResult, NoOp, QueuedOp, WireOp};
+use kv::kv::{BoxFuture, Tx};
+use crate::common::DbOp;
+use crate::common::op::{DbError, DbResult, DefaultWire, NoOp, QueuedOp, WireOp};
 use crate::common::session::Session;
-use crate::conn;
+use crate::{conn, RedisStore};
 use crate::resp::RespValue;
 
 /// The Redis wire-protocol version Invar claims compatibility with. Reported
@@ -66,6 +67,74 @@ pub fn info() -> QueuedOp {
             reply: RespValue::BulkString(Some(Bytes::from(info_string()))),
         }),
         is_mutating: false,
+        allowed_in_tx: true,
+    }
+}
+
+struct SaveOp {
+    store: Arc<dyn RedisStore>,
+}
+
+impl DbOp for SaveOp {
+    fn run<'a>(&'a self, _tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
+        Box::pin(async move {
+            self.store.sync().await?;
+            Ok(Box::new(()) as DbResult)
+        })
+    }
+}
+
+pub fn save(session: Session) -> QueuedOp {
+    QueuedOp {
+        db_op: Box::new(SaveOp { store: session.store() }),
+        wire_op: Box::new(DefaultWire),
+        is_mutating: false,
+        allowed_in_tx: false,
+    }
+}
+
+struct FlushAllOp {
+    store: Arc<dyn RedisStore>,
+}
+
+impl DbOp for FlushAllOp {
+    fn run<'a>(&'a self, _tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
+        Box::pin(async move {
+            self.store.destroy().await?;
+            Ok(Box::new(()) as DbResult)
+        })
+    }
+}
+
+pub fn flushall(session: &Session) -> QueuedOp {
+    QueuedOp {
+        db_op: Box::new(FlushAllOp { store: session.store() }),
+        wire_op: Box::new(DefaultWire),
+        is_mutating: false,
+        allowed_in_tx: false,
+    }
+}
+
+struct FlushDbOp {
+    store: Arc<dyn RedisStore>,
+    prefix: Bytes,
+}
+
+impl DbOp for FlushDbOp {
+    fn run<'a>(&'a self, _tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
+        Box::pin(async move {
+            self.store.drop_prefix(self.prefix.as_ref()).await?;
+            Ok(Box::new(()) as DbResult)
+        })
+    }
+}
+
+pub fn flushdb(session: &Session) -> QueuedOp {
+    QueuedOp {
+        db_op: Box::new(FlushDbOp { store: session.store(), prefix: Bytes::from(session.prefix()) }),
+        wire_op: Box::new(DefaultWire),
+        is_mutating: false,
+        allowed_in_tx: false,
     }
 }
 
@@ -226,6 +295,7 @@ pub fn hello(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         db_op: Box::new(NoOp),
         wire_op: Box::new(FixedReply { reply }),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 
@@ -290,6 +360,7 @@ pub fn client(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         db_op: Box::new(NoOp),
         wire_op: Box::new(FixedReply { reply }),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 

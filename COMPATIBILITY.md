@@ -218,6 +218,14 @@ in this implementation.
 
 ---
 
+## Scripting commands
+
+| Command | Status | Notes |
+|---------|--------|-------|
+| EVAL | ✅ | Piccolo-backed Lua interpreter; core stdlib only (no I/O); `KEYS`/`ARGV` exposed; Redis commands not exposed yet |
+
+---
+
 ## Connection commands
 
 | Command | Status | Notes |

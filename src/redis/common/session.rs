@@ -313,11 +313,14 @@ impl Session {
     }
 
     /// Enqueues a wire-only op (one with no database effect).
+    /// TODO is this smart? can't we just apply some sugar to QueuedOp creation and run wire-only
+    /// ops through `enqueue_op()`?
     pub fn enqueue_wire_op(&mut self, wire_op: Box<dyn WireOp>) -> Option<RespValue> {
         self.enqueue_op(QueuedOp {
             db_op: Box::new(NoOp),
             wire_op,
             is_mutating: false,
+            allowed_in_tx: true,
         })
     }
 

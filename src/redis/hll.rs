@@ -320,6 +320,7 @@ pub fn pfadd(session: &Session, key: &[u8], elements: &[Bytes]) -> QueuedOp {
         }),
         wire_op: Box::new(IntWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 
@@ -333,6 +334,7 @@ pub fn pfcount(session: &Session, keys: &[Bytes]) -> QueuedOp {
         }),
         wire_op: Box::new(CountWire),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 
@@ -347,6 +349,7 @@ pub fn pfmerge(session: &Session, dest: &[u8], sources: &[Bytes]) -> QueuedOp {
         }),
         wire_op: Box::new(OkWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 

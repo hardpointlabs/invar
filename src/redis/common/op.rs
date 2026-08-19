@@ -15,7 +15,7 @@ use std::any::Any;
 
 use bytes::Bytes;
 use kv::kv::{BoxFuture, Error as KvError, Tx};
-
+use crate::resp;
 use crate::resp::RespValue;
 
 /// Opaque result of a [`DbOp`], analogous to Go's `any`. The corresponding
@@ -62,7 +62,13 @@ pub trait DbOp: Send + 'static {
     /// Runs the KV operations against `tx`. The returned future may borrow
     /// both `self` and `tx`; the dispatcher awaits it to completion before
     /// running the next op.
-    fn run<'a>(&'a self, tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>>;
+    /// The default implementation is a no-op, making no changes to the `KeyValueStore`
+    fn run<'a>(&'a self, _tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
+        Box::pin(async move {
+            let result: DbResult = Box::new(());
+            Ok(result)
+        })
+    }
 
     /// Called by the dispatcher when a transaction that ran this op failed to
     /// commit, so any waiter claims embedded in `result` can be returned to
@@ -74,8 +80,17 @@ pub trait DbOp: Send + 'static {
 /// RESP reply the client receives. Runs after the transaction commits, or
 /// with an error if it failed.
 pub trait WireOp: Send + 'static {
-    fn reply(&self, result: Result<DbResult, DbError>) -> RespValue;
+    fn reply(&self, result: Result<DbResult, DbError>) -> RespValue {
+        match result {
+            Ok(_) => resp::ok_resp(),
+            Err(e) => RespValue::Error(Bytes::from(e.to_string())),
+        }
+    }
 }
+
+pub struct DefaultWire;
+
+impl WireOp for DefaultWire {}
 
 /// A command split into its database and wire halves, as returned by command
 /// implementations.
@@ -84,17 +99,21 @@ pub struct QueuedOp {
     pub wire_op: Box<dyn WireOp>,
     /// Whether this op must run inside a writable transaction.
     pub is_mutating: bool,
+    /// Whether this op is allowed to be enqueued inside a MULTI transactional block
+    pub allowed_in_tx: bool,
 }
 
 /// A [`DbOp`] with no database effect, used for wire-only commands such as
 /// `PING` and `ECHO`.
 pub struct NoOp;
 
-impl DbOp for NoOp {
-    fn run<'a>(&'a self, _tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
-        Box::pin(async move {
-            let result: DbResult = Box::new(());
-            Ok(result)
-        })
+impl DbOp for NoOp {}
+
+pub fn wire_only_op(wire_op: Box<dyn WireOp>, allowed_in_tx: bool) -> QueuedOp {
+    QueuedOp {
+        db_op: Box::new(NoOp),
+        wire_op,
+        is_mutating: false,
+        allowed_in_tx,
     }
 }

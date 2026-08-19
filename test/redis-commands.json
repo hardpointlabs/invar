@@ -2521,5 +2521,77 @@
     "type": "error",
     "version": "7.2.0",
     "description": "SCAN rejects unknown option tokens"
+  },
+  {
+    "name": "EVAL returns integer",
+    "command": ["EVAL", "return 1", "0"],
+    "expected": 1,
+    "type": "integer",
+    "version": "7.2.0",
+    "description": "A script returning an integer gets an integer reply"
+  },
+  {
+    "name": "EVAL returns string",
+    "command": ["EVAL", "return 'hello'", "0"],
+    "expected": "hello",
+    "type": "bulk_string",
+    "version": "7.2.0",
+    "description": "A script returning a string gets a bulk string reply"
+  },
+  {
+    "name": "EVAL returns nil",
+    "command": ["EVAL", "return nil", "0"],
+    "expected": null,
+    "type": "null",
+    "version": "7.2.0",
+    "description": "A script returning nil gets a null reply"
+  },
+  {
+    "name": "EVAL returns array",
+    "command": ["EVAL", "return {1, 2, 3}", "0"],
+    "expected": [1, 2, 3],
+    "type": "array",
+    "version": "7.2.0",
+    "description": "A script returning a sequential table gets an array reply"
+  },
+  {
+    "name": "EVAL returns nested array",
+    "command": ["EVAL", "return {1, {2, 3}}", "0"],
+    "expected": [1, [2, 3]],
+    "type": "array",
+    "version": "7.2.0",
+    "description": "Nested tables are converted recursively"
+  },
+  {
+    "name": "EVAL sees KEYS and ARGV",
+    "command": ["EVAL", "return KEYS[1] .. ':' .. ARGV[1]", "1", "invar_eval_key", "invar_eval_arg"],
+    "expected": "invar_eval_key:invar_eval_arg",
+    "type": "bulk_string",
+    "version": "7.2.0",
+    "description": "The script sees the KEYS and ARGV tables"
+  },
+  {
+    "name": "EVAL reports runtime errors",
+    "command": ["EVAL", "error('boom')", "0"],
+    "expected": {"error": true},
+    "type": "error",
+    "version": "7.2.0",
+    "description": "A runtime error in the script surfaces as an error reply"
+  },
+  {
+    "name": "EVAL rejects invalid numkeys",
+    "command": ["EVAL", "return 1", "notanumber"],
+    "expected": {"error": true},
+    "type": "error",
+    "version": "7.2.0",
+    "description": "EVAL numkeys must be an integer"
+  },
+  {
+    "name": "EVAL requires a script and numkeys",
+    "command": ["EVAL", "return 1"],
+    "expected": {"error": true},
+    "type": "error",
+    "version": "7.2.0",
+    "description": "EVAL requires at least a script and numkeys"
   }
 ]

@@ -55,6 +55,9 @@ use dashmap::DashMap;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamMap;
+use crate::common::{op, DbError, DbOp, DbResult, QueuedOp, WireOp};
+use crate::common::op::NoOp;
+use crate::RespValue;
 
 /// Capacity of each per-channel/per-pattern broadcast channel.  Slow consumers
 /// that fall more than this many messages behind receive a
@@ -190,7 +193,13 @@ impl PubSubRegistry {
 
     /// Returns all channel names with at least one active subscriber,
     /// optionally filtered by a glob pattern.
-    pub fn active_channels(&self, pattern: Option<&[u8]>) -> Vec<Bytes> {
+    pub fn active_channels(self: Arc<Self>, pattern: Option<&[u8]>) -> QueuedOp {
+        op::wire_only_op(Box::new(ChannelsOp {
+            registry: self, pattern: pattern.map(Bytes::copy_from_slice)
+        }), true)
+    }
+
+    fn active_channels_val(&self, pattern: Option<&[u8]>) -> Vec<Bytes> {
         self.channels
             .iter()
             .filter(|e| e.value().receiver_count() > 0)
@@ -203,7 +212,7 @@ impl PubSubRegistry {
 
     /// Returns the subscriber count for each of the given channel names.
     /// The result is a flat `[(channel, count), ...]` vec in the same order.
-    pub fn numsub(&self, channels: &[Bytes]) -> Vec<(Bytes, i64)> {
+    fn numsub_value(&self, channels: &[Bytes]) -> Vec<(Bytes, i64)> {
         channels
             .iter()
             .map(|ch| {
@@ -217,12 +226,40 @@ impl PubSubRegistry {
             .collect()
     }
 
-    /// Returns the number of active pattern subscriptions.
-    pub fn numpat(&self) -> i64 {
+    fn number_pattern_subscribers(&self) -> i64 {
         self.patterns
             .iter()
             .filter(|e| e.value().receiver_count() > 0)
             .count() as i64
+    }
+
+    /// Returns the number of active pattern subscriptions.
+    pub fn numpat(self: Arc<Self>) -> QueuedOp {
+        op::wire_only_op(Box::new(NumPatOp { registry: self }), true)
+    }
+
+    pub fn numsub(self: Arc<Self>, channels: Vec<Bytes>) -> QueuedOp {
+        op::wire_only_op(Box::new(NumSubOp { registry: self, channels: channels }), true)
+    }
+
+    /// Returns a [`QueuedOp`] that publishes `payload` to `channel` when executed.
+    ///
+    /// The publish happens inside the `WireOp` (after transaction commit) because
+    /// pub/sub delivery should not be rolled back if the enclosing transaction
+    /// fails for unrelated reasons — this matches real Redis semantics where
+    /// `PUBLISH` inside `MULTI` always fires when `EXEC` runs.
+    pub fn publish_op(self: Arc<Self>, channel: Bytes, payload: Bytes,
+    ) -> QueuedOp {
+        QueuedOp {
+            db_op: Box::new(PublishDbOp),
+            wire_op: Box::new(PublishWireOp {
+                registry: self,
+                channel,
+                payload,
+            }),
+            is_mutating: false,
+            allowed_in_tx: true,
+        }
     }
 }
 
@@ -588,6 +625,100 @@ fn redis_glob_match_inner(mut pat: &[u8], mut s: &[u8], nocase: bool) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+
+struct NumSubOp {
+    registry: Arc<PubSubRegistry>,
+    channels: Vec<Bytes>,
+}
+
+impl WireOp for NumSubOp {
+    fn reply(&self, _result: Result<DbResult, DbError>) -> RespValue {
+        let counts = self.registry.numsub_value(self.channels.as_slice());
+        let mut flat = Vec::with_capacity(counts.len() * 2);
+        for (ch, count) in counts {
+            flat.push(RespValue::BulkString(Some(ch)));
+            flat.push(RespValue::Integer(count));
+        }
+        RespValue::Array(Some(flat))
+    }
+}
+
+struct PublishDbOp;
+
+impl DbOp for PublishDbOp {}
+
+struct PublishWireOp {
+    registry: Arc<PubSubRegistry>,
+    channel: Bytes,
+    payload: Bytes,
+}
+
+impl WireOp for PublishWireOp {
+    fn reply(&self, result: Result<DbResult, DbError>) -> RespValue {
+        match result {
+            Ok(_) => {
+                let count = self.registry.publish(&self.channel, self.payload.clone());
+                RespValue::Integer(count)
+            }
+            Err(e) => crate::common::op::err_resp(&e),
+        }
+    }
+}
+
+struct HelpOp;
+
+impl WireOp for HelpOp {
+    fn reply(&self, _result: Result<DbResult, DbError>) -> RespValue {
+        RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(Bytes::from_static(b"PUBSUB <subcommand> [<arg> [value] [opt] ...]. subcommands are:"))),
+            RespValue::BulkString(Some(Bytes::from_static(b"CHANNELS [<pattern>] -- Return the currently active channels matching a pattern (default: all)."))),
+            RespValue::BulkString(Some(Bytes::from_static(b"NUMSUB [<channel> ...] -- Return listen count for channels."))),
+            RespValue::BulkString(Some(Bytes::from_static(b"NUMPAT -- Return the number of active patterns."))),
+        ]))
+    }
+}
+
+pub fn help() -> QueuedOp {
+    QueuedOp {
+        db_op: Box::new(NoOp),
+        wire_op: Box::new(HelpOp),
+        is_mutating: false,
+        allowed_in_tx: true,
+    }
+}
+
+struct NumPatOp {
+    registry: Arc<PubSubRegistry>,
+}
+
+impl WireOp for NumPatOp {
+    fn reply(&self, _result: Result<DbResult, DbError>) -> RespValue {
+        let num = self.registry.number_pattern_subscribers();
+        RespValue::Integer(num)
+    }
+}
+
+struct ChannelsOp {
+    registry: Arc<PubSubRegistry>,
+    pattern: Option<Bytes>,
+}
+
+impl WireOp for ChannelsOp {
+    fn reply(&self, result: Result<DbResult, DbError>) -> RespValue {
+        let pattern = &self.pattern;
+        let channels: Vec<Bytes> = self.registry.active_channels_val(pattern.as_ref().map({|p| p.as_ref()}));
+
+        RespValue::Array(Some(
+            channels
+                .into_iter()
+                .map(|c| RespValue::BulkString(Some(c)))
+                .collect(),
+        ))
+    }
+}
+
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -802,7 +933,7 @@ mod tests {
         let _r3 = reg.subscribe_channel(Bytes::from_static(b"ch2"));
         let _rp = reg.subscribe_pattern(Bytes::from_static(b"ch*"));
 
-        let ns = reg.numsub(&[
+        let ns = reg.numsub_value(&[
             Bytes::from_static(b"ch1"),
             Bytes::from_static(b"ch2"),
             Bytes::from_static(b"ch3"),
@@ -811,7 +942,7 @@ mod tests {
         assert_eq!(ns[1].1, 1); // ch2 has 1
         assert_eq!(ns[2].1, 0); // ch3 has 0
 
-        assert_eq!(reg.numpat(), 1);
+        assert_eq!(reg.number_pattern_subscribers(), 1);
     }
 
     #[tokio::test]
@@ -821,10 +952,10 @@ mod tests {
         let _r2 = reg.subscribe_channel(Bytes::from_static(b"bar"));
         let _r3 = reg.subscribe_channel(Bytes::from_static(b"foobar"));
 
-        let all = reg.active_channels(None);
+        let all = reg.active_channels_val(None);
         assert_eq!(all.len(), 3);
 
-        let mut foo = reg.active_channels(Some(b"foo*"));
+        let mut foo = reg.active_channels_val(Some(b"foo*"));
         foo.sort();
         assert_eq!(foo.len(), 2);
         assert!(foo.contains(&Bytes::from_static(b"foo")));

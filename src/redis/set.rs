@@ -232,6 +232,7 @@ pub fn sadd(session: &Session, key: &[u8], members: &[Bytes]) -> QueuedOp {
         }),
         wire_op: Box::new(IntWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 
@@ -246,6 +247,7 @@ pub fn srem(session: &Session, key: &[u8], members: &[Bytes]) -> QueuedOp {
         }),
         wire_op: Box::new(IntWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 
@@ -257,6 +259,7 @@ pub fn scard(session: &Session, key: &[u8]) -> QueuedOp {
         }),
         wire_op: Box::new(IntWire),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 
@@ -269,6 +272,7 @@ pub fn smembers(session: &Session, key: &[u8]) -> QueuedOp {
         }),
         wire_op: Box::new(BulkArrayWire),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 
@@ -282,6 +286,7 @@ pub fn sismember(session: &Session, key: &[u8], member: &[u8]) -> QueuedOp {
         }),
         wire_op: Box::new(BoolWire),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 
@@ -294,6 +299,7 @@ pub fn spop(session: &Session, key: &[u8]) -> QueuedOp {
         }),
         wire_op: Box::new(NullableBulkWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 
@@ -309,6 +315,7 @@ pub fn srandmember(session: &Session, key: &[u8], count: i64) -> QueuedOp {
         }),
         wire_op: Box::new(SRandMemberWire { count }),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 
@@ -325,6 +332,7 @@ pub fn smove(session: &Session, src: &[u8], dst: &[u8], member: &[u8]) -> Queued
         }),
         wire_op: Box::new(BoolWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 
@@ -335,6 +343,7 @@ pub fn sdiff(session: &Session, keys: &[Bytes]) -> QueuedOp {
         db_op: Box::new(BinarySetOp::new(session, keys, BinarySetOpKind::Diff)),
         wire_op: Box::new(BulkArrayWire),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 
@@ -344,6 +353,7 @@ pub fn sinter(session: &Session, keys: &[Bytes]) -> QueuedOp {
         db_op: Box::new(BinarySetOp::new(session, keys, BinarySetOpKind::Inter)),
         wire_op: Box::new(BulkArrayWire),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 
@@ -353,6 +363,7 @@ pub fn sunion(session: &Session, keys: &[Bytes]) -> QueuedOp {
         db_op: Box::new(BinarySetOp::new(session, keys, BinarySetOpKind::Union)),
         wire_op: Box::new(BulkArrayWire),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 
@@ -363,6 +374,7 @@ pub fn sdiffstore(session: &Session, dest: &[u8], keys: &[Bytes]) -> QueuedOp {
         db_op: Box::new(StoreOp::new(session, dest, keys, BinarySetOpKind::Diff)),
         wire_op: Box::new(IntWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 
@@ -373,6 +385,7 @@ pub fn sinterstore(session: &Session, dest: &[u8], keys: &[Bytes]) -> QueuedOp {
         db_op: Box::new(StoreOp::new(session, dest, keys, BinarySetOpKind::Inter)),
         wire_op: Box::new(IntWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 
@@ -383,6 +396,7 @@ pub fn sunionstore(session: &Session, dest: &[u8], keys: &[Bytes]) -> QueuedOp {
         db_op: Box::new(StoreOp::new(session, dest, keys, BinarySetOpKind::Union)),
         wire_op: Box::new(IntWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 

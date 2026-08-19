@@ -533,6 +533,7 @@ pub fn lpush(session: &Session, key: &[u8], values: &[Bytes]) -> QueuedOp {
         }),
         wire_op: Box::new(IntWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 
@@ -548,6 +549,7 @@ pub fn rpush(session: &Session, key: &[u8], values: &[Bytes]) -> QueuedOp {
         }),
         wire_op: Box::new(IntWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 
@@ -564,6 +566,7 @@ pub fn lpushx(session: &Session, key: &[u8], value: &[u8]) -> QueuedOp {
         }),
         wire_op: Box::new(IntWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 
@@ -580,6 +583,7 @@ pub fn rpushx(session: &Session, key: &[u8], value: &[u8]) -> QueuedOp {
         }),
         wire_op: Box::new(IntWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 
@@ -593,6 +597,7 @@ pub fn lpop(session: &Session, key: &[u8]) -> QueuedOp {
         }),
         wire_op: Box::new(NullableBulkWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 
@@ -606,6 +611,7 @@ pub fn rpop(session: &Session, key: &[u8]) -> QueuedOp {
         }),
         wire_op: Box::new(NullableBulkWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 
@@ -617,6 +623,7 @@ pub fn llen(session: &Session, key: &[u8]) -> QueuedOp {
         }),
         wire_op: Box::new(IntWire),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 
@@ -632,6 +639,7 @@ pub fn lrange(session: &Session, key: &[u8], start: i64, stop: i64) -> QueuedOp 
         }),
         wire_op: Box::new(BulkArrayWire),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 
@@ -646,6 +654,7 @@ pub fn lindex(session: &Session, key: &[u8], index: i64) -> QueuedOp {
         }),
         wire_op: Box::new(NullableBulkWire),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 
@@ -661,6 +670,7 @@ pub fn lset(session: &Session, key: &[u8], index: i64, value: &[u8]) -> QueuedOp
         }),
         wire_op: Box::new(LSetWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 
@@ -676,6 +686,7 @@ pub fn lrem(session: &Session, key: &[u8], count: i64, value: &[u8]) -> QueuedOp
         }),
         wire_op: Box::new(IntWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 
@@ -690,6 +701,7 @@ pub fn ltrim(session: &Session, key: &[u8], start: i64, stop: i64) -> QueuedOp {
         }),
         wire_op: Box::new(OkWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 
@@ -712,6 +724,7 @@ pub fn linsert(
         }),
         wire_op: Box::new(IntWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 

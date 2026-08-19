@@ -28,9 +28,9 @@ use bytes::{Buf, Bytes, BytesMut};
 use thiserror::Error;
 use tokio_util::codec::{Decoder, Encoder};
 
-/// Default maximum length of a bulk string (512 MiB, matching Redis's
+/// Default maximum length of a bulk string (128 MiB, matching Redis's
 /// `PROTO_MAX_BULK_LEN`).
-pub const DEFAULT_MAX_BULK_LEN: usize = 512 * 1024 * 1024;
+pub const DEFAULT_MAX_BULK_LEN: usize = 128 * 1024 * 1024;
 /// Default maximum number of elements in an array (matching Redis's
 /// `PROTO_MAX_MULTIBULK_LEN`).
 pub const DEFAULT_MAX_ARRAY_LEN: usize = 1024 * 1024;
@@ -396,6 +396,10 @@ fn parse_int(buf: &[u8]) -> Result<i64, RespError> {
             .ok_or_else(|| RespError::protocol("integer out of range"))?;
     }
     Ok(if negative { -value } else { value })
+}
+
+pub fn ok_resp() -> RespValue {
+    RespValue::SimpleString(Bytes::from_static(b"OK"))
 }
 
 #[cfg(test)]

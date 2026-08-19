@@ -37,6 +37,7 @@ pub fn exists(session: &Session, keys: &[Bytes]) -> QueuedOp {
         }),
         wire_op: Box::new(IntWire),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 
@@ -49,6 +50,7 @@ pub fn mget(session: &Session, keys: &[Bytes]) -> QueuedOp {
         }),
         wire_op: Box::new(MGetWire),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 
@@ -63,6 +65,7 @@ pub fn move_op(session: &Session, key: &[u8], target_db: i32) -> QueuedOp {
         }),
         wire_op: Box::new(IntWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 
@@ -76,6 +79,7 @@ pub fn rename(session: &Session, old_key: &[u8], new_key: &[u8]) -> QueuedOp {
         }),
         wire_op: Box::new(RenameWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 
@@ -90,6 +94,7 @@ pub fn rename_nx(session: &Session, old_key: &[u8], new_key: &[u8]) -> QueuedOp 
         }),
         wire_op: Box::new(RenameNXWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 
@@ -103,6 +108,7 @@ pub fn expire(session: &Session, key: &[u8], seconds: i64) -> QueuedOp {
         }),
         wire_op: Box::new(IntWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 
@@ -115,6 +121,7 @@ pub fn ttl(session: &Session, key: &[u8]) -> QueuedOp {
         }),
         wire_op: Box::new(IntWire),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 
@@ -127,6 +134,7 @@ pub fn pttl(session: &Session, key: &[u8]) -> QueuedOp {
         }),
         wire_op: Box::new(IntWire),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 
@@ -138,6 +146,7 @@ pub fn key_type(session: &Session, key: &[u8]) -> QueuedOp {
         }),
         wire_op: Box::new(TypeWire),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 
@@ -151,6 +160,7 @@ pub fn del(session: &Session, keys: &[Bytes]) -> QueuedOp {
         }),
         wire_op: Box::new(IntWire),
         is_mutating: true,
+        allowed_in_tx: true,
     }
 }
 
@@ -187,6 +197,7 @@ pub fn scan(
         }),
         wire_op: Box::new(ScanWire),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 
@@ -207,6 +218,7 @@ pub fn idle_time(_: &Session) -> QueuedOp {
         db_op: Box::new(NoOp),
         wire_op: Box::new(NullWire),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 

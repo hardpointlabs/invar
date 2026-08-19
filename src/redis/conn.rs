@@ -34,6 +34,7 @@ pub fn sync() -> QueuedOp {
         db_op: Box::new(NoOp),
         wire_op: Box::new(OkWire),
         is_mutating: false,
+        allowed_in_tx: false,
     }
 }
 
@@ -43,6 +44,7 @@ pub fn wait() -> QueuedOp {
         db_op: Box::new(NoOp),
         wire_op: Box::new(OkWire),
         is_mutating: false,
+        allowed_in_tx: false,
     }
 }
 
@@ -55,6 +57,7 @@ pub fn lolwut(version: &str, commit: &str) -> QueuedOp {
             commit: commit.to_string(),
         }),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 
@@ -64,6 +67,7 @@ pub fn time() -> QueuedOp {
         db_op: Box::new(NoOp),
         wire_op: Box::new(TimeWire),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 
@@ -75,6 +79,7 @@ pub fn module(args: &[Bytes]) -> QueuedOp {
             args: args.to_vec(),
         }),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 
@@ -87,6 +92,7 @@ pub fn bgsave(session: &Session) -> QueuedOp {
             store: session.store(),
         }),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 
@@ -99,6 +105,7 @@ pub fn dbsize(session: &Session) -> QueuedOp {
         }),
         wire_op: Box::new(DbSizeWire),
         is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 
@@ -112,6 +119,27 @@ pub fn ok_op() -> QueuedOp {
         db_op: Box::new(NoOp),
         wire_op: Box::new(OkWire),
         is_mutating: true,
+        allowed_in_tx: true,
+    }
+}
+
+/// A queued op that replies `PONG` with an optional message, if provided
+pub fn ping(msg: Option<Bytes>) -> QueuedOp {
+    QueuedOp {
+        db_op: Box::new(NoOp),
+        wire_op: Box::new(PingOp { msg }),
+        is_mutating: false,
+        allowed_in_tx: true,
+    }
+}
+
+/// A queued op that echoes a message back to the sender
+pub fn echo(msg: Bytes) -> QueuedOp {
+    QueuedOp {
+        db_op: Box::new(NoOp),
+        wire_op: Box::new(EchoOp { msg }),
+        is_mutating: false,
+        allowed_in_tx: true,
     }
 }
 
@@ -232,6 +260,37 @@ impl WireOp for DbSizeWire {
             },
             Err(e) => RespValue::Error(Bytes::from(format!("ERR: {e}"))),
         }
+    }
+}
+
+/// `PING [message]` — replies `+PONG`, or the message as a bulk string.
+pub struct PingOp {
+    msg: Option<Bytes>,
+}
+
+impl WireOp for PingOp {
+    fn reply(
+        &self,
+        _result: Result<crate::common::op::DbResult, crate::common::op::DbError>,
+    ) -> RespValue {
+        match &self.msg {
+            Some(msg) => RespValue::BulkString(Some(msg.clone())),
+            None => RespValue::SimpleString(Bytes::from_static(b"PONG")),
+        }
+    }
+}
+
+/// `ECHO message` — replies with the message as a bulk string.
+pub struct EchoOp {
+    msg: Bytes,
+}
+
+impl WireOp for EchoOp {
+    fn reply(
+        &self,
+        _result: Result<crate::common::op::DbResult, crate::common::op::DbError>,
+    ) -> RespValue {
+        RespValue::BulkString(Some(self.msg.clone()))
     }
 }
 

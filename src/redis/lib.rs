@@ -16,7 +16,6 @@ pub mod keys;
 pub mod list;
 pub mod listener;
 pub mod pubsub;
-pub mod pubsub_cmds;
 pub mod resp;
 pub mod server;
 pub mod set;
@@ -25,6 +24,7 @@ pub mod zset;
 
 #[cfg(test)]
 pub mod testutil;
+mod script;
 
 pub use common::{RedisStore, Session, WatchRegistry};
 pub use listener::RedisListener;
