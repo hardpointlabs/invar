@@ -604,6 +604,7 @@ pub fn zadd(session: &Session, key: &[u8], args: &[Bytes]) -> QueuedOp {
         wire_op: Box::new(ZAddWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -616,6 +617,7 @@ pub fn zcard(session: &Session, key: &[u8]) -> QueuedOp {
         wire_op: Box::new(IntWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -629,6 +631,7 @@ pub fn zscore(session: &Session, key: &[u8], member: &[u8]) -> QueuedOp {
         wire_op: Box::new(ScoreWire::Nullable),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -643,6 +646,7 @@ pub fn zrem(session: &Session, key: &[u8], members: &[Bytes]) -> QueuedOp {
         wire_op: Box::new(IntWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -659,6 +663,7 @@ pub fn zrange(session: &Session, key: &[u8], start: i64, stop: i64, with_scores:
         wire_op: Box::new(BulkArrayWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -681,6 +686,7 @@ pub fn zrevrange(
         wire_op: Box::new(BulkArrayWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -695,6 +701,7 @@ pub fn zrank(session: &Session, key: &[u8], member: &[u8]) -> QueuedOp {
         wire_op: Box::new(NullableIntWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -709,6 +716,7 @@ pub fn zrevrank(session: &Session, key: &[u8], member: &[u8]) -> QueuedOp {
         wire_op: Box::new(NullableIntWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -723,6 +731,7 @@ pub fn zcount(session: &Session, key: &[u8], min_str: &str, max_str: &str) -> Qu
         wire_op: Box::new(IntWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -738,6 +747,7 @@ pub fn zincrby(session: &Session, key: &[u8], increment: f64, member: &[u8]) -> 
         wire_op: Box::new(ScoreWire::Plain),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -769,6 +779,7 @@ pub fn zrangebyscore(
         wire_op: Box::new(BulkArrayWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -800,6 +811,7 @@ pub fn zrevrangebyscore(
         wire_op: Box::new(BulkArrayWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -827,6 +839,7 @@ pub fn zrangebylex(
         wire_op: Box::new(BulkArrayWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -854,6 +867,7 @@ pub fn zrevrangebylex(
         wire_op: Box::new(BulkArrayWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -868,6 +882,7 @@ pub fn zlexcount(session: &Session, key: &[u8], min_str: &str, max_str: &str) ->
         wire_op: Box::new(IntWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -882,6 +897,7 @@ pub fn zremrangebyrank(session: &Session, key: &[u8], start: i64, stop: i64) -> 
         wire_op: Box::new(IntWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -896,6 +912,7 @@ pub fn zremrangebyscore(session: &Session, key: &[u8], min_str: &str, max_str: &
         wire_op: Box::new(IntWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -910,6 +927,7 @@ pub fn zremrangebylex(session: &Session, key: &[u8], min_str: &str, max_str: &st
         wire_op: Box::new(IntWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -924,6 +942,7 @@ pub fn zpopmin(session: &Session, key: &[u8], count: usize) -> QueuedOp {
         wire_op: Box::new(MemberScoreArrayWire { with_scores: true }),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -938,6 +957,7 @@ pub fn zpopmax(session: &Session, key: &[u8], count: usize) -> QueuedOp {
         wire_op: Box::new(MemberScoreArrayWire { with_scores: true }),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -952,6 +972,7 @@ pub fn zmscore(session: &Session, key: &[u8], members: &[Bytes]) -> QueuedOp {
         wire_op: Box::new(ZMScoreWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -968,6 +989,7 @@ pub fn zrandmember(session: &Session, key: &[u8], count: i64) -> QueuedOp {
         }),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -986,6 +1008,7 @@ pub fn zdiff(session: &Session, with_scores: bool, keys: &[Bytes]) -> QueuedOp {
         wire_op: Box::new(BulkArrayWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -1004,6 +1027,7 @@ pub fn zdiffstore(session: &Session, dest: &[u8], keys: &[Bytes]) -> QueuedOp {
         wire_op: Box::new(IntWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -1028,6 +1052,7 @@ pub fn zinter(
         wire_op: Box::new(BulkArrayWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -1052,6 +1077,7 @@ pub fn zinterstore(
         wire_op: Box::new(IntWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -1076,6 +1102,7 @@ pub fn zunion(
         wire_op: Box::new(BulkArrayWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -1100,6 +1127,7 @@ pub fn zunionstore(
         wire_op: Box::new(IntWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -1116,6 +1144,7 @@ pub fn zrangestore(session: &Session, dest: &[u8], src: &[u8], start: i64, stop:
         wire_op: Box::new(IntWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 

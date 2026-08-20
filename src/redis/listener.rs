@@ -961,7 +961,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn multi_with_subscribe_command_aborts_transaction() {
         let (addr, handle) = spawn_listener().await;
         let conn_sock = connect_retry(addr).await;

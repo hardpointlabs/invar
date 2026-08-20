@@ -321,6 +321,7 @@ impl Session {
             wire_op,
             is_mutating: false,
             allowed_in_tx: true,
+        abort_in_tx: false,
         })
     }
 

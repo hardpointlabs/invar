@@ -1030,6 +1030,7 @@ pub(crate) fn set(
         wire_op: Box::new(JsonWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -1092,6 +1093,7 @@ pub fn get(session: &Session, key: &[u8], paths: Vec<String>) -> QueuedOp {
         wire_op: Box::new(JsonWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -1143,6 +1145,7 @@ pub fn del(session: &Session, key: &[u8], paths: Vec<String>) -> QueuedOp {
         wire_op: Box::new(JsonWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -1204,6 +1207,7 @@ pub fn json_type(session: &Session, key: &[u8], path: &[u8]) -> QueuedOp {
         wire_op: Box::new(JsonWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -1241,6 +1245,7 @@ pub(crate) fn arr_append(session: &Session, key: &[u8], path: &[u8], values: Vec
         wire_op: Box::new(JsonWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -1280,6 +1285,7 @@ pub(crate) fn arr_index(session: &Session, key: &[u8], path: &[u8], value: JValu
         wire_op: Box::new(JsonWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -1316,6 +1322,7 @@ pub fn arr_len(session: &Session, key: &[u8], path: &[u8]) -> QueuedOp {
         wire_op: Box::new(JsonWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -1354,6 +1361,7 @@ pub fn num_incr_by(session: &Session, key: &[u8], path: &[u8], delta: f64) -> Qu
         wire_op: Box::new(JsonWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -1393,6 +1401,7 @@ pub fn num_mult_by(session: &Session, key: &[u8], path: &[u8], factor: f64) -> Q
         wire_op: Box::new(JsonWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -1431,6 +1440,7 @@ pub fn obj_keys(session: &Session, key: &[u8], path: &[u8]) -> QueuedOp {
         wire_op: Box::new(JsonWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -1467,6 +1477,7 @@ pub fn obj_len(session: &Session, key: &[u8], path: &[u8]) -> QueuedOp {
         wire_op: Box::new(JsonWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -1505,6 +1516,7 @@ pub fn str_append(session: &Session, key: &[u8], path: &[u8], suffix: String) ->
         wire_op: Box::new(JsonWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -1543,6 +1555,7 @@ pub fn str_len(session: &Session, key: &[u8], path: &[u8]) -> QueuedOp {
         wire_op: Box::new(JsonWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -1578,6 +1591,7 @@ pub fn mget(session: &Session, keys: Vec<Vec<u8>>, path: String) -> QueuedOp {
         wire_op: Box::new(JsonWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -1619,6 +1633,7 @@ pub fn resp(session: &Session, key: &[u8], path: String) -> QueuedOp {
         wire_op: Box::new(JsonWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -1660,6 +1675,7 @@ pub fn clear(session: &Session, key: &[u8], path: &[u8]) -> QueuedOp {
         wire_op: Box::new(JsonWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -1722,6 +1738,7 @@ pub fn arr_pop(session: &Session, key: &[u8], path: &[u8], idx: i64) -> QueuedOp
         wire_op: Box::new(JsonWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -1780,6 +1797,7 @@ pub fn arr_trim(session: &Session, key: &[u8], path: &[u8], start: i64, stop: i6
         wire_op: Box::new(JsonWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -1844,6 +1862,7 @@ pub(crate) fn arr_insert(session: &Session, key: &[u8], path: &[u8], index: i64,
         wire_op: Box::new(JsonWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 

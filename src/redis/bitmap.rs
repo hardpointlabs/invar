@@ -93,6 +93,7 @@ pub fn set_bit(session: &Session, key: &[u8], offset: i64, value: i64) -> Queued
         wire_op: Box::new(IntWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -149,6 +150,7 @@ pub fn get_bit(session: &Session, key: &[u8], offset: i64) -> QueuedOp {
         wire_op: Box::new(IntWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -206,6 +208,7 @@ pub fn bit_count(
         wire_op: Box::new(IntWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -320,6 +323,7 @@ pub fn bit_pos(
         wire_op: Box::new(IntWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -428,6 +432,7 @@ pub fn bit_op(session: &Session, dest_key: &[u8], op: BitOpType, src_keys: &[&[u
         wire_op: Box::new(IntWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 

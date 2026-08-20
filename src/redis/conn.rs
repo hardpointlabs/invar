@@ -35,6 +35,7 @@ pub fn sync() -> QueuedOp {
         wire_op: Box::new(OkWire),
         is_mutating: false,
         allowed_in_tx: false,
+        abort_in_tx: false,
     }
 }
 
@@ -45,6 +46,7 @@ pub fn wait() -> QueuedOp {
         wire_op: Box::new(OkWire),
         is_mutating: false,
         allowed_in_tx: false,
+        abort_in_tx: false,
     }
 }
 
@@ -58,6 +60,7 @@ pub fn lolwut(version: &str, commit: &str) -> QueuedOp {
         }),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -68,6 +71,7 @@ pub fn time() -> QueuedOp {
         wire_op: Box::new(TimeWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -80,6 +84,7 @@ pub fn module(args: &[Bytes]) -> QueuedOp {
         }),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -93,6 +98,7 @@ pub fn bgsave(session: &Session) -> QueuedOp {
         }),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -106,6 +112,7 @@ pub fn dbsize(session: &Session) -> QueuedOp {
         wire_op: Box::new(DbSizeWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -120,6 +127,7 @@ pub fn ok_op() -> QueuedOp {
         wire_op: Box::new(OkWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -130,6 +138,7 @@ pub fn ping(msg: Option<Bytes>) -> QueuedOp {
         wire_op: Box::new(PingOp { msg }),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -140,6 +149,7 @@ pub fn echo(msg: Bytes) -> QueuedOp {
         wire_op: Box::new(EchoOp { msg }),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 

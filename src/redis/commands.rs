@@ -31,6 +31,13 @@ pub async fn enqueue_command(session: &mut Session, args: &[Bytes]) -> Vec<RespV
 
     let cmd = dispatch_command(session, args);
 
+    // Error ops abort the MULTI immediately without being enqueued.
+    // error_op() already called mark_dirty(); return the original error reply.
+    if session.in_multi() && cmd.abort_in_tx {
+        let reply = cmd.wire_op.reply(Ok(Box::new(())));
+        return vec![reply];
+    }
+
     if session.in_multi() && !cmd.allowed_in_tx {
         return vec![error(session, "Command not allowed inside a transaction")];
     }
@@ -74,7 +81,7 @@ pub async fn dispatch_noscript(session: &mut Session, args: &[Bytes]) -> Option<
             if session.in_multi() {
                 // Nested MULTI is an error but does NOT abort the outer
                 // transaction, so it bypasses dirty tracking.
-                Some(vec![error(session, Bytes::from_static(b"MULTI calls can not be nested"))])
+                Some(vec![RespValue::Error(Bytes::from_static(b"ERR MULTI calls can not be nested"))])
             } else {
                 session.enter_multi();
                 Some(vec![ok_resp()])
@@ -1911,6 +1918,7 @@ fn ok() -> QueuedOp {
         wire_op: Box::new(OkOp),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -1933,6 +1941,7 @@ fn error_op(session: &mut Session, msg: impl Into<Bytes>) -> QueuedOp {
         wire_op: Box::new(ErrorOp { msg: msg.into() }),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: true,
     }
 }
 
@@ -2095,7 +2104,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn unknown_command_aborts_exec() {
         let mut session = test_session();
         dispatch(&mut session, &["multi"]).await;
@@ -2110,7 +2118,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn nested_multi_errors_do_not_abort() {
         let mut session = test_session();
         dispatch(&mut session, &["multi"]).await;

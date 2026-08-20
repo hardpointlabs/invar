@@ -46,6 +46,7 @@ pub fn eval(script: Bytes, keys: Vec<Bytes>, argv: Vec<Bytes>) -> QueuedOp {
         wire_op: Box::new(EvalWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 

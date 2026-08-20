@@ -259,6 +259,7 @@ impl PubSubRegistry {
             }),
             is_mutating: false,
             allowed_in_tx: true,
+        abort_in_tx: false,
         }
     }
 }
@@ -684,6 +685,7 @@ pub fn help() -> QueuedOp {
         wire_op: Box::new(HelpOp),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 

@@ -64,6 +64,7 @@ pub fn set(session: &Session, key: &[u8], value: &[u8]) -> QueuedOp {
         wire_op: Box::new(OkWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -82,6 +83,7 @@ pub fn set_ex(session: &Session, key: &[u8], value: &[u8], seconds: i64) -> Queu
         wire_op: Box::new(OkWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -101,6 +103,7 @@ pub fn pset_ex(session: &Session, key: &[u8], value: &[u8], ms: i64) -> QueuedOp
         wire_op: Box::new(OkWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -113,6 +116,7 @@ pub fn get(session: &Session, key: &[u8]) -> QueuedOp {
         wire_op: Box::new(NullableBulkWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -127,6 +131,7 @@ pub fn get_set(session: &Session, key: &[u8], value: &[u8]) -> QueuedOp {
         wire_op: Box::new(NullableBulkWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -140,6 +145,7 @@ pub fn get_del(session: &Session, key: &[u8]) -> QueuedOp {
         wire_op: Box::new(NullableBulkWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -153,6 +159,7 @@ pub fn strlen(session: &Session, key: &[u8]) -> QueuedOp {
         wire_op: Box::new(IntWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -170,6 +177,7 @@ pub fn substr(session: &Session, key: &[u8], start: i64, end: i64) -> QueuedOp {
         wire_op: Box::new(BulkWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -184,6 +192,7 @@ pub fn set_nx(session: &Session, key: &[u8], value: &[u8]) -> QueuedOp {
         wire_op: Box::new(IntWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -198,6 +207,7 @@ pub fn append(session: &Session, key: &[u8], value: &[u8]) -> QueuedOp {
         wire_op: Box::new(IntWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -213,6 +223,7 @@ pub fn get_ex(session: &Session, args: &[Bytes]) -> QueuedOp {
         wire_op: Box::new(NullableBulkWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -227,6 +238,7 @@ pub fn incr_by_float(session: &Session, key: &[u8], amount: f64) -> QueuedOp {
         wire_op: Box::new(BulkStringWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -243,6 +255,7 @@ pub fn mset(session: &Session, args: &[Bytes]) -> QueuedOp {
         wire_op: Box::new(OkWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -259,6 +272,7 @@ pub fn mset_nx(session: &Session, args: &[Bytes]) -> QueuedOp {
         wire_op: Box::new(IntWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -274,6 +288,7 @@ pub fn set_range(session: &Session, key: &[u8], offset: i64, value: &[u8]) -> Qu
         wire_op: Box::new(IntWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -288,6 +303,7 @@ pub fn increment(session: &Session, key: &[u8], amount: i64) -> QueuedOp {
         wire_op: Box::new(IntWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 

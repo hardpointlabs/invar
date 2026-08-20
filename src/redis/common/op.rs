@@ -101,6 +101,12 @@ pub struct QueuedOp {
     pub is_mutating: bool,
     /// Whether this op is allowed to be enqueued inside a MULTI transactional block
     pub allowed_in_tx: bool,
+    /// When true and inside MULTI, this op is rejected immediately (its wire
+    /// reply is returned to the client) and the transaction is marked dirty
+    /// — the op is never enqueued. Used by `error_op` so that parse / arity /
+    /// unknown-command failures produce the correct error reply and trigger
+    /// `EXECABORT`, matching Redis semantics.
+    pub abort_in_tx: bool,
 }
 
 /// A [`DbOp`] with no database effect, used for wire-only commands such as
@@ -115,5 +121,6 @@ pub fn wire_only_op(wire_op: Box<dyn WireOp>, allowed_in_tx: bool) -> QueuedOp {
         wire_op,
         is_mutating: false,
         allowed_in_tx,
+        abort_in_tx: false,
     }
 }

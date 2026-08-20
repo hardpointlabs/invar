@@ -68,6 +68,7 @@ pub fn info() -> QueuedOp {
         }),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -90,6 +91,7 @@ pub fn save(session: &Session) -> QueuedOp {
         wire_op: Box::new(DefaultWire),
         is_mutating: false,
         allowed_in_tx: false,
+        abort_in_tx: false,
     }
 }
 
@@ -112,6 +114,7 @@ pub fn flushall(session: &Session) -> QueuedOp {
         wire_op: Box::new(DefaultWire),
         is_mutating: false,
         allowed_in_tx: false,
+        abort_in_tx: false,
     }
 }
 
@@ -135,6 +138,7 @@ pub fn flushdb(session: &Session) -> QueuedOp {
         wire_op: Box::new(DefaultWire),
         is_mutating: false,
         allowed_in_tx: false,
+        abort_in_tx: false,
     }
 }
 
@@ -296,6 +300,7 @@ pub fn hello(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         wire_op: Box::new(FixedReply { reply }),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -361,6 +366,7 @@ pub fn client(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         wire_op: Box::new(FixedReply { reply }),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 

@@ -139,6 +139,7 @@ pub fn hset(session: &Session, key: &[u8], field_values: &[Bytes]) -> QueuedOp {
         wire_op: Box::new(IntWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -155,6 +156,7 @@ pub fn hsetnx(session: &Session, key: &[u8], field: &[u8], value: &[u8]) -> Queu
         wire_op: Box::new(IntWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -168,6 +170,7 @@ pub fn hget(session: &Session, key: &[u8], field: &[u8]) -> QueuedOp {
         wire_op: Box::new(NullableBulkWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -182,6 +185,7 @@ pub fn hmget(session: &Session, key: &[u8], fields: &[Bytes]) -> QueuedOp {
         wire_op: Box::new(NullableArrayWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -197,6 +201,7 @@ pub fn hdel(session: &Session, key: &[u8], fields: &[Bytes]) -> QueuedOp {
         wire_op: Box::new(IntWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -210,6 +215,7 @@ pub fn hexists(session: &Session, key: &[u8], field: &[u8]) -> QueuedOp {
         wire_op: Box::new(IntWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -222,6 +228,7 @@ pub fn hlen(session: &Session, key: &[u8]) -> QueuedOp {
         wire_op: Box::new(IntWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -235,6 +242,7 @@ pub fn hkeys(session: &Session, key: &[u8]) -> QueuedOp {
         wire_op: Box::new(BulkArrayWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -248,6 +256,7 @@ pub fn hvals(session: &Session, key: &[u8]) -> QueuedOp {
         wire_op: Box::new(BulkArrayWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -262,6 +271,7 @@ pub fn hgetall(session: &Session, key: &[u8]) -> QueuedOp {
         wire_op: Box::new(BulkArrayWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -274,6 +284,7 @@ pub fn hmset(session: &Session, key: &[u8], field_values: &[Bytes]) -> QueuedOp 
         wire_op: Box::new(OkWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -290,6 +301,7 @@ pub fn hincrby(session: &Session, key: &[u8], field: &[u8], amount: i64) -> Queu
         wire_op: Box::new(IntWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -306,6 +318,7 @@ pub fn hincrbyfloat(session: &Session, key: &[u8], field: &[u8], amount: f64) ->
         wire_op: Box::new(NullableBulkWire),
         is_mutating: true,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -324,6 +337,7 @@ pub fn hrandfield(session: &Session, key: &[u8], count: i64, with_values: bool) 
         wire_op: Box::new(HRandFieldWire { count }),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -338,6 +352,7 @@ pub fn hstrlen(session: &Session, key: &[u8], field: &[u8]) -> QueuedOp {
         wire_op: Box::new(IntWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
@@ -354,6 +369,7 @@ pub fn hscan(session: &Session, key: &[u8], pattern: Vec<u8>, count: i64) -> Que
         wire_op: Box::new(HScanWire),
         is_mutating: false,
         allowed_in_tx: true,
+        abort_in_tx: false,
     }
 }
 
