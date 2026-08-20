@@ -12,3 +12,5 @@ clap = { version = "4", features = ["derive", "env"] }
 kv = { path = "src/kv" }
 redis = { path = "src/redis" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"]}

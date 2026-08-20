@@ -42,6 +42,10 @@ struct Cli {
 async fn main() {
     let cli = Cli::parse();
 
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
     let store: Arc<dyn RedisStore> = match cli.backend {
         Backend::Slate => {
             let bucket = cli
@@ -59,7 +63,9 @@ async fn main() {
         }
         Backend::Fjall => {
             let path = cli.path.expect("path is required for the fjall backend");
-            Arc::new(FjallDb::open(path).expect("failed to open Fjall store"))
+            Arc::new(FjallDb::open(path)
+                .inspect_err(|e| tracing::error!(error = %e, "operation failed"))
+                .expect("failed to open Fjall store"))
         }
     };
 
