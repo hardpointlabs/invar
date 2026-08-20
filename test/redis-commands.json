@@ -2657,5 +2657,249 @@
     "type": "bulk_string",
     "version": "7.2.0",
     "description": "redis.call works with KEYS and ARGV tables"
+  },
+  {
+    "name": "XADD explicit ID",
+    "command": ["XADD", "stream_exp", "1000-0", "name", "alice"],
+    "expected": "1000-0",
+    "type": "bulk_string",
+    "version": "5.0.0",
+    "description": "XADD with explicit entry ID"
+  },
+  {
+    "name": "XLEN missing key",
+    "command": ["XLEN", "noexist_xlen"],
+    "expected": 0,
+    "type": "integer",
+    "version": "5.0.0",
+    "description": "XLEN on a missing key returns 0"
+  },
+  {
+    "name": "XLEN after adds",
+    "command": ["XLEN", "stream_len"],
+    "expected": 3,
+    "type": "integer",
+    "version": "5.0.0",
+    "description": "XLEN returns the entry count",
+    "setup": [
+      ["XADD", "stream_len", "1-0", "f", "v"],
+      ["XADD", "stream_len", "2-0", "f", "v"],
+      ["XADD", "stream_len", "3-0", "f", "v"]
+    ]
+  },
+  {
+    "name": "XRANGE missing key",
+    "command": ["XRANGE", "noexist_xr", "-", "+"],
+    "expected": [],
+    "type": "array",
+    "version": "5.0.0",
+    "description": "XRANGE on missing key returns empty array"
+  },
+  {
+    "name": "XRANGE all entries",
+    "command": ["XRANGE", "stream_xr_all", "-", "+"],
+    "type": "array",
+    "version": "5.0.0",
+    "description": "XRANGE returns all entries in ascending order",
+    "setup": [
+      ["XADD", "stream_xr_all", "1-0", "f", "v1"],
+      ["XADD", "stream_xr_all", "2-0", "f", "v2"],
+      ["XADD", "stream_xr_all", "3-0", "f", "v3"]
+    ],
+    "expected": [
+      ["1-0", ["f", "v1"]],
+      ["2-0", ["f", "v2"]],
+      ["3-0", ["f", "v3"]]
+    ]
+  },
+  {
+    "name": "XRANGE with COUNT",
+    "command": ["XRANGE", "stream_xr_cnt", "-", "+", "COUNT", "2"],
+    "type": "array",
+    "version": "5.0.0",
+    "description": "XRANGE with COUNT limits results",
+    "setup": [
+      ["XADD", "stream_xr_cnt", "1-0", "f", "v1"],
+      ["XADD", "stream_xr_cnt", "2-0", "f", "v2"],
+      ["XADD", "stream_xr_cnt", "3-0", "f", "v3"]
+    ],
+    "expected": [
+      ["1-0", ["f", "v1"]],
+      ["2-0", ["f", "v2"]]
+    ]
+  },
+  {
+    "name": "XRANGE filtered range",
+    "command": ["XRANGE", "stream_xr_flt", "2-0", "2-0"],
+    "type": "array",
+    "version": "5.0.0",
+    "description": "XRANGE with specific start and end",
+    "setup": [
+      ["XADD", "stream_xr_flt", "1-0", "f", "v1"],
+      ["XADD", "stream_xr_flt", "2-0", "f", "v2"],
+      ["XADD", "stream_xr_flt", "3-0", "f", "v3"]
+    ],
+    "expected": [
+      ["2-0", ["f", "v2"]]
+    ]
+  },
+  {
+    "name": "XREVRANGE returns reversed",
+    "command": ["XREVRANGE", "stream_xrr", "3-0", "1-0"],
+    "type": "array",
+    "version": "5.0.0",
+    "description": "XREVRANGE returns entries in descending order",
+    "setup": [
+      ["XADD", "stream_xrr", "1-0", "f", "v1"],
+      ["XADD", "stream_xrr", "2-0", "f", "v2"],
+      ["XADD", "stream_xrr", "3-0", "f", "v3"]
+    ],
+    "expected": [
+      ["3-0", ["f", "v3"]],
+      ["2-0", ["f", "v2"]],
+      ["1-0", ["f", "v1"]]
+    ]
+  },
+  {
+    "name": "XDEL removes entry",
+    "command": ["XDEL", "stream_xd", "2-0"],
+    "expected": 1,
+    "type": "integer",
+    "version": "5.0.0",
+    "description": "XDEL removes a single entry by ID",
+    "setup": [
+      ["XADD", "stream_xd", "1-0", "f", "v1"],
+      ["XADD", "stream_xd", "2-0", "f", "v2"],
+      ["XADD", "stream_xd", "3-0", "f", "v3"]
+    ]
+  },
+  {
+    "name": "XDEL multiple entries",
+    "command": ["XDEL", "stream_xdm", "1-0", "3-0"],
+    "expected": 2,
+    "type": "integer",
+    "version": "5.0.0",
+    "description": "XDEL removes multiple entries",
+    "setup": [
+      ["XADD", "stream_xdm", "1-0", "f", "v1"],
+      ["XADD", "stream_xdm", "2-0", "f", "v2"],
+      ["XADD", "stream_xdm", "3-0", "f", "v3"]
+    ]
+  },
+  {
+    "name": "XTRIM MAXLEN",
+    "command": ["XTRIM", "stream_xtm", "MAXLEN", "2"],
+    "expected": 1,
+    "type": "integer",
+    "version": "5.0.0",
+    "description": "XTRIM MAXLEN removes oldest entries",
+    "setup": [
+      ["XADD", "stream_xtm", "1-0", "f", "v1"],
+      ["XADD", "stream_xtm", "2-0", "f", "v2"],
+      ["XADD", "stream_xtm", "3-0", "f", "v3"]
+    ]
+  },
+  {
+    "name": "XTRIM MINID",
+    "command": ["XTRIM", "stream_xti", "MINID", "2-0"],
+    "expected": 1,
+    "type": "integer",
+    "version": "5.0.0",
+    "description": "XTRIM MINID removes entries below ID",
+    "setup": [
+      ["XADD", "stream_xti", "1-0", "f", "v1"],
+      ["XADD", "stream_xti", "2-0", "f", "v2"],
+      ["XADD", "stream_xti", "3-0", "f", "v3"]
+    ]
+  },
+  {
+    "name": "XSETID basic",
+    "command": ["XSETID", "stream_xsi", "500-0"],
+    "expected": "OK",
+    "type": "simple_string",
+    "version": "5.0.0",
+    "description": "XSETID sets the last entry ID"
+  },
+  {
+    "name": "XREAD entries after ID",
+    "command": ["XREAD", "STREAMS", "stream_xrd", "1-0"],
+    "type": "array",
+    "version": "5.0.0",
+    "description": "XREAD returns entries after the given ID",
+    "setup": [
+      ["XADD", "stream_xrd", "1-0", "f", "v1"],
+      ["XADD", "stream_xrd", "2-0", "f", "v2"],
+      ["XADD", "stream_xrd", "3-0", "f", "v3"]
+    ],
+    "expected": [
+      ["stream_xrd", [
+        ["2-0", ["f", "v2"]],
+        ["3-0", ["f", "v3"]]
+      ]]
+    ]
+  },
+  {
+    "name": "XREAD missing stream",
+    "command": ["XREAD", "STREAMS", "noexist_xread", "0-0"],
+    "expected": null,
+    "type": "null",
+    "version": "5.0.0",
+    "description": "XREAD on missing stream returns nil"
+  },
+  {
+    "name": "WRONGTYPE XLEN on string key",
+    "command": ["XLEN", "wt_xlen_str"],
+    "expected": "WRONGTYPE",
+    "type": "error",
+    "version": "5.0.0",
+    "description": "XLEN on a string key returns WRONGTYPE",
+    "setup": [["SET", "wt_xlen_str", "value"]]
+  },
+  {
+    "name": "WRONGTYPE XRANGE on string key",
+    "command": ["XRANGE", "wt_xrange_str", "-", "+"],
+    "expected": "WRONGTYPE",
+    "type": "error",
+    "version": "5.0.0",
+    "description": "XRANGE on a string key returns WRONGTYPE",
+    "setup": [["SET", "wt_xrange_str", "value"]]
+  },
+  {
+    "name": "WRONGTYPE XDEL on string key",
+    "command": ["XDEL", "wt_xdel_str", "1-0"],
+    "expected": "WRONGTYPE",
+    "type": "error",
+    "version": "5.0.0",
+    "description": "XDEL on a string key returns WRONGTYPE",
+    "setup": [["SET", "wt_xdel_str", "value"]]
+  },
+  {
+    "name": "XADD multiple fields",
+    "command": ["XADD", "stream_mf", "500-0", "f1", "v1", "f2", "v2"],
+    "expected": "500-0",
+    "type": "bulk_string",
+    "version": "5.0.0",
+    "description": "XADD with multiple field-value pairs"
+  },
+  {
+    "name": "XRANGE multiple fields",
+    "command": ["XRANGE", "stream_mf", "500-0", "500-0"],
+    "type": "array",
+    "version": "5.0.0",
+    "description": "XRANGE shows all fields of an entry",
+    "setup": [
+      ["XADD", "stream_mf", "500-0", "f1", "v1", "f2", "v2"]
+    ],
+    "expected": [
+      ["500-0", ["f1", "v1", "f2", "v2"]]
+    ]
+  },
+  {
+    "name": "XINFO STREAM missing key",
+    "command": ["XINFO", "STREAM", "noexist_xinfo"],
+    "expected": {"error": true},
+    "type": "error",
+    "version": "5.0.0",
+    "description": "XINFO STREAM on missing key returns error"
   }
 ]

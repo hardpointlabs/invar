@@ -22,6 +22,7 @@ use crate::strings;
 use crate::zset;
 use crate::pubsub;
 use crate::script;
+use crate::stream;
 
 pub async fn enqueue_command(session: &mut Session, args: &[Bytes]) -> Vec<RespValue> {
     // short-circuit in the case of a command not allowed in a script
@@ -1899,6 +1900,276 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                 _ => {
                     return error_op(session, format!( "ERR unknown subcommand '{}'. Try PUBSUB HELP.", String::from_utf8_lossy(&sub_cmd)));
                 }
+            }
+        }
+        // --- Stream commands ---
+        b"xadd" => {
+            // XADD key [NOMKSTREAM] [MAXLEN [~] count | MINID [~] ms-seq] *|id field value [field value ...]
+            if args.len() < 4 {
+                return error_op(session, "ERR wrong number of arguments for 'xadd' command");
+            }
+            let key = &args[1];
+            let mut nomkstream = false;
+            let mut max_len: Option<u64> = None;
+            let mut min_id: Option<stream::StreamEntryId> = None;
+            let mut i = 2;
+            while i < args.len() {
+                if args[i].eq_ignore_ascii_case(b"nomkstream") {
+                    nomkstream = true;
+                    i += 1;
+                } else if args[i].eq_ignore_ascii_case(b"maxlen") {
+                    i += 1;
+                    if i < args.len() && args[i].as_ref() == b"~" {
+                        i += 1; // approximate flag — treat as exact
+                    }
+                    if i >= args.len() {
+                        return error_op(session, "ERR syntax error");
+                    }
+                    let Some(n) = parse_i64(&args[i]) else {
+                        return error_op(session, "ERR value is not an integer or out of range");
+                    };
+                    if n < 0 {
+                        return error_op(session, "ERR MAXLEN positive integer argument required");
+                    }
+                    max_len = Some(n as u64);
+                    i += 1;
+                } else if args[i].eq_ignore_ascii_case(b"minid") {
+                    i += 1;
+                    if i < args.len() && args[i].as_ref() == b"~" {
+                        i += 1;
+                    }
+                    if i >= args.len() {
+                        return error_op(session, "ERR syntax error");
+                    }
+                    let Some(id) = stream::StreamEntryId::from_str_bytes(&args[i]) else {
+                        return error_op(session, "ERR invalid stream ID specified as MINID argument");
+                    };
+                    min_id = Some(id);
+                    i += 1;
+                } else {
+                    break; // reached the id / * / field args
+                }
+            }
+            if i >= args.len() {
+                return error_op(session, "ERR wrong number of arguments for 'xadd' command");
+            }
+            // Parse the entry ID.
+            let id = if args[i].as_ref() == b"*" {
+                None // auto-generate
+            } else {
+                match stream::StreamEntryId::from_str_bytes(&args[i]) {
+                    Some(id) => Some(id),
+                    None => {
+                        return error_op(session, "ERR invalid stream ID specified as XADD argument");
+                    }
+                }
+            };
+            i += 1;
+            let field_values = &args[i..];
+            if field_values.is_empty() || field_values.len() % 2 != 0 {
+                return error_op(session, "ERR wrong number of arguments for 'xadd' command");
+            }
+            stream::xadd(session, key, nomkstream, max_len, min_id, id, field_values)
+        }
+        b"xlen" => {
+            if args.len() != 2 {
+                return error_op(session, "ERR wrong number of arguments for 'xlen' command");
+            }
+            stream::xlen(session, &args[1])
+        }
+        b"xrange" => {
+            // XRANGE key start end [COUNT count]
+            if args.len() < 4 {
+                return error_op(session, "ERR wrong number of arguments for 'xrange' command");
+            }
+            let start = if args[2].as_ref() == b"-" {
+                None
+            } else {
+                match stream::StreamEntryId::from_str_bytes(&args[2]) {
+                    Some(id) => Some(id),
+                    None => {
+                        return error_op(session, "ERR invalid stream ID specified as XRANGE argument");
+                    }
+                }
+            };
+            let end = if args[3].as_ref() == b"+" {
+                None
+            } else {
+                match stream::StreamEntryId::from_str_bytes(&args[3]) {
+                    Some(id) => Some(id),
+                    None => {
+                        return error_op(session, "ERR invalid stream ID specified as XRANGE argument");
+                    }
+                }
+            };
+            let mut count = usize::MAX;
+            if args.len() >= 6 && args[4].eq_ignore_ascii_case(b"count") {
+                let Some(n) = parse_i64(&args[5]) else {
+                    return error_op(session, "ERR value is not an integer or out of range");
+                };
+                if n < 0 {
+                    return error_op(session, "ERR COUNT must be positive");
+                }
+                count = n as usize;
+            }
+            stream::xrange(session, &args[1], start, end, count)
+        }
+        b"xrevrange" => {
+            // XREVRANGE key end start [COUNT count]
+            if args.len() < 4 {
+                return error_op(session, "ERR wrong number of arguments for 'xrevrange' command");
+            }
+            let start = if args[3].as_ref() == b"-" {
+                None
+            } else {
+                match stream::StreamEntryId::from_str_bytes(&args[3]) {
+                    Some(id) => Some(id),
+                    None => {
+                        return error_op(session, "ERR invalid stream ID specified as XREVRANGE argument");
+                    }
+                }
+            };
+            let end = if args[2].as_ref() == b"+" {
+                None
+            } else {
+                match stream::StreamEntryId::from_str_bytes(&args[2]) {
+                    Some(id) => Some(id),
+                    None => {
+                        return error_op(session, "ERR invalid stream ID specified as XREVRANGE argument");
+                    }
+                }
+            };
+            let mut count = usize::MAX;
+            if args.len() >= 6 && args[4].eq_ignore_ascii_case(b"count") {
+                let Some(n) = parse_i64(&args[5]) else {
+                    return error_op(session, "ERR value is not an integer or out of range");
+                };
+                if n < 0 {
+                    return error_op(session, "ERR COUNT must be positive");
+                }
+                count = n as usize;
+            }
+            stream::xrevrange(session, &args[1], start, end, count)
+        }
+        b"xread" => {
+            // XREAD [COUNT count] [BLOCK milliseconds] STREAMS key [key ...] id [id ...]
+            if args.len() < 4 {
+                return error_op(session, "ERR wrong number of arguments for 'xread' command");
+            }
+            let mut count = usize::MAX;
+            let mut i = 1;
+            while i < args.len() && !args[i].eq_ignore_ascii_case(b"streams") {
+                if args[i].eq_ignore_ascii_case(b"count") {
+                    i += 1;
+                    if i >= args.len() {
+                        return error_op(session, "ERR syntax error");
+                    }
+                    let Some(n) = parse_i64(&args[i]) else {
+                        return error_op(session, "ERR value is not an integer or out of range");
+                    };
+                    if n < 1 {
+                        return error_op(session, "ERR COUNT must be positive");
+                    }
+                    count = n as usize;
+                    i += 1;
+                } else if args[i].eq_ignore_ascii_case(b"block") {
+                    return error_op(session, "ERR BLOCK is not supported in this version");
+                } else {
+                    return error_op(session, "ERR syntax error");
+                }
+            }
+            if !args[i].eq_ignore_ascii_case(b"streams") {
+                return error_op(session, "ERR syntax error");
+            }
+            i += 1;
+            let remaining = args.len() - i;
+            if remaining < 2 || remaining % 2 != 0 {
+                return error_op(session, "ERR wrong number of arguments for 'xread' command");
+            }
+            let half = remaining / 2;
+            let keys = args[i..i + half].to_vec();
+            let id_args = &args[i + half..];
+            let mut ids = Vec::with_capacity(half);
+            for a in id_args {
+                match stream::parse_stream_id_arg(a) {
+                    Some(id) => ids.push(id),
+                    None => {
+                        return error_op(session, "ERR invalid stream ID specified in XREAD argument");
+                    }
+                }
+            }
+            stream::xread(session, &keys, ids, count)
+        }
+        b"xdel" => {
+            // XDEL key id [id ...]
+            if args.len() < 3 {
+                return error_op(session, "ERR wrong number of arguments for 'xdel' command");
+            }
+            let mut ids = Vec::with_capacity(args.len() - 2);
+            for a in &args[2..] {
+                match stream::StreamEntryId::from_str_bytes(a) {
+                    Some(id) => ids.push(id),
+                    None => {
+                        return error_op(session, "ERR invalid stream ID specified in XDEL");
+                    }
+                }
+            }
+            stream::xdel(session, &args[1], &ids)
+        }
+        b"xtrim" => {
+            // XTRIM key MAXLEN [~] count | MINID [~] ms-seq
+            if args.len() < 4 {
+                return error_op(session, "ERR wrong number of arguments for 'xtrim' command");
+            }
+            let strategy = args[2].eq_ignore_ascii_case(b"maxlen");
+            let is_minid = args[2].eq_ignore_ascii_case(b"minid");
+            if !strategy && !is_minid {
+                return error_op(session, "ERR syntax error");
+            }
+            let mut i = 3;
+            if i < args.len() && args[i].as_ref() == b"~" {
+                i += 1; // approximate flag — treat as exact
+            }
+            if i >= args.len() {
+                return error_op(session, "ERR syntax error");
+            }
+            if strategy {
+                let Some(n) = parse_i64(&args[i]) else {
+                    return error_op(session, "ERR value is not an integer or out of range");
+                };
+                if n < 0 {
+                    return error_op(session, "ERR MAXLEN positive integer argument required");
+                }
+                stream::xtrim_maxlen(session, &args[1], n as u64)
+            } else {
+                let Some(id) = stream::StreamEntryId::from_str_bytes(&args[i]) else {
+                    return error_op(session, "ERR invalid stream ID specified as MINID argument");
+                };
+                stream::xtrim_minid(session, &args[1], id)
+            }
+        }
+        b"xsetid" => {
+            // XSETID key last-entry-id
+            if args.len() != 3 {
+                return error_op(session, "ERR wrong number of arguments for 'xsetid' command");
+            }
+            let Some(id) = stream::StreamEntryId::from_str_bytes(&args[2]) else {
+                return error_op(session, "ERR invalid stream ID specified in XSETID");
+            };
+            stream::xsetid(session, &args[1], id)
+        }
+        b"xinfo" => {
+            // XINFO STREAM key
+            if args.len() < 3 {
+                return error_op(session, "ERR wrong number of arguments for 'xinfo' command");
+            }
+            if args[1].eq_ignore_ascii_case(b"stream") {
+                stream::xinfo_stream(session, &args[2])
+            } else {
+                error_op(session, format!(
+                    "ERR unknown XINFO subcommand '{}'",
+                    String::from_utf8_lossy(&args[1])
+                ))
             }
         }
         _ => {
