@@ -53,13 +53,14 @@ async fn read_string(tx: &dyn Tx, key: &[u8]) -> Result<Option<Vec<u8>>, DbError
     Ok(Some(item.value().to_vec()))
 }
 
-/// `SET key value` — stores a string value, overwriting any existing value.
-pub fn set(session: &Session, key: &[u8], value: &[u8]) -> QueuedOp {
+/// `SET key value [EX seconds] [PX milliseconds]` — stores a string value,
+/// optionally with a TTL.
+pub fn set(session: &Session, key: &[u8], value: &[u8], ttl: Option<Duration>) -> QueuedOp {
     QueuedOp {
         db_op: Box::new(SetOp {
             key: session.public_key(key),
             value: value.to_vec(),
-            ttl: None,
+            ttl,
         }),
         wire_op: Box::new(OkWire),
         is_mutating: true,
@@ -952,7 +953,7 @@ mod tests {
         let session = test_session();
 
         assert_eq!(
-            exec(&session, set(&session, b"k", b"v1")).await,
+            exec(&session, set(&session, b"k", b"v1", None)).await,
             RespValue::SimpleString(Bytes::from_static(b"OK"))
         );
         assert_eq!(

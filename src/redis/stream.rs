@@ -1768,7 +1768,7 @@ mod tests {
     #[tokio::test]
     async fn wrong_type_xlen() {
         let session = test_session();
-        exec(&session, crate::strings::set(&session, b"key", b"val")).await;
+        exec(&session, crate::strings::set(&session, b"key", b"val", None)).await;
         let r = exec(&session, xlen(&session, b"key")).await;
         assert_eq!(
             expect_error(&r),
@@ -1781,7 +1781,7 @@ mod tests {
     #[tokio::test]
     async fn wrong_type_xrange() {
         let session = test_session();
-        exec(&session, crate::strings::set(&session, b"key", b"val")).await;
+        exec(&session, crate::strings::set(&session, b"key", b"val", None)).await;
         let r = exec(&session, xrange(&session, b"key", None, None, 10)).await;
         assert_eq!(
             expect_error(&r),

@@ -1286,7 +1286,7 @@ mod tests {
         // meta, so `add_one` treats it as absent and overwrites it with a
         // fresh filter — mirroring the Go behavior exactly.
         let session = test_session();
-        run_ops(&session, vec![crate::strings::set(&session, b"k", b"hi")]).await;
+        run_ops(&session, vec![crate::strings::set(&session, b"k", b"hi", None)]).await;
         let replies = run_ops(&session, vec![add(&session, b"k", b"item")]).await;
         assert_eq!(expect_int(&replies), 1);
     }

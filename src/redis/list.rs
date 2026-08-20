@@ -741,6 +741,41 @@ pub fn linsert(
     }
 }
 
+/// `RPOPLPUSH source destination` — atomically pops the tail of `source` and
+/// pushes it to the head of `destination`, returning the element. If `source`
+/// does not exist, nil is returned.
+pub fn rpoplpush(session: &Session, source: &[u8], destination: &[u8]) -> QueuedOp {
+    QueuedOp {
+        db_op: Box::new(RPopLPushOp {
+            src_public: session.public_key(source),
+            src_node_prefix: session.private_key(source),
+            dst_public: session.public_key(destination),
+            dst_node_prefix: session.private_key(destination),
+        }),
+        wire_op: Box::new(NullableBulkWire),
+        is_mutating: true,
+        allowed_in_tx: true,
+        abort_in_tx: false,
+    }
+}
+
+/// `LPOS key element [RANK rank] [COUNT count]` — returns the index of the
+/// first occurrence of `element`, or nil if not found. RANK and COUNT are
+/// accepted but not yet implemented (they default to single-first match).
+pub fn lpos(session: &Session, key: &[u8], element: &[u8]) -> QueuedOp {
+    QueuedOp {
+        db_op: Box::new(LPosOp {
+            public_key: session.public_key(key),
+            node_prefix: session.private_key(key),
+            element: element.to_vec(),
+        }),
+        wire_op: Box::new(NullableIntWire),
+        is_mutating: false,
+        allowed_in_tx: true,
+        abort_in_tx: false,
+    }
+}
+
 // --- DbOp halves ---
 
 struct PushOp {
@@ -1117,6 +1152,99 @@ impl DbOp for LInsertOp {
     }
 }
 
+struct RPopLPushOp {
+    src_public: Vec<u8>,
+    src_node_prefix: Vec<u8>,
+    dst_public: Vec<u8>,
+    dst_node_prefix: Vec<u8>,
+}
+
+impl DbOp for RPopLPushOp {
+    fn run<'a>(&'a self, tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
+        let src_public = self.src_public.clone();
+        let src_prefix = self.src_node_prefix.clone();
+        let dst_public = self.dst_public.clone();
+        let dst_prefix = self.dst_node_prefix.clone();
+        Box::pin(async move {
+            // Pop tail of source.
+            let mut src_ll = match load_list(tx, &src_public, &src_prefix).await {
+                Ok(ll) => ll,
+                Err(DbError::Kv(KvError::KeyNotFound)) => {
+                    let result: DbResult = Box::new(None::<Vec<u8>>);
+                    return Ok(result);
+                }
+                Err(e) => return Err(e),
+            };
+            let value = match src_ll.remove_last() {
+                Some(v) => v,
+                None => {
+                    let result: DbResult = Box::new(None::<Vec<u8>>);
+                    return Ok(result);
+                }
+            };
+            // Save source list.
+            if src_ll.size == 0 {
+                tx.delete(&src_public)?;
+            } else {
+                persist_list(tx, &src_public, &src_prefix, &src_ll)?;
+            }
+            // Push to head of destination.
+            let mut dst_ll = match load_list(tx, &dst_public, &dst_prefix).await {
+                Ok(ll) => ll,
+                Err(DbError::Kv(KvError::KeyNotFound)) => Linked::new_empty(),
+                Err(e) => return Err(e),
+            };
+            dst_ll.add_first(value.clone());
+            persist_list(tx, &dst_public, &dst_prefix, &dst_ll)?;
+            let result: DbResult = Box::new(Some(value));
+            Ok(result)
+        })
+    }
+}
+
+struct LPosOp {
+    public_key: Vec<u8>,
+    node_prefix: Vec<u8>,
+    element: Vec<u8>,
+}
+
+impl DbOp for LPosOp {
+    fn run<'a>(&'a self, tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
+        let public_key = self.public_key.clone();
+        let node_prefix = self.node_prefix.clone();
+        let element = self.element.clone();
+        Box::pin(async move {
+            // Check key type first (WRONGTYPE on non-list).
+            if let Ok(item) = tx.get(&public_key).await {
+                if item.metadata() != TYPE_LIST {
+                    return Err(DbError::WrongType);
+                }
+            }
+            let ll = match load_list(tx, &public_key, &node_prefix).await {
+                Ok(ll) => ll,
+                Err(DbError::Kv(KvError::KeyNotFound)) => {
+                    let result: DbResult = Box::new(None::<i64>);
+                    return Ok(result);
+                }
+                Err(e) => return Err(e),
+            };
+            let mut pos = 0i64;
+            let mut cur = ll.head;
+            while let Some(k) = cur {
+                let node = ll.nodes.get(&k).expect("node present");
+                if node.value == element {
+                    let result: DbResult = Box::new(Some(pos));
+                    return Ok(result);
+                }
+                cur = node.next;
+                pos += 1;
+            }
+            let result: DbResult = Box::new(None::<i64>);
+            Ok(result)
+        })
+    }
+}
+
 // --- WireOp halves ---
 
 /// Replies an integer result.
@@ -1194,6 +1322,27 @@ impl WireOp for LSetWire {
             Ok(_) => RespValue::SimpleString(Bytes::from_static(b"OK")),
             Err(DbError::Kv(KvError::KeyNotFound)) => {
                 RespValue::Error(Bytes::from_static(b"ERR no such key"))
+            }
+            Err(e) => err_resp(&e),
+        }
+    }
+}
+
+/// Replies null for `None` (LPOS nil), an integer otherwise.
+struct NullableIntWire;
+
+impl WireOp for NullableIntWire {
+    fn reply(&self, result: Result<DbResult, DbError>) -> RespValue {
+        match result {
+            Ok(res) => {
+                if let Ok(boxed) = res.downcast::<Option<i64>>() {
+                    match *boxed {
+                        Some(n) => RespValue::Integer(n),
+                        None => RespValue::BulkString(None),
+                    }
+                } else {
+                    internal_error()
+                }
             }
             Err(e) => err_resp(&e),
         }
@@ -1778,7 +1927,7 @@ mod tests {
     async fn wrong_type_on_string_key() {
         let session = test_session();
         let key = b"strkey";
-        exec(&session, crate::strings::set(&session, key, b"hi")).await;
+        exec(&session, crate::strings::set(&session, key, b"hi", None)).await;
 
         let replies = exec(&session, lpush(&session, key, &[Bytes::from_static(b"a")])).await;
         assert_eq!(

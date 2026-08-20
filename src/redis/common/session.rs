@@ -509,7 +509,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_executes_queued_set_and_persists() {
         let mut session = test_session();
-        let op = strings::set(&session, b"foo", b"bar");
+        let op = strings::set(&session, b"foo", b"bar", None);
         session.enqueue_op(op);
         let replies = session.dispatch_pending_ops(false).await;
         assert_eq!(

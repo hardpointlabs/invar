@@ -922,7 +922,7 @@ mod tests {
         let session = test_session();
         // A plain string under a source key is skipped, and the dest is
         // still created as an empty sketch.
-        exec(&session, crate::strings::set(&session, b"notahll", b"plain")).await;
+        exec(&session, crate::strings::set(&session, b"notahll", b"plain", None)).await;
         let reply = exec(
             &session,
             pfmerge(&session, b"hll_merged", &[Bytes::from_static(b"missing")]),
@@ -940,7 +940,7 @@ mod tests {
     #[tokio::test]
     async fn pfadd_on_invalid_key_leaves_it_untouched() {
         let session = test_session();
-        exec(&session, crate::strings::set(&session, b"notahll", b"plain")).await;
+        exec(&session, crate::strings::set(&session, b"notahll", b"plain", None)).await;
 
         let reply = exec(&session, pfadd(&session, b"notahll", &[Bytes::from_static(b"x")])).await;
         assert_eq!(expect_int(&reply), 0);

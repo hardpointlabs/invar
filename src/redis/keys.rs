@@ -118,6 +118,35 @@ pub fn expire(session: &Session, key: &[u8], seconds: i64) -> QueuedOp {
     }
 }
 
+/// `PEXPIRE key milliseconds` — sets a TTL in milliseconds on a key, returning
+/// 1 if the key exists and 0 otherwise.
+pub fn pexpire(session: &Session, key: &[u8], milliseconds: i64) -> QueuedOp {
+    QueuedOp {
+        db_op: Box::new(PExpireOp {
+            key: session.public_key(key),
+            milliseconds,
+        }),
+        wire_op: Box::new(IntWire),
+        is_mutating: true,
+        allowed_in_tx: true,
+        abort_in_tx: false,
+    }
+}
+
+/// `PERSIST key` — removes any existing TTL, returning 1 if the key exists and
+/// had an expiry, 0 otherwise.
+pub fn persist(session: &Session, key: &[u8]) -> QueuedOp {
+    QueuedOp {
+        db_op: Box::new(PersistOp {
+            key: session.public_key(key),
+        }),
+        wire_op: Box::new(IntWire),
+        is_mutating: true,
+        allowed_in_tx: true,
+        abort_in_tx: false,
+    }
+}
+
 /// `TTL key` — returns the remaining time to live in seconds: `-2` if the
 /// key is missing, `-1` if it exists without an expiry.
 pub fn ttl(session: &Session, key: &[u8]) -> QueuedOp {
@@ -391,6 +420,67 @@ impl DbOp for ExpireOp {
             let entry = Entry::new(key, item.value().to_vec())
                 .metadata(item.metadata())
                 .ttl(ttl);
+            tx.set(entry)?;
+            let result: DbResult = Box::new(1i64);
+            Ok(result)
+        })
+    }
+}
+
+struct PExpireOp {
+    key: Vec<u8>,
+    milliseconds: i64,
+}
+
+impl DbOp for PExpireOp {
+    fn run<'a>(&'a self, tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
+        let key = self.key.clone();
+        let milliseconds = self.milliseconds;
+        Box::pin(async move {
+            let item = match tx.get(&key).await {
+                Ok(item) => item,
+                Err(KvError::KeyNotFound) => {
+                    let result: DbResult = Box::new(0i64);
+                    return Ok(result);
+                }
+                Err(e) => return Err(e.into()),
+            };
+            let ttl = u64::try_from(milliseconds)
+                .ok()
+                .map(std::time::Duration::from_millis)
+                .unwrap_or(std::time::Duration::ZERO);
+            let entry = Entry::new(key, item.value().to_vec())
+                .metadata(item.metadata())
+                .ttl(ttl);
+            tx.set(entry)?;
+            let result: DbResult = Box::new(1i64);
+            Ok(result)
+        })
+    }
+}
+
+struct PersistOp {
+    key: Vec<u8>,
+}
+
+impl DbOp for PersistOp {
+    fn run<'a>(&'a self, tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
+        let key = self.key.clone();
+        Box::pin(async move {
+            let item = match tx.get(&key).await {
+                Ok(item) => item,
+                Err(KvError::KeyNotFound) => {
+                    let result: DbResult = Box::new(0i64);
+                    return Ok(result);
+                }
+                Err(e) => return Err(e.into()),
+            };
+            if item.expires_at() == 0 {
+                let result: DbResult = Box::new(0i64);
+                return Ok(result);
+            }
+            let entry = Entry::new(key, item.value().to_vec())
+                .metadata(item.metadata());
             tx.set(entry)?;
             let result: DbResult = Box::new(1i64);
             Ok(result)

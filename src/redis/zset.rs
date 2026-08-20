@@ -3241,10 +3241,10 @@ mod tests {
         let session = test_session();
         // A plain string key set through the raw store, then touched by zset
         // reads/writes, should produce WRONGTYPE.
-        crate::strings::set(&session, b"strkey", b"plainstring");
+        crate::strings::set(&session, b"strkey", b"plainstring", None);
         let _ = exec(
             &session,
-            crate::strings::set(&session, b"strkey", b"plainstring"),
+            crate::strings::set(&session, b"strkey", b"plainstring", None),
         )
         .await;
 

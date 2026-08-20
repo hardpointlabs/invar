@@ -414,6 +414,36 @@ pub fn sunionstore(session: &Session, dest: &[u8], keys: &[Bytes]) -> QueuedOp {
     }
 }
 
+/// `SSCAN key cursor [MATCH pattern] [COUNT count]` — iterates set members.
+/// Cursor `0` starts a new scan; returned cursor `0` means iteration complete.
+/// Returns `(cursor, [members...])`.
+pub fn sscan(
+    session: &Session,
+    key: &[u8],
+    cursor: &[u8],
+    count: usize,
+    pattern: Option<Vec<u8>>,
+) -> QueuedOp {
+    let cursor = if cursor == b"0" {
+        Vec::new()
+    } else {
+        cursor.to_vec()
+    };
+    QueuedOp {
+        db_op: Box::new(SScanOp {
+            public_key: session.public_key(key),
+            node_prefix: session.private_key(key),
+            cursor,
+            count,
+            pattern,
+        }),
+        wire_op: Box::new(SScanWire),
+        is_mutating: false,
+        allowed_in_tx: true,
+        abort_in_tx: false,
+    }
+}
+
 // --- DbOp halves ---
 
 /// A pair of `(public_key, node_prefix)` identifying a set on disk.
@@ -972,6 +1002,175 @@ impl WireOp for SRandMemberWire {
     }
 }
 
+// --- SSCAN support ---
+
+struct SScanResult {
+    cursor: Vec<u8>,
+    members: Vec<Vec<u8>>,
+}
+
+struct SScanOp {
+    public_key: Vec<u8>,
+    node_prefix: Vec<u8>,
+    cursor: Vec<u8>,
+    count: usize,
+    pattern: Option<Vec<u8>>,
+}
+
+impl DbOp for SScanOp {
+    fn run<'a>(&'a self, tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
+        let public_key = self.public_key.clone();
+        let node_prefix = self.node_prefix.clone();
+        let cursor = self.cursor.clone();
+        let count = self.count.max(1);
+        let pattern = self.pattern.clone();
+        Box::pin(async move {
+            // Verify key exists and is a set.
+            match set_count(tx, &public_key).await {
+                Ok(None) => {
+                    let result: DbResult = Box::new(SScanResult {
+                        cursor: Vec::new(),
+                        members: Vec::new(),
+                    });
+                    return Ok(result);
+                }
+                Ok(Some(_)) => {}
+                Err(e) => return Err(e),
+            }
+            // Load all members into sorted order.
+            let mut it = tx.new_prefix_iterator(&members_prefix(&node_prefix)).await?;
+            let mut all_members: Vec<Vec<u8>> = Vec::new();
+            while it.next().await {
+                if let Some(item) = it.item() {
+                    all_members.push(item.value().to_vec());
+                }
+            }
+            let err = it.err().cloned();
+            if let Some(e) = err {
+                it.close().await?;
+                return Err(DbError::Kv(e));
+            }
+            it.close().await?;
+
+            // Determine the starting offset from the cursor.
+            let start_offset = if cursor.is_empty() {
+                0
+            } else {
+                // Cursor is the last member returned (base64-encoded index or raw member).
+                // For simplicity, use the cursor as an offset string.
+                std::str::from_utf8(&cursor)
+                    .ok()
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(0)
+            };
+
+            // Filter by pattern if given.
+            let filtered: Vec<Vec<u8>> = if let Some(ref pat) = pattern {
+                let pat_str = std::str::from_utf8(pat).unwrap_or("");
+                all_members
+                    .into_iter()
+                    .filter(|m| {
+                        let m_str = std::str::from_utf8(m).unwrap_or("");
+                        glob_match(pat_str, m_str)
+                    })
+                    .collect()
+            } else {
+                all_members
+            };
+
+            // Paginate.
+            let end = (start_offset + count).min(filtered.len());
+            let page: Vec<Vec<u8>> = filtered[start_offset..end].to_vec();
+            let next_cursor = if end < filtered.len() {
+                end.to_string().into_bytes()
+            } else {
+                Vec::new() // cursor 0 = done
+            };
+
+            let result: DbResult = Box::new(SScanResult {
+                cursor: next_cursor,
+                members: page,
+            });
+            Ok(result)
+        })
+    }
+}
+
+/// Simple glob pattern matcher (mirrors Go's `path.Match`). Supports `*`
+/// (any sequence of chars) and `?` (any single char). No character classes.
+fn glob_match(pattern: &str, s: &str) -> bool {
+    if pattern.is_empty() {
+        return true;
+    }
+    let pat: Vec<char> = pattern.chars().collect();
+    let s: Vec<char> = s.chars().collect();
+    glob_match_inner(&pat, &s)
+}
+
+fn glob_match_inner(pat: &[char], s: &[char]) -> bool {
+    match (pat.first(), s.first()) {
+        (None, None) => true,
+        (None, Some(_)) => false,
+        (Some('*'), _) => {
+            if glob_match_inner(&pat[1..], s) {
+                return true;
+            }
+            if s.is_empty() {
+                return false;
+            }
+            glob_match_inner(pat, &s[1..])
+        }
+        (Some('?'), Some(_)) => glob_match_inner(&pat[1..], &s[1..]),
+        (Some('['), _) => {
+            let close = pat[1..].iter().position(|&c| c == ']');
+            if let Some(idx) = close {
+                let charset = &pat[2..idx + 1];
+                let negate = charset.first() == Some(&'^');
+                let chars = if negate { &charset[1..] } else { charset };
+                let matched = s.first().map_or(false, |&c| {
+                    chars.contains(&c) || chars.windows(2).any(|w| w[0] == '-' && c >= w[0] && c <= w[2])
+                });
+                if negate {
+                    return glob_match_inner(&pat[idx + 2..], &s[1..]);
+                }
+                return matched && glob_match_inner(&pat[idx + 2..], &s[1..]);
+            }
+            false
+        }
+        (Some(&p), Some(&c)) if p == c => glob_match_inner(&pat[1..], &s[1..]),
+        _ => false,
+    }
+}
+
+struct SScanWire;
+
+impl WireOp for SScanWire {
+    fn reply(&self, result: Result<DbResult, DbError>) -> RespValue {
+        match result {
+            Ok(res) => match res.downcast::<SScanResult>() {
+                Ok(boxed) => {
+                    let cursor = if boxed.cursor.is_empty() {
+                        Bytes::from_static(b"0")
+                    } else {
+                        Bytes::copy_from_slice(&boxed.cursor)
+                    };
+                    let members = boxed
+                        .members
+                        .iter()
+                        .map(|m| RespValue::BulkString(Some(Bytes::copy_from_slice(m))))
+                        .collect();
+                    RespValue::Array(Some(vec![
+                        RespValue::BulkString(Some(cursor)),
+                        RespValue::Array(Some(members)),
+                    ]))
+                }
+                Err(_) => internal_error(),
+            },
+            Err(e) => err_resp(&e),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1496,7 +1695,7 @@ mod tests {
     async fn wrong_type_operations_error() {
         let session = test_session();
         let key = b"strkey";
-        exec(&session, crate::strings::set(&session, key, b"plainstring")).await;
+        exec(&session, crate::strings::set(&session, key, b"plainstring", None)).await;
 
         for op in [
             sadd(&session, key, &[Bytes::from_static(b"m")]),

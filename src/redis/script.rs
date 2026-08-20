@@ -16,13 +16,15 @@
 //! `.await`.
 
 use std::cell::UnsafeCell;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use gc_arena::Collect;
 use piccolo::Error as PicError;
 use piccolo::{Callback, CallbackReturn, Closure, Context, Executor, Fuel, Lua, Stack, Value};
+use sha1::{Digest, Sha1};
 
 use crate::commands::dispatch_command;
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
@@ -31,6 +33,33 @@ use crate::common::session::Session;
 use crate::common::store::RedisStore;
 use crate::resp::RespValue;
 use kv::kv::{BoxFuture, Tx};
+
+/// Global cache mapping SHA1 hex digests to their Lua script source.
+/// Populated by EVAL, consulted by EVALSHA.
+fn script_cache() -> &'static Mutex<HashMap<String, Bytes>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Bytes>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn sha1_hex(data: &[u8]) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(data);
+    let hash = hasher.finalize();
+    hash.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Stores a script in the global cache, keyed by its SHA1 hex digest.
+fn cache_script(script: &[u8]) -> String {
+    let digest = sha1_hex(script);
+    let mut cache = script_cache().lock().unwrap();
+    cache.entry(digest.clone()).or_insert_with(|| Bytes::copy_from_slice(script));
+    digest
+}
+
+/// Looks up a cached script by its SHA1 hex digest.
+fn lookup_script(sha1: &str) -> Option<Bytes> {
+    script_cache().lock().unwrap().get(sha1).cloned()
+}
 
 /// Approximate VM-instruction budget granted to the interpreter between
 /// deadline checks.
@@ -195,6 +224,9 @@ pub fn eval(
     registry: Arc<WatchRegistry>,
     current_db: i32,
 ) -> QueuedOp {
+    // Cache the script by its SHA1 digest so EVALSHA can find it later.
+    cache_script(&script);
+
     QueuedOp {
         db_op: Box::new(EvalOp {
             script,
@@ -208,6 +240,67 @@ pub fn eval(
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+    }
+}
+
+/// `EVALSHA sha1 numkeys [key ...] [arg ...]`.
+pub fn evalsha(
+    sha1_hex: Bytes,
+    keys: Vec<Bytes>,
+    argv: Vec<Bytes>,
+    store: Arc<dyn RedisStore>,
+    registry: Arc<WatchRegistry>,
+    current_db: i32,
+) -> QueuedOp {
+    let sha1_str = String::from_utf8_lossy(&sha1_hex).to_string();
+    match lookup_script(&sha1_str) {
+        Some(script) => {
+            // Script found in cache — execute it like EVAL.
+            QueuedOp {
+                db_op: Box::new(EvalOp {
+                    script,
+                    keys,
+                    argv,
+                    store,
+                    registry,
+                    current_db,
+                }),
+                wire_op: Box::new(EvalWire),
+                is_mutating: true,
+                allowed_in_tx: true,
+                abort_in_tx: false,
+            }
+        }
+        None => {
+            // Script not cached — return NOSCRIPT error (Redis convention).
+            QueuedOp {
+                db_op: Box::new(NoscriptOp),
+                wire_op: Box::new(NoscriptWire),
+                is_mutating: false,
+                allowed_in_tx: true,
+                abort_in_tx: false,
+            }
+        }
+    }
+}
+
+struct NoscriptOp;
+
+impl DbOp for NoscriptOp {
+    fn run<'a>(&'a self, _tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
+        Box::pin(async { Err(DbError::Redis("NOSCRIPT No matching script. Use EVAL.".into())) })
+    }
+}
+
+struct NoscriptWire;
+
+impl WireOp for NoscriptWire {
+    fn reply(&self, result: Result<DbResult, DbError>) -> RespValue {
+        match result {
+            Err(DbError::Redis(msg)) => RespValue::Error(Bytes::from(msg)),
+            Err(_) => RespValue::Error(Bytes::from_static(b"ERR NOSCRIPT internal error")),
+            Ok(_) => unreachable!(),
+        }
     }
 }
 
@@ -229,7 +322,8 @@ impl DbOp for EvalOp {
         let registry = self.registry.clone();
         let current_db = self.current_db;
         Box::pin(async move {
-            let result = run_script(&script, &keys, &argv, &store, &registry, current_db, tx)?;
+            let result = run_script(&script, &keys, &argv, &store, &registry, current_db, tx);
+            let result = result?;
             let result: DbResult = Box::new(result);
             Ok(result)
         })
@@ -350,6 +444,306 @@ fn run_script(
 
         ctx.set_global("redis", redis_table)?;
 
+        // Add `tonumber` — piccolo's core stdlib omits it, but Redis/Lua scripts
+        // rely on it heavily (e.g. `tonumber(ARGV[1])`).
+        let tonumber_fn = Callback::from_fn(&ctx, |ctx, _exec, mut stack| {
+            if stack.is_empty() {
+                return Err(PicError::from(Value::String(ctx.intern(
+                    b"bad argument #1 to 'tonumber' (value expected)",
+                ))));
+            }
+            let val = stack.get(0);
+            match val {
+                Value::Integer(n) => {
+                    stack.push_back(Value::Integer(n));
+                }
+                Value::Number(n) => {
+                    stack.push_back(Value::Integer(n as i64));
+                }
+                Value::String(s) => {
+                    let s = s.as_bytes();
+                    // Skip leading/trailing whitespace
+                    let mut start = 0;
+                    while start < s.len() && s[start].is_ascii_whitespace() {
+                        start += 1;
+                    }
+                    let mut end = s.len();
+                    while end > start && s[end - 1].is_ascii_whitespace() {
+                        end -= 1;
+                    }
+                    let s = &s[start..end];
+                    // Handle optional sign
+                    let (neg, s) = if s.first() == Some(&b'-') {
+                        (true, &s[1..])
+                    } else if s.first() == Some(&b'+') {
+                        (false, &s[1..])
+                    } else {
+                        (false, s)
+                    };
+                    if let Ok(s) = std::str::from_utf8(s) {
+                        if let Ok(n) = s.parse::<i64>() {
+                            stack.push_back(Value::Integer(if neg { -n } else { n }));
+                        } else if let Ok(n) = s.parse::<f64>() {
+                            let n = if neg { -n } else { n };
+                            stack.push_back(Value::Number(n));
+                        } else {
+                            stack.push_back(Value::Nil);
+                        }
+                    } else {
+                        stack.push_back(Value::Nil);
+                    }
+                }
+                Value::Boolean(b) => {
+                    stack.push_back(Value::Integer(if b { 1 } else { 0 }));
+                }
+                _ => {
+                    stack.push_back(Value::Nil);
+                }
+            }
+            Ok(CallbackReturn::Return)
+        });
+        ctx.set_global("tonumber", Value::from(tonumber_fn))?;
+
+        // Add `unpack` as a top-level global (alias for table.unpack).
+        // Lua 5.1 had `unpack` as a global; Lua 5.2+ moved it to table.unpack.
+        // BullMQ scripts and many Redis scripts use the bare `unpack` form.
+        let table_val = ctx.get_global("table");
+        let unpack_fn = match table_val {
+            Value::Table(table) => {
+                let unpack_key = Value::from(ctx.intern(b"unpack"));
+                table.get_value(unpack_key)
+            }
+            _ => Value::Nil,
+        };
+        ctx.set_global("unpack", unpack_fn)?;
+
+        // Supplement the `table` global with standard Lua functions missing from
+        // piccolo's core (which only provides pack/unpack). BullMQ and many other
+        // Redis scripts depend on insert, remove, sort, concat, and move.
+        if let Value::Table(table) = table_val {
+            let insert_fn = Callback::from_fn(&ctx, |ctx, _exec, mut stack| {
+                // table.insert(table, [pos,] value)
+                let nargs = stack.len();
+                if nargs < 2 {
+                    return Err(PicError::from(Value::String(ctx.intern(
+                        b"table.insert: wrong number of arguments",
+                    ))));
+                }
+                let tbl = match stack.get(0) {
+                    Value::Table(t) => t,
+                    _ => {
+                        return Err(PicError::from(Value::String(ctx.intern(
+                            b"table.insert: bad argument #1 (table expected)",
+                        ))));
+                    }
+                };
+                if nargs == 2 {
+                    // table.insert(tbl, value) — append at end
+                    let len = tbl.length();
+                    let val = stack.get(1);
+                    tbl.set_value(&ctx, Value::Integer(len + 1), val)
+                        .map_err(|e| PicError::from(Value::String(ctx.intern(e.to_string().as_bytes()))))?;
+                } else {
+                    // table.insert(tbl, pos, value)
+                    let pos = match stack.get(1) {
+                        Value::Integer(n) => n,
+                        _ => {
+                            return Err(PicError::from(Value::String(ctx.intern(
+                                b"table.insert: bad argument #2 (number expected)",
+                            ))));
+                        }
+                    };
+                    let val = stack.get(2);
+                    let len = tbl.length();
+                    for i in (pos..=len).rev() {
+                        let v = tbl.get_value(Value::Integer(i));
+                        tbl.set_value(&ctx, Value::Integer(i + 1), v).map_err(|e| {
+                            PicError::from(Value::String(ctx.intern(e.to_string().as_bytes())))
+                        })?;
+                    }
+                    tbl.set_value(&ctx, Value::Integer(pos), val).map_err(|e| {
+                        PicError::from(Value::String(ctx.intern(e.to_string().as_bytes())))
+                    })?;
+                }
+                stack.clear();
+                Ok(CallbackReturn::Return)
+            });
+            table.set(ctx, "insert", insert_fn).map_err(|e| {
+                PicError::from(Value::String(ctx.intern(e.to_string().as_bytes())))
+            })?;
+
+            let remove_fn = Callback::from_fn(&ctx, |ctx, _exec, mut stack| {
+                // table.remove(tbl [, pos])
+                let tbl = match stack.get(0) {
+                    Value::Table(t) => t,
+                    _ => {
+                        return Err(PicError::from(Value::String(ctx.intern(
+                            b"table.remove: bad argument #1 (table expected)",
+                        ))));
+                    }
+                };
+                let len = tbl.length();
+                let pos = match stack.get(1) {
+                    Value::Integer(n) => n,
+                    Value::Nil => len,
+                    _ => len,
+                };
+                let removed = tbl.get_value(Value::Integer(pos));
+                for i in pos..len {
+                    let v = tbl.get_value(Value::Integer(i + 1));
+                    tbl.set_value(&ctx, Value::Integer(i), v).map_err(|e| {
+                        PicError::from(Value::String(ctx.intern(e.to_string().as_bytes())))
+                    })?;
+                }
+                tbl.set_value(&ctx, Value::Integer(len), Value::Nil).map_err(|e| {
+                    PicError::from(Value::String(ctx.intern(e.to_string().as_bytes())))
+                })?;
+                stack.clear();
+                stack.push_back(removed);
+                Ok(CallbackReturn::Return)
+            });
+            table.set(ctx, "remove", remove_fn).map_err(|e| {
+                PicError::from(Value::String(ctx.intern(e.to_string().as_bytes())))
+            })?;
+
+            let sort_fn = Callback::from_fn(&ctx, |ctx, _exec, mut stack| {
+                let tbl = match stack.get(0) {
+                    Value::Table(t) => t,
+                    _ => {
+                        return Err(PicError::from(Value::String(ctx.intern(
+                            b"table.sort: bad argument #1 (table expected)",
+                        ))));
+                    }
+                };
+                stack.clear();
+                let len = tbl.length();
+                if len < 2 {
+                    return Ok(CallbackReturn::Return);
+                }
+                let mut vals: Vec<Value> = (1..=len)
+                    .map(|i| tbl.get_value(Value::Integer(i)))
+                    .collect();
+                // Insertion sort (no comparator support — Lua comparators require
+                // piccolo executor access which isn't available in callbacks).
+                // Redis scripts rarely sort with comparators.
+                vals.sort_by(|a, b| {
+                    let sa = a.to_string();
+                    let sb = b.to_string();
+                    sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                for (i, v) in vals.into_iter().enumerate() {
+                    tbl.set_value(&ctx, Value::Integer(i as i64 + 1), v).map_err(|e| {
+                        PicError::from(Value::String(ctx.intern(e.to_string().as_bytes())))
+                    })?;
+                }
+                Ok(CallbackReturn::Return)
+            });
+            table.set(ctx, "sort", sort_fn).map_err(|e| {
+                PicError::from(Value::String(ctx.intern(e.to_string().as_bytes())))
+            })?;
+
+            let concat_fn = Callback::from_fn(&ctx, |ctx, _exec, mut stack| {
+                let tbl = match stack.get(0) {
+                    Value::Table(t) => t,
+                    _ => {
+                        return Err(PicError::from(Value::String(ctx.intern(
+                            b"table.concat: bad argument #1 (table expected)",
+                        ))));
+                    }
+                };
+                let sep_str = match stack.get(1) {
+                    Value::String(s) => s.as_bytes().to_vec(),
+                    _ => Vec::new(),
+                };
+                let start = match stack.get(2) {
+                    Value::Integer(n) => n,
+                    _ => 1,
+                };
+                let end = match stack.get(3) {
+                    Value::Integer(n) => n,
+                    _ => tbl.length(),
+                };
+                stack.clear();
+                let mut result = Vec::new();
+                for idx in start..=end {
+                    let v = tbl.get_value(Value::Integer(idx));
+                    match v {
+                        Value::String(s) => result.extend_from_slice(s.as_bytes()),
+                        Value::Integer(n) => result.extend_from_slice(n.to_string().as_bytes()),
+                        Value::Number(f) => result.extend_from_slice(f.to_string().as_bytes()),
+                        Value::Boolean(b) => {
+                            result.extend_from_slice(if b { b"true" } else { b"false" });
+                        }
+                        Value::Nil => {}
+                        _ => {}
+                    }
+                    if idx < end && !sep_str.is_empty() {
+                        result.extend_from_slice(&sep_str);
+                    }
+                }
+                stack.push_back(Value::from(ctx.intern(&result)));
+                Ok(CallbackReturn::Return)
+            });
+            table.set(ctx, "concat", concat_fn).map_err(|e| {
+                PicError::from(Value::String(ctx.intern(e.to_string().as_bytes())))
+            })?;
+        }
+
+        // Add `cmsgpack` table with `unpack` (MessagePack decoder).
+        // BullMQ uses cmsgpack.unpack(ARGV[n]) to deserialize job options.
+        let cmsgpack_table = piccolo::Table::new(&ctx);
+        let cmsgpack_unpack_fn = Callback::from_fn(&ctx, |ctx, _exec, mut stack| {
+            let data: Value = stack.consume(ctx)?;
+            match data {
+                Value::Nil => {
+                    stack.push_back(Value::Nil);
+                    Ok(CallbackReturn::Return)
+                }
+                Value::String(s) => {
+                    let bytes = s.as_bytes();
+                    let decoded = msgpack_to_lua(ctx, bytes)?;
+                    stack.push_back(decoded);
+                    Ok(CallbackReturn::Return)
+                }
+                other => {
+                    // Non-string input: try to_string it first
+                    let s = data.to_string();
+                    let bytes = s.into_bytes();
+                    let decoded = msgpack_to_lua(ctx, &bytes)?;
+                    stack.push_back(decoded);
+                    Ok(CallbackReturn::Return)
+                }
+            }
+        });
+        cmsgpack_table
+            .set_value(
+                &ctx,
+                Value::from(ctx.intern(b"unpack")),
+                cmsgpack_unpack_fn.into(),
+            )
+            .map_err(|e| PicError::from(Value::String(ctx.intern(e.to_string().as_bytes()))))?;
+        ctx.set_global("cmsgpack", cmsgpack_table)?;
+
+        // Add `cjson` table with `encode` (JSON encoder).
+        // BullMQ uses cjson.encode(opts) and cjson.encode(parent) in job scripts.
+        let cjson_table = piccolo::Table::new(&ctx);
+        let cjson_encode_fn = Callback::from_fn(&ctx, |ctx, _exec, mut stack| {
+            let val: Value = stack.consume(ctx)?;
+            let json = piccolo_to_json(ctx, val)?;
+            let json_str = serde_json::to_string(&json)
+                .map_err(|e| PicError::from(Value::String(ctx.intern(e.to_string().as_bytes()))))?;
+            stack.push_back(Value::String(ctx.intern(json_str.as_bytes())));
+            Ok(CallbackReturn::Return)
+        });
+        cjson_table
+            .set_value(
+                &ctx,
+                Value::from(ctx.intern(b"encode")),
+                cjson_encode_fn.into(),
+            )
+            .map_err(|e| PicError::from(Value::String(ctx.intern(e.to_string().as_bytes()))))?;
+        ctx.set_global("cjson", cjson_table)?;
+
         run_executor(ctx, closure)
     }) {
         Ok(result) => Ok(result),
@@ -411,6 +805,128 @@ fn table_from_slice<'gc>(
         })?;
     }
     Ok(table)
+}
+
+/// Decodes a MessagePack binary payload into a piccolo Lua value.
+fn msgpack_to_lua<'gc>(
+    ctx: Context<'gc>,
+    data: &[u8],
+) -> Result<Value<'gc>, PicError<'gc>> {
+    let val = rmpv::decode::read_value(&mut std::io::Cursor::new(data)).map_err(|e| {
+        PicError::from(Value::String(ctx.intern(
+            format!("cmsgpack.unpack: {}", e).as_bytes(),
+        )))
+    })?;
+
+    mp_value_to_lua(ctx, val)
+}
+
+fn mp_value_to_lua<'gc>(
+    ctx: Context<'gc>,
+    val: rmpv::Value,
+) -> Result<Value<'gc>, PicError<'gc>> {
+    match val {
+        rmpv::Value::Nil => Ok(Value::Nil),
+        rmpv::Value::Boolean(b) => Ok(Value::Boolean(b)),
+        rmpv::Value::Integer(i) => {
+            let n = i.as_i64().unwrap_or(0);
+            Ok(Value::Integer(n))
+        }
+        rmpv::Value::F32(f) => Ok(Value::Number(f as f64)),
+        rmpv::Value::F64(f) => Ok(Value::Number(f)),
+        rmpv::Value::String(s) => {
+            let bytes = s.into_bytes();
+            Ok(Value::from(ctx.intern(&bytes)))
+        }
+        rmpv::Value::Binary(b) => Ok(Value::from(ctx.intern(&b))),
+        rmpv::Value::Array(arr) => {
+            let table = piccolo::Table::new(&ctx);
+            for (i, item) in arr.into_iter().enumerate() {
+                let key = Value::Integer(i as i64 + 1);
+                let value = mp_value_to_lua(ctx, item)?;
+                table.set_value(&ctx, key, value).map_err(|e| {
+                    PicError::from(Value::String(ctx.intern(e.to_string().as_bytes())))
+                })?;
+            }
+            Ok(Value::Table(table))
+        }
+        rmpv::Value::Map(map) => {
+            let table = piccolo::Table::new(&ctx);
+            for (k, v) in map {
+                let key = mp_value_to_lua(ctx, k)?;
+                let value = mp_value_to_lua(ctx, v)?;
+                table.set_value(&ctx, key, value).map_err(|e| {
+                    PicError::from(Value::String(ctx.intern(e.to_string().as_bytes())))
+                })?;
+            }
+            Ok(Value::Table(table))
+        }
+        rmpv::Value::Ext(_, _) => {
+            // MessagePack extension types — return raw binary as a fallback
+            Ok(Value::Nil)
+        }
+    }
+}
+
+/// Converts a piccolo `Value` to a `serde_json::Value` for `cjson.encode`.
+/// Tables with contiguous integer keys 1..n are encoded as JSON arrays;
+/// all other tables are encoded as JSON objects.
+fn piccolo_to_json<'gc>(
+    ctx: Context<'gc>,
+    val: Value<'gc>,
+) -> Result<serde_json::Value, PicError<'gc>> {
+    match val {
+        Value::Nil => Ok(serde_json::Value::Null),
+        Value::Boolean(b) => Ok(serde_json::Value::Bool(b)),
+        Value::Integer(n) => Ok(serde_json::Value::Number(n.into())),
+        Value::Number(n) => {
+            let num = serde_json::Number::from_f64(n)
+                .unwrap_or(serde_json::Number::from(0));
+            Ok(serde_json::Value::Number(num))
+        }
+        Value::String(s) => Ok(serde_json::Value::String(
+            String::from_utf8_lossy(s.as_bytes()).to_string(),
+        )),
+        Value::Table(table) => {
+            let len = table.length();
+            if len > 0 {
+                // Check if it's a sequential array (keys 1..len all present)
+                let mut arr = Vec::with_capacity(len as usize);
+                for i in 1..=len {
+                    let v = table.get_value(Value::Integer(i));
+                    arr.push(piccolo_to_json(ctx, v)?);
+                }
+                Ok(serde_json::Value::Array(arr))
+            } else {
+                // Object with string keys
+                let mut map = serde_json::Map::new();
+                let mut key = Value::Nil;
+                while let piccolo::table::NextValue::Found { key: k, value: v } =
+                    table.next(key)
+                {
+                    let json_val = piccolo_to_json(ctx, v)?;
+                    match k {
+                        Value::String(s) => {
+                            map.insert(
+                                String::from_utf8_lossy(s.as_bytes()).to_string(),
+                                json_val,
+                            );
+                        }
+                        Value::Integer(n) => {
+                            map.insert(n.to_string(), json_val);
+                        }
+                        _ => {
+                            let key_str = k.to_string();
+                            map.insert(key_str, json_val);
+                        }
+                    }
+                    key = k;
+                }
+                Ok(serde_json::Value::Object(map))
+            }
+        }
+        _ => Ok(serde_json::Value::Null),
+    }
 }
 
 /// Converts a Lua return value to [`EvalResult`] following Redis's reply rules:

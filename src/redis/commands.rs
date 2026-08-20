@@ -2,6 +2,8 @@
 //! enforcing the `MULTI`/`EXEC`/`DISCARD` lifecycle, and flushes any queued
 //! operations through the session's transaction dispatcher.
 
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 use bytes::Bytes;
 
 use crate::bitmap;
@@ -119,6 +121,33 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
             let argv = args[3 + num_keys..].to_vec();
             script::eval(
                 script,
+                keys,
+                argv,
+                session.store(),
+                session.registry(),
+                session.current_db(),
+            )
+        }
+        b"evalsha" => {
+            // EVALSHA sha1 numkeys [key ...] [arg ...]
+            if args.len() < 3 {
+                return error_op(session, "ERR wrong number of arguments for 'evalsha' command");
+            }
+            let sha1 = args[1].clone();
+            let Some(num_keys) = parse_i64(&args[2]) else {
+                return error_op(session, "ERR value is not an integer or out of range");
+            };
+            if num_keys < 0 {
+                return error_op(session, "ERR number of keys can't be negative");
+            }
+            let num_keys = num_keys as usize;
+            if args.len() < 3 + num_keys {
+                return error_op(session, "ERR wrong number of arguments for 'evalsha' command");
+            }
+            let keys = args[3..3 + num_keys].to_vec();
+            let argv = args[3 + num_keys..].to_vec();
+            script::evalsha(
+                sha1,
                 keys,
                 argv,
                 session.store(),
@@ -335,10 +364,101 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
             bitmap::bit_op(session, &args[2], op, &src_keys)
         }
         b"set" => {
-            let Some((key, value)) = parse_pair(&args[1..]) else {
+            if args.len() < 3 {
                 return error_op(session, "ERR wrong number of arguments for 'set' command");
-            };
-            strings::set(session, key, value)
+            }
+            let key = args[1].as_ref();
+            let value = args[2].as_ref();
+            let mut ttl: Option<Duration> = None;
+            let mut i = 3;
+            while i < args.len() {
+                match args[i].as_ref().to_ascii_uppercase().as_slice() {
+                    b"EX" => {
+                        i += 1;
+                        if i >= args.len() {
+                            return error_op(session, "ERR syntax error");
+                        }
+                        let Some(seconds) = parse_i64(&args[i]) else {
+                            return error_op(session, "ERR value is not an integer or out of range");
+                        };
+                        if seconds <= 0 {
+                            return error_op(session, "ERR invalid expire time in 'set' command");
+                        }
+                        ttl = Some(Duration::from_secs(seconds as u64));
+                    }
+                    b"PX" => {
+                        i += 1;
+                        if i >= args.len() {
+                            return error_op(session, "ERR syntax error");
+                        }
+                        let Some(ms) = parse_i64(&args[i]) else {
+                            return error_op(session, "ERR value is not an integer or out of range");
+                        };
+                        if ms <= 0 {
+                            return error_op(session, "ERR invalid expire time in 'set' command");
+                        }
+                        ttl = Some(Duration::from_millis(ms as u64));
+                    }
+                    b"EXAT" => {
+                        i += 1;
+                        if i >= args.len() {
+                            return error_op(session, "ERR syntax error");
+                        }
+                        let Some(ts) = parse_i64(&args[i]) else {
+                            return error_op(session, "ERR value is not an integer or out of range");
+                        };
+                        if ts <= 0 {
+                            return error_op(session, "ERR invalid expire time in 'set' command");
+                        }
+                        let now_ms = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as i64;
+                        let remaining = ts * 1000 - now_ms;
+                        if remaining <= 0 {
+                            ttl = Some(Duration::ZERO);
+                        } else {
+                            ttl = Some(Duration::from_millis(remaining as u64));
+                        }
+                    }
+                    b"PXAT" => {
+                        i += 1;
+                        if i >= args.len() {
+                            return error_op(session, "ERR syntax error");
+                        }
+                        let Some(ts_ms) = parse_i64(&args[i]) else {
+                            return error_op(session, "ERR value is not an integer or out of range");
+                        };
+                        if ts_ms <= 0 {
+                            return error_op(session, "ERR invalid expire time in 'set' command");
+                        }
+                        let now_ms = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as i64;
+                        let remaining = ts_ms - now_ms;
+                        if remaining <= 0 {
+                            ttl = Some(Duration::ZERO);
+                        } else {
+                            ttl = Some(Duration::from_millis(remaining as u64));
+                        }
+                    }
+                    b"NX" | b"XX" | b"KEEPTTL" | b"GET" => {
+                        // NX/XX/KEEPTTL/GET not yet supported — accepted but ignored
+                    }
+                    other => {
+                        return error_op(
+                            session,
+                            format!(
+                                "ERR unknown option '{}' in 'set' command",
+                                String::from_utf8_lossy(other)
+                            ),
+                        );
+                    }
+                }
+                i += 1;
+            }
+            strings::set(session, key, value, ttl)
         }
         b"get" => {
             if args.len() != 2 {
@@ -921,6 +1041,21 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
             }
             list::rpop(session, &args[1])
         }
+        b"rpoplpush" => {
+            if args.len() != 3 {
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'rpoplpush' command",
+                );
+            }
+            list::rpoplpush(session, &args[1], &args[2])
+        }
+        b"lpos" => {
+            if args.len() < 3 {
+                return error_op(session, "ERR wrong number of arguments for 'lpos' command");
+            }
+            list::lpos(session, &args[1], &args[2])
+        }
         b"llen" => {
             if args.len() != 2 {
                 return error_op(session, "ERR wrong number of arguments for 'llen' command");
@@ -1080,6 +1215,35 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                 return error_op(session, "ERR wrong number of arguments for 'sunionstore' command");
             }
             set::sunionstore(session, &args[1], &args[2..])
+        }
+        b"sscan" => {
+            if args.len() < 3 {
+                return error_op(session, "ERR wrong number of arguments for 'sscan' command");
+            }
+            let mut count = 10usize;
+            let mut pattern: Option<Vec<u8>> = None;
+            let mut i = 3;
+            while i < args.len() {
+                if args[i].eq_ignore_ascii_case(b"match") {
+                    if i + 1 >= args.len() {
+                        return error_op(session, "ERR syntax error");
+                    }
+                    pattern = Some(args[i + 1].to_vec());
+                    i += 2;
+                } else if args[i].eq_ignore_ascii_case(b"count") {
+                    if i + 1 >= args.len() {
+                        return error_op(session, "ERR syntax error");
+                    }
+                    let Some(n) = parse_i64(&args[i + 1]) else {
+                        return error_op(session, "ERR value is not an integer or out of range");
+                    };
+                    count = n.max(1) as usize;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            set::sscan(session, &args[1], &args[2], count, pattern)
         }
         b"zadd" => {
             if args.len() < 4 {
@@ -1286,6 +1450,21 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                 return error_op(session, "ERR value is not an integer or out of range");
             };
             keys::expire(session, &args[1], seconds)
+        }
+        b"pexpire" => {
+            if args.len() != 3 {
+                return error_op(session, "ERR wrong number of arguments for 'pexpire' command");
+            }
+            let Some(millis) = parse_i64(&args[2]) else {
+                return error_op(session, "ERR value is not an integer or out of range");
+            };
+            keys::pexpire(session, &args[1], millis)
+        }
+        b"persist" => {
+            if args.len() != 2 {
+                return error_op(session, "ERR wrong number of arguments for 'persist' command");
+            }
+            keys::persist(session, &args[1])
         }
         b"type" => {
             if args.len() != 2 {
