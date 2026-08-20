@@ -18,10 +18,8 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
-
       - uses: denoland/setup-deno@v2
         with:
-          deno-version: v2.x
-
+          deno-version: lts
       - name: Build, unit tests, and integration tests
         run: ./run-tests.sh

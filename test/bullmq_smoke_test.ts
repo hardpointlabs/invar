@@ -28,7 +28,7 @@ Deno.test({name: "Validate basic BullMQ interaction"}, async () => {
   await queue.add("smoke-job", { hello: "world" });
   console.log("job added, waiting for completion...");
   
-  let timer: number | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<void>((_, reject) => {
     timer = setTimeout(() => reject(new Error("timed out waiting for job completion")), 5_000);
   });
