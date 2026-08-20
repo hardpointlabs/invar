@@ -1,3 +1,10 @@
+## [1.0.8](https://github.com/hardpointlabs/invar/compare/v1.0.7...v1.0.8) (2026-08-20)
+
+
+### Bug Fixes
+
+* bump setip-zig action ([8ce16cf](https://github.com/hardpointlabs/invar/commit/8ce16cf39b5a09e078ed90f92a2c7422ef2bc771))
+
 ## [1.0.7](https://github.com/hardpointlabs/invar/compare/v1.0.6...v1.0.7) (2026-08-20)
 
 
