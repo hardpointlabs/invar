@@ -1419,6 +1419,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "futures",
+ "gc-arena",
  "kv",
  "piccolo",
  "rand 0.9.5",

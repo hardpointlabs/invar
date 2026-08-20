@@ -116,7 +116,14 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
             }
             let keys = args[3..3 + num_keys].to_vec();
             let argv = args[3 + num_keys..].to_vec();
-            script::eval(script, keys, argv)
+            script::eval(
+                script,
+                keys,
+                argv,
+                session.store(),
+                session.registry(),
+                session.current_db(),
+            )
         }
         b"select" => {
             match &args[1..] {
@@ -1949,13 +1956,6 @@ fn error(session: &mut Session, msg: impl Into<Bytes>) -> RespValue {
         session.mark_dirty();
     }
     RespValue::Error(msg.into())
-}
-
-/// Enqueues a wire-only op, recording the `+QUEUED` reply if in MULTI.
-fn queue_wire(session: &mut Session, replies: &mut Vec<RespValue>, wire_op: impl WireOp + 'static) {
-    if let Some(queued) = session.enqueue_wire_op(Box::new(wire_op)) {
-        replies.push(queued);
-    }
 }
 
 /// Parses a command's arguments as exactly one `(key, value)` pair.

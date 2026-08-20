@@ -2593,5 +2593,69 @@
     "type": "error",
     "version": "7.2.0",
     "description": "EVAL requires at least a script and numkeys"
+  },
+  {
+    "name": "EVAL redis.call SET and GET",
+    "command": ["EVAL", "redis.call('SET', 'eval_rc_key', 'eval_rc_val'); return redis.call('GET', 'eval_rc_key')", "0"],
+    "expected": "eval_rc_val",
+    "type": "bulk_string",
+    "version": "7.2.0",
+    "description": "redis.call can SET and GET within a script"
+  },
+  {
+    "name": "EVAL redis.call returns integer",
+    "command": ["EVAL", "redis.call('SET', 'eval_rc_counter', '10'); return redis.call('INCR', 'eval_rc_counter')", "0"],
+    "expected": 11,
+    "type": "integer",
+    "version": "7.2.0",
+    "description": "redis.call returns the integer from INCR"
+  },
+  {
+    "name": "EVAL redis.call GET missing key returns nil",
+    "command": ["EVAL", "return redis.call('GET', 'eval_rc_missing')", "0"],
+    "expected": null,
+    "type": "null",
+    "version": "7.2.0",
+    "description": "redis.call GET on a missing key returns nil"
+  },
+  {
+    "name": "EVAL redis.call multiple commands",
+    "command": ["EVAL", "redis.call('SET', 'eval_rc_k1', 'v1'); redis.call('SET', 'eval_rc_k2', 'v2'); return {redis.call('GET', 'eval_rc_k1'), redis.call('GET', 'eval_rc_k2')}", "0"],
+    "expected": ["v1", "v2"],
+    "type": "array",
+    "version": "7.2.0",
+    "description": "redis.call can issue multiple commands in one script"
+  },
+  {
+    "name": "EVAL redis.call error propagates",
+    "command": ["EVAL", "redis.call('ECHO')", "0"],
+    "expected": {"error": true},
+    "type": "error",
+    "version": "7.2.0",
+    "description": "redis.call raises a Lua error on a Redis command error"
+  },
+  {
+    "name": "EVAL redis.pcall catches error",
+    "command": ["EVAL", "local ok, err = pcall(redis.call, 'ECHO'); return ok", "0"],
+    "expected": 0,
+    "type": "integer",
+    "version": "7.2.0",
+    "description": "redis.pcall returns false on error"
+  },
+  {
+    "name": "EVAL redis.pcall returns result on success",
+    "command": ["EVAL", "local ok, val = pcall(redis.call, 'SET', 'eval_pcall_key', 'pcall_val'); return ok", "0"],
+    "expected": 1,
+    "type": "integer",
+    "version": "7.2.0",
+    "description": "redis.pcall returns true on success"
+  },
+  {
+    "name": "EVAL redis.call with KEYS and ARGV",
+    "command": ["EVAL", "redis.call('SET', KEYS[1], ARGV[1]); return redis.call('GET', KEYS[1])", "1", "eval_rc_script_key", "eval_rc_script_val"],
+    "expected": "eval_rc_script_val",
+    "type": "bulk_string",
+    "version": "7.2.0",
+    "description": "redis.call works with KEYS and ARGV tables"
   }
 ]

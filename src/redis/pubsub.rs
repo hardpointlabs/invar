@@ -706,9 +706,9 @@ struct ChannelsOp {
 }
 
 impl WireOp for ChannelsOp {
-    fn reply(&self, result: Result<DbResult, DbError>) -> RespValue {
+    fn reply(&self, _result: Result<DbResult, DbError>) -> RespValue {
         let pattern = &self.pattern;
-        let channels: Vec<Bytes> = self.registry.active_channels_val(pattern.as_ref().map({|p| p.as_ref()}));
+        let channels: Vec<Bytes> = self.registry.active_channels_val(pattern.as_ref().map(|p| p.as_ref()));
 
         RespValue::Array(Some(
             channels

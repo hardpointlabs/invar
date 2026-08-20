@@ -25,6 +25,7 @@ pub mod zset;
 #[cfg(test)]
 pub mod testutil;
 mod script;
+mod stream;
 
 pub use common::{RedisStore, Session, WatchRegistry};
 pub use listener::RedisListener;
