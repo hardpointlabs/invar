@@ -84,7 +84,7 @@ impl DbOp for SaveOp {
     }
 }
 
-pub fn save(session: Session) -> QueuedOp {
+pub fn save(session: &Session) -> QueuedOp {
     QueuedOp {
         db_op: Box::new(SaveOp { store: session.store() }),
         wire_op: Box::new(DefaultWire),
