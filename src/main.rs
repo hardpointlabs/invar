@@ -50,19 +50,19 @@ async fn main() {
         Backend::Slate => {
             let bucket = cli
                 .bucket
-                .expect("bucket is required for the slate backend");
+                .expect("bucket is required for the SlateDB backend");
             Arc::new(
                 SlateDb::open(SlateDbOpts {
                     path: "/tmp/invar-slatedb".to_string(),
                     object_store_url: format!("s3://{bucket}/"),
                     settings: None,
                 })
-                .await
+                .await.inspect_err(|e| tracing::error!(error = %e, "operation failed"))
                 .expect("failed to open SlateDB store"),
             )
         }
         Backend::Fjall => {
-            let path = cli.path.expect("path is required for the fjall backend");
+            let path = cli.path.expect("path is required for the Fjall backend");
             Arc::new(FjallDb::open(path)
                 .inspect_err(|e| tracing::error!(error = %e, "operation failed"))
                 .expect("failed to open Fjall store"))
