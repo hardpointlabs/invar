@@ -4,26 +4,20 @@ project_name: invar
 
 builds:
   - id: invar
+    builder: rust
     binary: invar
-    goos:
-      - linux
-    goarch:
-      - amd64
-      - arm64
-    tags:
-      - slatedb
+    # The workspace has multiple members, so cargo needs the package flag.
+    flags:
+      - --release
+      - -p=invar
+    # glibc 2.31 (Ubuntu 20.04 / Debian 11) is the oldest runtime supported;
+    # cargo-zigbuild builds against that ABI regardless of the build host.
+    targets:
+      - x86_64-unknown-linux-gnu.2.31
+      - aarch64-unknown-linux-gnu.2.31
     env:
-      - CGO_ENABLED=1
-      - 'CC={{ if eq .Arch "arm64" }}aarch64-linux-gnu-gcc{{ else }}gcc{{ end }}'
-      - >-
-        CGO_LDFLAGS=-L .build/slatedb/target/{{ if eq .Arch "arm64" }}aarch64-unknown-linux-gnu/{{ end }}release
-    # The $ORIGIN rpath lives in ldflags rather than env: goreleaser runs
-    # os.ExpandEnv over build env values, which would strip $ORIGIN, while
-    # ldflags only pass through the Go template engine.
-    ldflags:
-      - -X github.com/hardpointlabs/invar/config.Version={{ .Version }}
-      - -X github.com/hardpointlabs/invar/config.Commit={{ .Commit }}
-      - -extldflags=-Wl,-rpath,$ORIGIN
+      - INVAR_VERSION={{ .Version }}
+      - INVAR_COMMIT={{ .Commit }}
 
 archives:
   - formats: ["tar.gz"]
@@ -33,13 +27,6 @@ archives:
       {{- if eq .Arch "amd64" }}x86_64
       {{- else if eq .Arch "386" }}i386
       {{- else }}{{ .Arch }}{{ end }}
-    files:
-      - LICENSE*
-      - README*
-      - CHANGELOG*
-      - src: >-
-          .build/slatedb/target/{{ if eq .Arch "arm64" }}aarch64-unknown-linux-gnu/{{ end }}release/libslatedb_uniffi.so
-        dst: libslatedb_uniffi.so
 
 dockers_v2:
   - id: default
@@ -53,9 +40,6 @@ dockers_v2:
     platforms:
       - linux/amd64
       - linux/arm64
-    extra_files:
-      - .build/goreleaser/libslatedb_uniffi-amd64.so
-      - .build/goreleaser/libslatedb_uniffi-arm64.so
 
 changelog:
   sort: asc

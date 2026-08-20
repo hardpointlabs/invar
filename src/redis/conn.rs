@@ -23,9 +23,17 @@ use crate::common::RedisStore;
 use crate::resp::RespValue;
 
 /// The Invar version and commit banners reported by `LOLWUT`, matching the
-/// Go `config` package defaults.
-pub const VERSION: &str = "dev";
-pub const COMMIT: &str = "unknown";
+/// Go `config` package defaults. Overridden at release build time via the
+/// INVAR_VERSION/INVAR_COMMIT env vars (see .goreleaser.yaml).
+pub const VERSION: &str = match option_env!("INVAR_VERSION") {
+    Some(v) => v,
+    None => "dev",
+};
+
+pub const COMMIT: &str = match option_env!("INVAR_COMMIT") {
+    Some(c) => c,
+    None => "unknown",
+};
 
 /// `SYNC`/`PSYNC` — stubbed, since Invar runs single-writer without
 /// replication. Replies `+OK`.
