@@ -1,3 +1,10 @@
+## [1.0.7](https://github.com/hardpointlabs/invar/compare/v1.0.6...v1.0.7) (2026-08-20)
+
+
+### Bug Fixes
+
+* update Goreleaser config ([b429eb3](https://github.com/hardpointlabs/invar/commit/b429eb3bfc302526662ee74f3b57a7a6af19c3a8))
+
 ## [1.0.6](https://github.com/hardpointlabs/invar/compare/v1.0.5...v1.0.6) (2026-08-12)
 
 
