@@ -5,11 +5,12 @@ go 1.25.0
 require (
 	github.com/alexflint/go-arg v1.6.1
 	github.com/anishathalye/porcupine v1.3.0
-	github.com/dgraph-io/badger/v4 v4.9.5
+	github.com/dgraph-io/badger/v4 v4.9.6
 	github.com/prometheus/client_golang v1.24.1
 	github.com/rs/zerolog v1.35.1
 	github.com/tidwall/redcon v1.6.4
 	golang.org/x/sync v0.22.0
+	slatedb.io/slatedb-go v0.15.0
 )
 
 require (
@@ -37,4 +38,3 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
-
