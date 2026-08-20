@@ -110,6 +110,26 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
             [msg] => conn::echo(msg.clone()),
             _ => error_op(session, "ERR wrong number of arguments for 'echo' command"),
         },
+        b"eval" => {
+            // EVAL script numkeys [key ...] [arg ...]
+            if args.len() < 3 {
+                return error_op(session, "ERR wrong number of arguments for 'eval' command");
+            }
+            let script = args[1].clone();
+            let Some(num_keys) = parse_i64(&args[2]) else {
+                return error_op(session, "ERR value is not an integer or out of range");
+            };
+            if num_keys < 0 {
+                return error_op(session, "ERR number of keys can't be negative");
+            }
+            let num_keys = num_keys as usize;
+            if args.len() < 3 + num_keys {
+                return error_op(session, "ERR wrong number of arguments for 'eval' command");
+            }
+            let keys = args[3..3 + num_keys].to_vec();
+            let argv = args[3 + num_keys..].to_vec();
+            script::eval(script, keys, argv)
+        }
         b"select" => {
             match &args[1..] {
                 [db] => match parse_i64(db) {
