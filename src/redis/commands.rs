@@ -48,25 +48,6 @@ pub async fn enqueue_command(session: &mut Session, args: &[Bytes]) -> Vec<RespV
         replies.push(queued);
     }
 
-    // TODO blocking ops lifted out of direct invocation path
-    // b"bzpopmin" | b"bzpopmax" => {
-    //     let want_min = name == b"bzpopmin";
-    //     if args.len() < 3 {
-    //         return error_op(session, format!( "ERR wrong number of arguments for '{}' command", String::from_utf8_lossy(&name) ),);
-    //     }
-    //     // Syntax: BZPOPMIN key [key ...] timeout. The last argument is
-    //     // the timeout in (fractional) seconds; 0 blocks indefinitely.
-    //     let timeout_arg = &args[args.len() - 1];
-    //     let Some(timeout) = parse_f64(timeout_arg) else {
-    //         return error_op(session, "ERR timeout is not a float or out of range");
-    //     };
-    //     if timeout < 0.0 {
-    //         return error_op(session, "ERR timeout is not a float or out of range");
-    //     }
-    //     let keys: Vec<&[u8]> = args[1..args.len() - 1].iter().map(|b| b.as_ref()).collect();
-    //     replies.push(zset::bzpop_reply(session, &keys, timeout, want_min).await);
-    // }
-
     replies.extend(session.dispatch_pending_ops(false).await);
     replies
 }
@@ -1216,6 +1197,22 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
             } else {
                 zset::zpopmax(session, &args[1], count)
             }
+        }
+        b"bzpopmin" | b"bzpopmax" => {
+            let want_min = name == b"bzpopmin";
+            // BZPOPMIN key [key ...] timeout
+            if args.len() < 3 {
+                return error_op(session, format!("ERR wrong number of arguments for '{}' command", String::from_utf8_lossy(&name)));
+            }
+            let timeout_arg = &args[args.len() - 1];
+            let Some(timeout) = parse_f64(timeout_arg) else {
+                return error_op(session, "ERR timeout is not a float or out of range");
+            };
+            if timeout < 0.0 {
+                return error_op(session, "ERR timeout is not a float or out of range");
+            }
+            let keys: Vec<&[u8]> = args[1..args.len() - 1].iter().map(|b| b.as_ref()).collect();
+            zset::bzpop(session, &keys, timeout, want_min)
         }
         b"exists" => {
             if args.len() < 2 {

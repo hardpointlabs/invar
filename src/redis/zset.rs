@@ -23,11 +23,14 @@
 //! `ValueType::SortedSet` metadata before any member is touched, so a command
 //! aimed at a key holding another value type replies `WRONGTYPE`.
 //!
-//! Blocking pops (`BZPOPMIN`/`BZPOPMAX`) are special: they are not
-//! [`QueuedOp`]s. They write their reply directly (mirroring the Go listener,
-//! which returns without dispatching pending ops), so they live as the async
-//! [`bzpop_reply`] function that the dispatcher calls directly. Writers that
-//! add to a sorted set (`ZADD`) claim and serve the longest-waiting blocked
+//! Blocking pops (`BZPOPMIN`/`BZPOPMAX`) are regular [`QueuedOp`]s.  When
+//! `should_block()` is `true` (outside `MULTI` and scripts) the op opens its
+//! own writable transaction for the non-blocking attempt and, if all keys are
+//! empty, registers a waiter on the [`WatchRegistry`] and blocks.  Inside
+//! `MULTI` or a Lua script, `should_block()` is `false` so the op degrades to
+//! a non-blocking pop using the dispatcher's batch transaction — matching
+//! Redis semantics.  Writers that add to a sorted set (`ZADD`) claim and serve
+//! the longest-waiting blocked
 //! client inside their DbOp, exactly like Go, via the [`WatchRegistry`].
 
 use std::collections::HashMap;
@@ -40,7 +43,7 @@ use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use crate::common::session::Session;
-use crate::common::{Claim, PopResult, ValueType, WatchRegistry};
+use crate::common::{Claim, PopResult, RedisStore, ValueType, WatchRegistry};
 use crate::resp::RespValue;
 
 /// Metadata type byte stamped on every zset sentinel, matching
@@ -2434,87 +2437,131 @@ fn bzpop_reply_value(p: PopResult) -> RespValue {
     ]))
 }
 
-/// The shared implementation of `BZPOPMIN` and `BZPOPMAX`.
-///
-/// Step 1: attempt an immediate non-blocking pop across the keys in order
-/// (first non-empty key wins), inside a writable transaction.
-/// Step 2: if all keys are empty and `session.should_block()` is `true`,
-/// register a waiter and block. If blocking is forbidden (`MULTI`/`EXEC` or a
-/// Lua-script context), reply with a null immediately — the same reply a real
-/// timeout produces.
-///
-/// `want_min` is `true` for `BZPOPMIN`, `false` for `BZPOPMAX`. A `timeout` of
-/// `0` blocks indefinitely. Returns a single RESP reply. Like the Go
-/// implementation, this is NOT a [`QueuedOp`]: the dispatcher must not run
-/// pending ops after calling it.
-pub fn bzpop_reply(
+/// Attempts a non-blocking pop across the given keys (first non-empty wins).
+async fn try_pop(
+    tx: &dyn Tx,
+    nodes: &[(NodeRef, Vec<u8>)],
+    want_min: bool,
+) -> Result<Option<PopResult>, DbError> {
+    for (node, raw_key) in nodes {
+        let popped = if want_min {
+            pop_one_min(tx, node).await
+        } else {
+            pop_one_max(tx, node).await
+        };
+        match popped {
+            Err(e) => return Err(e),
+            Ok(Some(p)) => {
+                return Ok(Some(PopResult {
+                    key: raw_key.clone(),
+                    member: p.member,
+                    score: p.score,
+                }));
+            }
+            Ok(None) => {}
+        }
+    }
+    Ok(None)
+}
+
+struct BzpopOp {
+    store: Arc<dyn RedisStore>,
+    registry: Arc<WatchRegistry>,
+    nodes: Vec<(NodeRef, Vec<u8>)>,
+    timeout: f64,
+    want_min: bool,
+    can_block: bool,
+}
+
+impl DbOp for BzpopOp {
+    fn run<'a>(&'a self, tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
+        Box::pin(async move {
+            if self.can_block {
+                // Normal mode: open own writable tx, try pop, block if empty.
+                let own_tx = self.store.begin(true).await?;
+                match try_pop(&*own_tx, &self.nodes, self.want_min).await {
+                    Ok(Some(result)) => {
+                        own_tx.commit().await.map_err(DbError::Kv)?;
+                        Ok(Box::new(Some(result)) as DbResult)
+                    }
+                    Ok(None) => {
+                        own_tx.discard();
+                        let public_keys: Vec<Vec<u8>> = self
+                            .nodes
+                            .iter()
+                            .map(|(n, _)| n.public_key.clone())
+                            .collect();
+                        let duration = if self.timeout.is_finite() && self.timeout > 0.0 {
+                            Some(Duration::from_secs_f64(self.timeout))
+                        } else {
+                            None
+                        };
+                        match self.registry.block(&public_keys, self.want_min, duration).await {
+                            Some(result) => Ok(Box::new(Some(result)) as DbResult),
+                            None => Ok(Box::new(None::<PopResult>) as DbResult),
+                        }
+                    }
+                    Err(e) => {
+                        own_tx.discard();
+                        Err(e)
+                    }
+                }
+            } else {
+                // MULTI / script mode: use the dispatcher's batch tx,
+                // non-blocking only.
+                let result = try_pop(tx, &self.nodes, self.want_min).await?;
+                Ok(Box::new(result) as DbResult)
+            }
+        })
+    }
+}
+
+struct BzpopWire;
+
+impl WireOp for BzpopWire {
+    fn reply(&self, result: Result<DbResult, DbError>) -> RespValue {
+        match result {
+            Ok(result) => match result.downcast::<Option<PopResult>>() {
+                Ok(p) => match *p {
+                    Some(p) => bzpop_reply_value(p),
+                    None => RespValue::BulkString(None),
+                },
+                Err(_) => internal_error(),
+            },
+            Err(err) => err_resp(&err),
+        }
+    }
+}
+
+/// `BZPOPMIN key [key ...] timeout` / `BZPOPMAX key [key ...] timeout`.
+pub fn bzpop(
     session: &Session,
     keys: &[&[u8]],
     timeout: f64,
     want_min: bool,
-) -> BoxFuture<'static, RespValue> {
-    // Capture everything the blocking future needs as owned data up front:
-    // a `&Session` (itself not `Sync`) must not be held across the await.
+) -> QueuedOp {
+    let can_block = session.should_block();
     let store = session.store();
     let registry = session.registry();
-    let can_block = session.should_block();
     let nodes: Vec<(NodeRef, Vec<u8>)> = keys
         .iter()
         .map(|k| (NodeRef::new(session, k), k.to_vec()))
         .collect();
 
-    Box::pin(async move {
-        let tx = match store.begin(true).await {
-            Ok(tx) => tx,
-            Err(e) => return RespValue::Error(format!("ERR {e}").into()),
-        };
-
-        let mut immediate: Option<PopResult> = None;
-        for (node, raw_key) in &nodes {
-            let popped = if want_min {
-                pop_one_min(&*tx, node).await
-            } else {
-                pop_one_max(&*tx, node).await
-            };
-            match popped {
-                Err(e) => {
-                    tx.discard();
-                    return err_resp(&e);
-                }
-                Ok(Some(p)) => {
-                    immediate = Some(PopResult {
-                        key: raw_key.clone(),
-                        member: p.member,
-                        score: p.score,
-                    });
-                    break;
-                }
-                Ok(None) => {}
-            }
-        }
-
-        if let Some(immediate) = immediate {
-            if tx.commit().await.is_err() {
-                return RespValue::Error(Bytes::from_static(b"ERR Couldn't commit transaction"));
-            }
-            return bzpop_reply_value(immediate);
-        }
-
-        tx.discard();
-        if !can_block {
-            return RespValue::BulkString(None);
-        }
-        let public_keys: Vec<Vec<u8>> = nodes.iter().map(|(n, _)| n.public_key.clone()).collect();
-        let duration = if timeout.is_finite() && timeout > 0.0 {
-            Some(Duration::from_secs_f64(timeout))
-        } else {
-            None
-        };
-        match registry.block(&public_keys, want_min, duration).await {
-            Some(result) => bzpop_reply_value(result),
-            None => RespValue::BulkString(None),
-        }
-    })
+    QueuedOp {
+        db_op: Box::new(BzpopOp {
+            store,
+            registry,
+            nodes,
+            timeout,
+            want_min,
+            can_block,
+        }),
+        wire_op: Box::new(BzpopWire),
+        is_mutating: !can_block,
+        allowed_in_tx: true,
+        abort_in_tx: false,
+    }
 }
 
 #[cfg(test)]
@@ -2527,6 +2574,17 @@ mod tests {
     /// renders the reply (the unit-test equivalent of Go's `kvs.Update`/`Read`).
     async fn exec(session: &Session, op: QueuedOp) -> RespValue {
         let store = session.store();
+        let tx = store.begin(op.is_mutating).await.expect("tx");
+        let outcome = op.db_op.run(&*tx).await;
+        if op.is_mutating {
+            tx.commit().await.expect("commit");
+        }
+        op.wire_op.reply(outcome)
+    }
+
+    /// Like [`exec`] but takes owned data so it can be spawned as a `'static`
+    /// task (needed for blocking-pop tests).
+    async fn exec_owned(op: QueuedOp, store: Arc<dyn RedisStore>) -> RespValue {
         let tx = store.begin(op.is_mutating).await.expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
@@ -3234,8 +3292,9 @@ mod tests {
         let writer = Session::new(store, registry);
 
         let keys: Vec<&[u8]> = vec![b"bk"];
-        let reply_fut = bzpop_reply(&waiter, &keys, 2.0, want_min);
-        let handle = tokio::spawn(reply_fut);
+        let op = bzpop(&waiter, &keys, 2.0, want_min);
+        let store_clone = waiter.store();
+        let handle = tokio::spawn(exec_owned(op, store_clone));
 
         // Give the waiter time to register on the key before writing.
         tokio::time::sleep(Duration::from_millis(30)).await;
@@ -3294,7 +3353,7 @@ mod tests {
         let session = test_session();
         zadd_pairs(&session, b"bk", &[("a", 1.0), ("b", 2.0)]).await;
         let key: Vec<&[u8]> = vec![b"bk"];
-        let reply = bzpop_reply(&session, &key, 1.0, false).await;
+        let reply = exec(&session, bzpop(&session, &key, 1.0, false)).await;
         match reply {
             RespValue::Array(Some(v)) => {
                 assert_eq!(v.len(), 3);
@@ -3324,7 +3383,7 @@ mod tests {
     async fn bzpop_timeout_returns_null() {
         let session = test_session();
         let key: Vec<&[u8]> = vec![b"nothing"];
-        let reply = bzpop_reply(&session, &key, 0.05, true).await;
+        let reply = exec(&session, bzpop(&session, &key, 0.05, true)).await;
         assert_eq!(reply, RespValue::BulkString(None));
     }
 
@@ -3335,7 +3394,7 @@ mod tests {
         let mut session = test_session();
         session.enter_multi();
         let key: Vec<&[u8]> = vec![b"bk"];
-        let reply = bzpop_reply(&session, &key, 0.0, true).await;
+        let reply = exec(&session, bzpop(&session, &key, 0.0, true)).await;
         assert_eq!(reply, RespValue::BulkString(None));
     }
 }
