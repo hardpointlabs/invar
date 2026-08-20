@@ -57,7 +57,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: Set up Zig
         if: steps.semantic.outputs.new_release == 'true'
-        uses: mlugg/setup-zig@v1
+        uses: mlugg/setup-zig@v2
       - name: Install cargo-zigbuild
         if: steps.semantic.outputs.new_release == 'true'
         run: cargo install --locked cargo-zigbuild
