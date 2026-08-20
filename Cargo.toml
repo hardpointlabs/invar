@@ -1,0 +1,16 @@
+[workspace]
+members = [".", "src/kv", "src/redis"]
+resolver = "2"
+
+[package]
+name = "invar"
+version = "1.0.6"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+kv = { path = "src/kv" }
+redis = { path = "src/redis" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"]}

@@ -218,29 +218,38 @@ in this implementation.
 
 ---
 
+## Scripting commands
+
+| Command | Status | Notes |
+|---------|--------|-------|
+| EVAL | ✅ | Piccolo-backed Lua interpreter; core stdlib only (no I/O); `KEYS`/`ARGV` exposed; Redis commands not exposed yet |
+
+---
+
 ## Connection commands
 
 | Command | Status | Notes |
 |---------|--------|-------|
 | AUTH | 🚫 | Not implementing |
 | CLIENT CACHING | 🚫 | Not implementing |
-| CLIENT GETNAME | 🚫 | Not implementing |
+| CLIENT GETNAME | ✅ | Per-connection name via CLIENT SETNAME |
 | CLIENT GETREDIR | 🚫 | Not implementing |
 | CLIENT ID | ✅ | |
 | CLIENT INFO | ✅ | |
 | CLIENT KILL | 🚫 | Not implementing |
-| CLIENT LIST | 🚫 | |
+| CLIENT LIST | ✅ | Reports the current connection only |
 | CLIENT NO-EVICT | 🚫 | Not implementing |
 | CLIENT NO-TOUCH | 🚫 | Not implementing |
 | CLIENT PAUSE | 🚫 | Not implementing |
 | CLIENT REPLY | 🚫 | Not implementing |
-| CLIENT SETNAME | 🚫 | Not implementing |
+| CLIENT SETNAME | ✅ | |
+| CLIENT SETINFO | ✅ | LIB-NAME / LIB-VER |
 | CLIENT TRACKING | 🚫 | Not implementing |
 | CLIENT TRACKINGINFO | 🚫 | Not implementing |
 | CLIENT UNBLOCK | 🚫 | Not implementing |
 | CLIENT UNPAUSE | 🚫 | Not implementing |
 | ECHO | ✅ | |
-| HELLO | ✅ | |
+| HELLO | ✅ | RESP2 only; RESP3 refused with NOPROTO |
 | PING | ✅ | |
 | QUIT | ✅ | |
 | RESET | 🚫 | |
@@ -282,7 +291,7 @@ in this implementation.
 | FAILOVER | 🚫 | |
 | FLUSHALL | ✅ | |
 | FLUSHDB | ✅ | |
-| INFO | ✅ | |
+| INFO | ✅ | Reports redis_version:6.2.0 + invar_version |
 | LASTSAVE | 🚫 | |
 | LATENCY DOCTOR | 🚫 | |
 | LATENCY GRAPH | 🚫 | |
@@ -344,7 +353,7 @@ in this implementation.
 | RENAME | ✅ | |
 | RENAMENX | ✅ | |
 | RESTORE | 🚫 | |
-| SCAN | 🚫 | |
+| SCAN | ✅ | MATCH, COUNT, and TYPE options supported |
 | SORT | 🚫 | |
 | SORT_RO | 🚫 | |
 | TOUCH | 🚫 | |

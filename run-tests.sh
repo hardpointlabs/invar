@@ -2,7 +2,6 @@
 
 set -e
 
-KV_BINARY="./invar"
 PID_FILE="/tmp/kv-test-daemon.pid"
 LOG_FILE="/tmp/kv-test-daemon.log"
 PORT=6379
@@ -29,13 +28,13 @@ VERSION=${2:-dev}
 SHORT_COMMIT=${COMMIT:0:7}
 
 echo "Building version $VERSION (commit $SHORT_COMMIT)..."
-go build -ldflags="-X github.com/hardpointlabs/invar/config.Version=$VERSION -X github.com/hardpointlabs/invar/config.Commit=$SHORT_COMMIT" -o "$KV_BINARY" .
+cargo build
 
 echo "Running unit & linearizability tests..."
-go test ./...
+cargo test --workspace
 
 echo "Starting invar daemon on port $PORT..."
-./invar redis badger --data-dir /tmp/invar-test-data > "$LOG_FILE" 2>&1 &
+./target/debug/invar --backend fjall --path /tmp/invar-test-data --redis > "$LOG_FILE" 2>&1 &
 echo $! > "$PID_FILE"
 
 echo "Waiting for daemon to be ready..."
@@ -58,4 +57,4 @@ echo "Daemon is ready."
 echo ""
 
 cd test
-deno test --allow-net --allow-read
+deno test --allow-net --allow-read --allow-env

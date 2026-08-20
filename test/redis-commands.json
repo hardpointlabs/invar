@@ -2384,5 +2384,522 @@
     "version": "1.2.0",
     "description": "Queuing SUBSCRIBE should mark the transaction dirty and abort EXEC",
     "setup": [["MULTI"], ["SUBSCRIBE", "somechannel"]]
+  },
+  {
+    "name": "INFO returns a bulk string with Server section",
+    "command": ["INFO"],
+    "expected": "# Server",
+    "type": "bulk_string_contains",
+    "version": "2.8.12",
+    "description": "INFO reports a # Server section"
+  },
+  {
+    "name": "INFO reports redis_version",
+    "command": ["INFO"],
+    "expected": "redis_version:",
+    "type": "bulk_string_contains",
+    "version": "2.8.12",
+    "description": "INFO exposes the server version for client capability probing"
+  },
+  {
+    "name": "INFO reports noeviction maxmemory policy",
+    "command": ["INFO"],
+    "expected": "maxmemory_policy:noeviction",
+    "type": "bulk_string_contains",
+    "version": "2.8.12",
+    "description": "INFO reports maxmemory_policy:noeviction"
+  },
+  {
+    "name": "INFO reports not loading",
+    "command": ["INFO"],
+    "expected": "loading:0",
+    "type": "bulk_string_contains",
+    "version": "2.8.12",
+    "description": "INFO reports loading:0 so ready checks pass immediately"
+  },
+  {
+    "name": "CLIENT SETNAME",
+    "command": ["CLIENT", "SETNAME", "integration-test"],
+    "expected": "OK",
+    "type": "simple_string",
+    "version": "2.6.9",
+    "description": "CLIENT SETNAME assigns a name to the connection"
+  },
+  {
+    "name": "CLIENT GETNAME",
+    "command": ["CLIENT", "GETNAME"],
+    "expected": "integration-test",
+    "type": "bulk_string",
+    "version": "2.6.9",
+    "description": "CLIENT GETNAME returns the connection name"
+  },
+  {
+    "name": "CLIENT SETINFO LIB-VER",
+    "command": ["CLIENT", "SETINFO", "LIB-VER", "6.0.0"],
+    "expected": "OK",
+    "type": "simple_string",
+    "version": "7.2.0",
+    "description": "CLIENT SETINFO stores the client library version"
+  },
+  {
+    "name": "CLIENT GETINFO LIB-VER",
+    "command": ["CLIENT", "GETINFO", "LIB-VER"],
+    "expected": "6.0.0",
+    "type": "bulk_string",
+    "version": "7.2.0",
+    "description": "CLIENT GETINFO LIB-VER returns the stored library version"
+  },
+  {
+    "name": "SCAN empty MATCH returns no keys",
+    "command": ["SCAN", "0", "MATCH", "invar_scan_a_*", "COUNT", "1000000"],
+    "expected": ["0", []],
+    "type": "array",
+    "version": "7.2.0",
+    "description": "SCAN with a MATCH pattern matching no keys returns an empty key list and a zero cursor once the keyspace is exhausted"
+  },
+  {
+    "name": "SCAN returns matching keys and zero cursor",
+    "command": ["SCAN", "0", "MATCH", "invar_scan_b_*", "COUNT", "1000000"],
+    "expected": ["0", ["invar_scan_b_1", "invar_scan_b_2"]],
+    "type": "array",
+    "version": "7.2.0",
+    "description": "SCAN returns all keys matching the pattern (filtering out non-matching ones) and a zero cursor when done",
+    "setup": [
+      ["SET", "invar_scan_b_1", "one"],
+      ["SET", "invar_scan_b_2", "two"],
+      ["SET", "invar_scan_b2_decoy", "three"]
+    ]
+  },
+  {
+    "name": "SCAN COUNT pages through keys",
+    "command": ["SCAN", "invar_scan_c_1", "MATCH", "invar_scan_c_*", "COUNT", "1"],
+    "expected": ["invar_scan_c_2", ["invar_scan_c_2"]],
+    "type": "array",
+    "version": "7.2.0",
+    "description": "SCAN with COUNT 1 returns one key plus the key name as the next cursor",
+    "setup": [
+      ["SET", "invar_scan_c_1", "one"],
+      ["SET", "invar_scan_c_2", "two"],
+      ["SET", "invar_scan_c_3", "three"],
+      ["SET", "invar_scan_z_tail", "z"]
+    ]
+  },
+  {
+    "name": "SCAN resumes from the returned cursor",
+    "command": ["SCAN", "invar_scan_c_2", "MATCH", "invar_scan_c_*", "COUNT", "1"],
+    "expected": ["invar_scan_c_3", ["invar_scan_c_3"]],
+    "type": "array",
+    "version": "7.2.0",
+    "description": "SCAN resumes the iteration from the cursor returned by the previous page",
+    "setup": [
+      ["SET", "invar_scan_c_1", "one"],
+      ["SET", "invar_scan_c_2", "two"],
+      ["SET", "invar_scan_c_3", "three"],
+      ["SET", "invar_scan_z_tail", "z"]
+    ]
+  },
+  {
+    "name": "SCAN with no arguments errors",
+    "command": ["SCAN"],
+    "expected": {"error": true},
+    "type": "error",
+    "version": "7.2.0",
+    "description": "SCAN requires at least a cursor argument"
+  },
+  {
+    "name": "SCAN rejects COUNT below one",
+    "command": ["SCAN", "0", "COUNT", "0"],
+    "expected": {"error": true},
+    "type": "error",
+    "version": "7.2.0",
+    "description": "SCAN COUNT must be a positive integer"
+  },
+  {
+    "name": "SCAN rejects unknown options",
+    "command": ["SCAN", "0", "NOSUCHOPT"],
+    "expected": {"error": true},
+    "type": "error",
+    "version": "7.2.0",
+    "description": "SCAN rejects unknown option tokens"
+  },
+  {
+    "name": "EVAL returns integer",
+    "command": ["EVAL", "return 1", "0"],
+    "expected": 1,
+    "type": "integer",
+    "version": "7.2.0",
+    "description": "A script returning an integer gets an integer reply"
+  },
+  {
+    "name": "EVAL returns string",
+    "command": ["EVAL", "return 'hello'", "0"],
+    "expected": "hello",
+    "type": "bulk_string",
+    "version": "7.2.0",
+    "description": "A script returning a string gets a bulk string reply"
+  },
+  {
+    "name": "EVAL returns nil",
+    "command": ["EVAL", "return nil", "0"],
+    "expected": null,
+    "type": "null",
+    "version": "7.2.0",
+    "description": "A script returning nil gets a null reply"
+  },
+  {
+    "name": "EVAL returns array",
+    "command": ["EVAL", "return {1, 2, 3}", "0"],
+    "expected": [1, 2, 3],
+    "type": "array",
+    "version": "7.2.0",
+    "description": "A script returning a sequential table gets an array reply"
+  },
+  {
+    "name": "EVAL returns nested array",
+    "command": ["EVAL", "return {1, {2, 3}}", "0"],
+    "expected": [1, [2, 3]],
+    "type": "array",
+    "version": "7.2.0",
+    "description": "Nested tables are converted recursively"
+  },
+  {
+    "name": "EVAL sees KEYS and ARGV",
+    "command": ["EVAL", "return KEYS[1] .. ':' .. ARGV[1]", "1", "invar_eval_key", "invar_eval_arg"],
+    "expected": "invar_eval_key:invar_eval_arg",
+    "type": "bulk_string",
+    "version": "7.2.0",
+    "description": "The script sees the KEYS and ARGV tables"
+  },
+  {
+    "name": "EVAL reports runtime errors",
+    "command": ["EVAL", "error('boom')", "0"],
+    "expected": {"error": true},
+    "type": "error",
+    "version": "7.2.0",
+    "description": "A runtime error in the script surfaces as an error reply"
+  },
+  {
+    "name": "EVAL rejects invalid numkeys",
+    "command": ["EVAL", "return 1", "notanumber"],
+    "expected": {"error": true},
+    "type": "error",
+    "version": "7.2.0",
+    "description": "EVAL numkeys must be an integer"
+  },
+  {
+    "name": "EVAL requires a script and numkeys",
+    "command": ["EVAL", "return 1"],
+    "expected": {"error": true},
+    "type": "error",
+    "version": "7.2.0",
+    "description": "EVAL requires at least a script and numkeys"
+  },
+  {
+    "name": "EVAL redis.call SET and GET",
+    "command": ["EVAL", "redis.call('SET', 'eval_rc_key', 'eval_rc_val'); return redis.call('GET', 'eval_rc_key')", "0"],
+    "expected": "eval_rc_val",
+    "type": "bulk_string",
+    "version": "7.2.0",
+    "description": "redis.call can SET and GET within a script"
+  },
+  {
+    "name": "EVAL redis.call returns integer",
+    "command": ["EVAL", "redis.call('SET', 'eval_rc_counter', '10'); return redis.call('INCR', 'eval_rc_counter')", "0"],
+    "expected": 11,
+    "type": "integer",
+    "version": "7.2.0",
+    "description": "redis.call returns the integer from INCR"
+  },
+  {
+    "name": "EVAL redis.call GET missing key returns nil",
+    "command": ["EVAL", "return redis.call('GET', 'eval_rc_missing')", "0"],
+    "expected": null,
+    "type": "null",
+    "version": "7.2.0",
+    "description": "redis.call GET on a missing key returns nil"
+  },
+  {
+    "name": "EVAL redis.call multiple commands",
+    "command": ["EVAL", "redis.call('SET', 'eval_rc_k1', 'v1'); redis.call('SET', 'eval_rc_k2', 'v2'); return {redis.call('GET', 'eval_rc_k1'), redis.call('GET', 'eval_rc_k2')}", "0"],
+    "expected": ["v1", "v2"],
+    "type": "array",
+    "version": "7.2.0",
+    "description": "redis.call can issue multiple commands in one script"
+  },
+  {
+    "name": "EVAL redis.call error propagates",
+    "command": ["EVAL", "redis.call('ECHO')", "0"],
+    "expected": {"error": true},
+    "type": "error",
+    "version": "7.2.0",
+    "description": "redis.call raises a Lua error on a Redis command error"
+  },
+  {
+    "name": "EVAL redis.pcall catches error",
+    "command": ["EVAL", "local ok, err = pcall(redis.call, 'ECHO'); return ok", "0"],
+    "expected": 0,
+    "type": "integer",
+    "version": "7.2.0",
+    "description": "redis.pcall returns false on error"
+  },
+  {
+    "name": "EVAL redis.pcall returns result on success",
+    "command": ["EVAL", "local ok, val = pcall(redis.call, 'SET', 'eval_pcall_key', 'pcall_val'); return ok", "0"],
+    "expected": 1,
+    "type": "integer",
+    "version": "7.2.0",
+    "description": "redis.pcall returns true on success"
+  },
+  {
+    "name": "EVAL redis.call with KEYS and ARGV",
+    "command": ["EVAL", "redis.call('SET', KEYS[1], ARGV[1]); return redis.call('GET', KEYS[1])", "1", "eval_rc_script_key", "eval_rc_script_val"],
+    "expected": "eval_rc_script_val",
+    "type": "bulk_string",
+    "version": "7.2.0",
+    "description": "redis.call works with KEYS and ARGV tables"
+  },
+  {
+    "name": "XADD explicit ID",
+    "command": ["XADD", "stream_exp", "1000-0", "name", "alice"],
+    "expected": "1000-0",
+    "type": "bulk_string",
+    "version": "5.0.0",
+    "description": "XADD with explicit entry ID"
+  },
+  {
+    "name": "XLEN missing key",
+    "command": ["XLEN", "noexist_xlen"],
+    "expected": 0,
+    "type": "integer",
+    "version": "5.0.0",
+    "description": "XLEN on a missing key returns 0"
+  },
+  {
+    "name": "XLEN after adds",
+    "command": ["XLEN", "stream_len"],
+    "expected": 3,
+    "type": "integer",
+    "version": "5.0.0",
+    "description": "XLEN returns the entry count",
+    "setup": [
+      ["XADD", "stream_len", "1-0", "f", "v"],
+      ["XADD", "stream_len", "2-0", "f", "v"],
+      ["XADD", "stream_len", "3-0", "f", "v"]
+    ]
+  },
+  {
+    "name": "XRANGE missing key",
+    "command": ["XRANGE", "noexist_xr", "-", "+"],
+    "expected": [],
+    "type": "array",
+    "version": "5.0.0",
+    "description": "XRANGE on missing key returns empty array"
+  },
+  {
+    "name": "XRANGE all entries",
+    "command": ["XRANGE", "stream_xr_all", "-", "+"],
+    "type": "array",
+    "version": "5.0.0",
+    "description": "XRANGE returns all entries in ascending order",
+    "setup": [
+      ["XADD", "stream_xr_all", "1-0", "f", "v1"],
+      ["XADD", "stream_xr_all", "2-0", "f", "v2"],
+      ["XADD", "stream_xr_all", "3-0", "f", "v3"]
+    ],
+    "expected": [
+      ["1-0", ["f", "v1"]],
+      ["2-0", ["f", "v2"]],
+      ["3-0", ["f", "v3"]]
+    ]
+  },
+  {
+    "name": "XRANGE with COUNT",
+    "command": ["XRANGE", "stream_xr_cnt", "-", "+", "COUNT", "2"],
+    "type": "array",
+    "version": "5.0.0",
+    "description": "XRANGE with COUNT limits results",
+    "setup": [
+      ["XADD", "stream_xr_cnt", "1-0", "f", "v1"],
+      ["XADD", "stream_xr_cnt", "2-0", "f", "v2"],
+      ["XADD", "stream_xr_cnt", "3-0", "f", "v3"]
+    ],
+    "expected": [
+      ["1-0", ["f", "v1"]],
+      ["2-0", ["f", "v2"]]
+    ]
+  },
+  {
+    "name": "XRANGE filtered range",
+    "command": ["XRANGE", "stream_xr_flt", "2-0", "2-0"],
+    "type": "array",
+    "version": "5.0.0",
+    "description": "XRANGE with specific start and end",
+    "setup": [
+      ["XADD", "stream_xr_flt", "1-0", "f", "v1"],
+      ["XADD", "stream_xr_flt", "2-0", "f", "v2"],
+      ["XADD", "stream_xr_flt", "3-0", "f", "v3"]
+    ],
+    "expected": [
+      ["2-0", ["f", "v2"]]
+    ]
+  },
+  {
+    "name": "XREVRANGE returns reversed",
+    "command": ["XREVRANGE", "stream_xrr", "3-0", "1-0"],
+    "type": "array",
+    "version": "5.0.0",
+    "description": "XREVRANGE returns entries in descending order",
+    "setup": [
+      ["XADD", "stream_xrr", "1-0", "f", "v1"],
+      ["XADD", "stream_xrr", "2-0", "f", "v2"],
+      ["XADD", "stream_xrr", "3-0", "f", "v3"]
+    ],
+    "expected": [
+      ["3-0", ["f", "v3"]],
+      ["2-0", ["f", "v2"]],
+      ["1-0", ["f", "v1"]]
+    ]
+  },
+  {
+    "name": "XDEL removes entry",
+    "command": ["XDEL", "stream_xd", "2-0"],
+    "expected": 1,
+    "type": "integer",
+    "version": "5.0.0",
+    "description": "XDEL removes a single entry by ID",
+    "setup": [
+      ["XADD", "stream_xd", "1-0", "f", "v1"],
+      ["XADD", "stream_xd", "2-0", "f", "v2"],
+      ["XADD", "stream_xd", "3-0", "f", "v3"]
+    ]
+  },
+  {
+    "name": "XDEL multiple entries",
+    "command": ["XDEL", "stream_xdm", "1-0", "3-0"],
+    "expected": 2,
+    "type": "integer",
+    "version": "5.0.0",
+    "description": "XDEL removes multiple entries",
+    "setup": [
+      ["XADD", "stream_xdm", "1-0", "f", "v1"],
+      ["XADD", "stream_xdm", "2-0", "f", "v2"],
+      ["XADD", "stream_xdm", "3-0", "f", "v3"]
+    ]
+  },
+  {
+    "name": "XTRIM MAXLEN",
+    "command": ["XTRIM", "stream_xtm", "MAXLEN", "2"],
+    "expected": 1,
+    "type": "integer",
+    "version": "5.0.0",
+    "description": "XTRIM MAXLEN removes oldest entries",
+    "setup": [
+      ["XADD", "stream_xtm", "1-0", "f", "v1"],
+      ["XADD", "stream_xtm", "2-0", "f", "v2"],
+      ["XADD", "stream_xtm", "3-0", "f", "v3"]
+    ]
+  },
+  {
+    "name": "XTRIM MINID",
+    "command": ["XTRIM", "stream_xti", "MINID", "2-0"],
+    "expected": 1,
+    "type": "integer",
+    "version": "5.0.0",
+    "description": "XTRIM MINID removes entries below ID",
+    "setup": [
+      ["XADD", "stream_xti", "1-0", "f", "v1"],
+      ["XADD", "stream_xti", "2-0", "f", "v2"],
+      ["XADD", "stream_xti", "3-0", "f", "v3"]
+    ]
+  },
+  {
+    "name": "XSETID basic",
+    "command": ["XSETID", "stream_xsi", "500-0"],
+    "expected": "OK",
+    "type": "simple_string",
+    "version": "5.0.0",
+    "description": "XSETID sets the last entry ID"
+  },
+  {
+    "name": "XREAD entries after ID",
+    "command": ["XREAD", "STREAMS", "stream_xrd", "1-0"],
+    "type": "array",
+    "version": "5.0.0",
+    "description": "XREAD returns entries after the given ID",
+    "setup": [
+      ["XADD", "stream_xrd", "1-0", "f", "v1"],
+      ["XADD", "stream_xrd", "2-0", "f", "v2"],
+      ["XADD", "stream_xrd", "3-0", "f", "v3"]
+    ],
+    "expected": [
+      ["stream_xrd", [
+        ["2-0", ["f", "v2"]],
+        ["3-0", ["f", "v3"]]
+      ]]
+    ]
+  },
+  {
+    "name": "XREAD missing stream",
+    "command": ["XREAD", "STREAMS", "noexist_xread", "0-0"],
+    "expected": null,
+    "type": "null",
+    "version": "5.0.0",
+    "description": "XREAD on missing stream returns nil"
+  },
+  {
+    "name": "WRONGTYPE XLEN on string key",
+    "command": ["XLEN", "wt_xlen_str"],
+    "expected": "WRONGTYPE",
+    "type": "error",
+    "version": "5.0.0",
+    "description": "XLEN on a string key returns WRONGTYPE",
+    "setup": [["SET", "wt_xlen_str", "value"]]
+  },
+  {
+    "name": "WRONGTYPE XRANGE on string key",
+    "command": ["XRANGE", "wt_xrange_str", "-", "+"],
+    "expected": "WRONGTYPE",
+    "type": "error",
+    "version": "5.0.0",
+    "description": "XRANGE on a string key returns WRONGTYPE",
+    "setup": [["SET", "wt_xrange_str", "value"]]
+  },
+  {
+    "name": "WRONGTYPE XDEL on string key",
+    "command": ["XDEL", "wt_xdel_str", "1-0"],
+    "expected": "WRONGTYPE",
+    "type": "error",
+    "version": "5.0.0",
+    "description": "XDEL on a string key returns WRONGTYPE",
+    "setup": [["SET", "wt_xdel_str", "value"]]
+  },
+  {
+    "name": "XADD multiple fields",
+    "command": ["XADD", "stream_mf", "500-0", "f1", "v1", "f2", "v2"],
+    "expected": "500-0",
+    "type": "bulk_string",
+    "version": "5.0.0",
+    "description": "XADD with multiple field-value pairs"
+  },
+  {
+    "name": "XRANGE multiple fields",
+    "command": ["XRANGE", "stream_mf", "500-0", "500-0"],
+    "type": "array",
+    "version": "5.0.0",
+    "description": "XRANGE shows all fields of an entry",
+    "setup": [
+      ["XADD", "stream_mf", "500-0", "f1", "v1", "f2", "v2"]
+    ],
+    "expected": [
+      ["500-0", ["f1", "v1", "f2", "v2"]]
+    ]
+  },
+  {
+    "name": "XINFO STREAM missing key",
+    "command": ["XINFO", "STREAM", "noexist_xinfo"],
+    "expected": {"error": true},
+    "type": "error",
+    "version": "5.0.0",
+    "description": "XINFO STREAM on missing key returns error"
   }
 ]

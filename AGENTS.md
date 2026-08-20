@@ -1,65 +1,45 @@
 # Invar
 
-Invar is a data store that runs as a standalone daemon and supports the Redis wire protocol and a small but growing subset of Redis commands (the authoritative reference of Redis commands can be found on the official website at https://redis.io/docs/latest/commands/set/index.html.md). The project is 100% written in golang. You can see the currently supported list of commands in the integration test cases in `./test/redis-commands.json`.
+Invar is a lightweight document DB which supports the Redis wire protocol and a small but growing subset of Redis
+commands. It uses LSM-trees for persistence and supports multiple implementations to facilitate local development (with
+Fjall and real production deployment with SlateDB).
+
+Invar's focus is on operational simplicity and durability, not outright performance. The choice of SlateDB was
+deliberate: offer a document DB that Redis clients can speak to, but has well-defined transactional guarantees without
+the operational complexity of managing a normal stateful workload.
+
+Invar only supports single-writers per key-value store; it's designed to be light enough to be scaled horizontally,
+with many instances + key-value stores running in parallel as discrete datasets.
+
+## Global requirements
+
+* Correctness comes before everything: this is not an in-memory data store; the loss of unintended modification of data is never acceptable
+* Minimise code churn: avoid refactorings unrelated to the task at hand, and if significant amount of adjacent code is being churned, ask the user what to do
+* Do not speculate on public API behavior: if some functionality is not clear, ask the user rather than guessing.
+
+## Tech stack
+
+The project is a Cargo-based Rust project. A legacy golang implementation is present and can be used for reference; it
+is scheduled for removal. While the Rust project diverges in idiomatic language/framework-specific ways such as
+threading model, it preserves the key layout of the original implementation.
 
 ## Overall structure
 
-Directory layout follows golang packaging norms (it's module-based), save for the integration tests.
+Directory layout follows Cargo packaging norms, save for the integration tests, which use Deno/TypeScript and some shell
+scripting.
 
-- `kv`: vendor-neutral abstraction over LSM-tree-based key-value stores. Gives a single interface to build upon with common minimum consistency and isolation guarantees
-- `redis` package: main implementation code for the Redis listener. Relies on github.com/tidwall/redcon for Redis wire command [de]serialization the `kv` module for the actual persistence. This package therefore destructures Redis command data into individual keys that are stored in the kv store, and then looked up & translated back into Redis responses. See the later section about 'redis key structure'.
-- `redis/common`: Common utilities for redis connection management, redis-specific key prefixing, tx queuing and command boilerplate
-- `mongo` package: experimental. ignore this for now
+- `./src`: implementation source
+- `./src/kv`: vendor-neutral abstraction over LSM-tree-based key-value stores. Gives a single interface to build upon with common minimum consistency and isolation guarantees
+- `./src/redis` package: main implementation code for the Redis listener. Relies on github.com/tidwall/redcon for Redis wire command [de]serialization the `kv` module for the actual persistence. This package therefore destructures Redis command data into individual keys that are stored in the kv store, and then looked up & translated back into Redis responses. See the later section about 'redis key structure'.
 - `test`: a test suite where Deno boots a test script containing a Redis client, and runs through a set of Redis commands with known expected responses, and evaluates the correctness of what comes back to the client.
 
 ## Development
 
-This is a normal Go project. To fetch modules:
+This is a normal Rust project. To build:
 
-`go mod download`
+`cargo build`
 
-The modules should be periodically updated:
-
-`go get -u ./...`
-
-To build, simply `go build .`. At this time there are no non-standard build flags.
-
-To run, the storage backend is a mandatory subcommand. For example, invoke the resulting executable as `./invar redis badger --data-dir /tmp/badger` to spin up a daemon with BadgerDB listening on `:6379`. The Redis and Mongo protocol subcommands each accept `badger` or `slatedb`:
-
-### Optional SlateDB backend
-
-`kv/slate.go` (and `kv/slate_test.go`) implement the kv interface on top of SlateDB via the `slatedb.io/slatedb-go` bindings. This requires the native `libslatedb_uniffi` shared library and is compiled only when the `slatedb` build tag is set (e.g. `go build -tags slatedb .`). The default build has no SlateDB references and works with the BadgerDB backend only.
-
-The committed `go.mod` intentionally contains no SlateDB entries; the `require`/`replace` directives are injected by the Makefile. To set up the SlateDB prerequisites (clones SlateDB at a pinned tag into `.build/`, builds the release uniffi lib, and wires `go.mod`):
-
-`make deps-slatedb`
-
-Then build invar with the SlateDB backend, run the tagged tests, or run only the BadgerDB tests:
-
-* `make build` — builds `./invar` with `-tags slatedb` and an embedded rpath (no `DYLD_LIBRARY_PATH` needed at runtime)
-* `make test` — runs the unit tests with `-tags slatedb`
-* `make test-badger` — runs the plain `go test ./...` without SlateDB
-* `make clean` — removes `.build/` and drops the injected `go.mod` entries
-
-`make` (default target) runs `deps-slatedb` followed by `build`. `make regen-bindings` regenerates the checked-in Go bindings when the SlateDB tag is bumped (requires `uniffi-bindgen-go`).
-
-Note: `go mod tidy` evaluates all build-tag files, so it needs the SlateDB checkout present (run `make deps-slatedb` first) or it will fail trying to resolve `slatedb.io/slatedb-go`.
-
-### Simulating a release locally
-
-The goreleaser routine (linux/amd64 + linux/arm64 binaries, archives, and the multi-arch docker images) must run on linux/amd64 because the amd64 Go build uses the native `gcc`. It cannot run directly on macOS. `./simulate-release.sh` runs the exact steps in an `ubuntu:24.04` container with the host docker daemon mounted, then invokes `goreleaser release --snapshot --clean`, which builds and `--load`s the images into the local daemon without pushing anything. Run `make clean` afterwards to restore `go.mod` and remove `.build/`. Requires Docker (OrbStack: `open -a OrbStack`).
-
-Before committing, first run staticcheck to catch code quality regressions:
-
-`./run-staticcheck.sh`
-
-This compares current staticcheck output against the baseline in `.staticcheck.baseline`. Any new issues (not present in the baseline) will cause it to fail. To update the baseline (e.g. after cleaning up an existing issue), run:
-
-`staticcheck ./... > .staticcheck.baseline`
-
-Then ensure all the tests pass as outlined below.
-
-If you have implemented a new command(s), check the `COMPATIBILITY.md` table and update it accordingly.
+To run, the storage backend is a mandatory subcommand. For example, invoke the resulting executable as `./target/debug/invar --backend fjall --path /tmp/invar --redis` to spin up a daemon with BadgerDB listening on `:6379`. The Redis and Mongo protocol subcommands each accept `badger` or `slatedb`:
 
 ## Branching strategy
 
@@ -67,26 +47,26 @@ Create a new branch based on latest master for new feature development. Create a
 
 ## Test
 
-* To run all unit tests, run `go test ./...`
-* To run the integration tests, run `./run-tests.sh` from the project root
+* To run all Rust-based unit tests, run `cargo test --workspace`
+* To run al the unit tests + the integration tests, run `./run-tests.sh` from the project root
 
 If the invar executable is hanging for some reason (e.g. resource contention, typo causing infinite loop, e.t.c) you can use the `pprof` tool that's built into go as outlined in the [`net/http/pprof`](https://pkg.go.dev/net/http/pprof) docs and the main [pprof](https://github.com/google/pprof) docs to pinpoint execution points in the program. The pprof HTTP handler listens on `localhost:6060`.
 
 ## Redis key structure
 
-Redis has a couple of concepts that don't map naturally to BadgerDB's flat keyspace:
+Redis has a couple of concepts that don't map naturally to an LSM tree's flat keyspace, such as:
 
 * What redis calls a `db`, which to all intents and purposes is a namespace
 * Compound data structures: lists, sets, e.t.c which under the hood will be represented by multiple keys which contain a combination of user-provided data as well as internal references to other keys
 
-The naming convention for keys is as follows:
+The layout for keys is as follows:
 
 For public keys (i.e. user-accessible keys):
 
-"<current DB>:keyname"
+`<current DB>:<keyname>`
 
 For internal (i.e. non-user-accessible keys):
 
-"-<current DB>:keyname:rest..."
+`-<current DB>:<keyname>:<rest...>`
 
-For the semantics of how internal keys reference each other, see inline comments (e.g. for the linked list implementation in list.go)
+For the semantics of how internal keys reference each other, see inline comments (e.g. for the linked list implementation in `./src/redis/list.rs`)

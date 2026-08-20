@@ -1,10 +1,11 @@
 # Redis Common Utils
 
-This module contains 2 things:
+This module contains 4 things:
 
 1. Command operation queuing logic for redcon's read/accept loop, for dispatching operations to a `KeyValueStore`
 2. A `QueuedOp` type which unifies DB operations with corresponding Redis wire operations
 3. Exposes a `Session` that callers can use to obtain standard key prefixes without having to pollute their code with current db/connection state
+4. Housekeeping logic for tracking clients which are blocked, 'watching' for value changes on certain keys
 
 # Usage
 

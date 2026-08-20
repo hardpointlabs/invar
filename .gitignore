@@ -1,6 +1,8 @@
+.idea
 .DS_Store
 .build/
 invar
 dump.rdb
 dist
 .vscode
+target
