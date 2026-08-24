@@ -4,7 +4,7 @@ Durable storage lives in S3, not on disks you have to provision or manage.
 
 Invar gives you Redis-compatible storage without the tradeoff between "cheap" and "durable." There are no attached volumes to size, replicate, or run out of — source of truth lives in object storage, so cost scales with what you store, not what you provision. A single binary can idle at a few MB of RAM, making it practical to run thousands of isolated instances on modest hardware.
 
-[![Apache 2.0 License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)![GitHub Release](https://img.shields.io/github/v/release/hardpointlabs/invar) ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/hardpointlabs/invar/release.yml)
+[![Apache 2.0 License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE) ![GitHub Release](https://img.shields.io/github/v/release/hardpointlabs/invar) ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/hardpointlabs/invar/release.yml)
 
 ---
 
