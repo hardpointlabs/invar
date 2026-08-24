@@ -1,65 +1,38 @@
-# Invar
+# Invar — A Diskless, Redis-Compatible Document Database
 
-![Logo](/logo.png)
+Durable storage lives in S3, not on disks you have to provision or manage.
 
-![GitHub Release](https://img.shields.io/github/v/release/hardpointlabs/invar) ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/hardpointlabs/invar/release.yml)
+Invar gives you Redis-compatible storage without the tradeoff between "cheap" and "durable." There are no attached volumes to size, replicate, or run out of — source of truth lives in object storage, so cost scales with what you store, not what you provision. A single binary can idle at a few MB of RAM, making it practical to run thousands of isolated instances on modest hardware.
 
-## Overview
-
-Invar is a lightweight durable document database. Its main goals are:
-
-* Lightweight single binary
-* Simple consistency & durability guarantees
-* Compatibility with RESP and Mongo Wire Protocols
-* Open: Apache 2.0-licensed
-
-It supports clients which speak the Redis Serialization Protocol (RESP), and has incubating support for MongoDB client drivers.
-
-If you need to store JSON documents reliably, without the complexity or licensing constraints of other systems, try Invar.
-
-## Backed by Hardpoint
-
-Invar is backed by [Hardpoint Labs](https://hardpoint.dev) and powers our enterprise products. If you need to offer comprehensive tenant isolation for enterprise customers without throwing away your existing stack, [give us a try](https://docs.hardpoint.dev/who-is-hardpoint-for).
+[![Apache 2.0 License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)![GitHub Release](https://img.shields.io/github/v/release/hardpointlabs/invar) ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/hardpointlabs/invar/release.yml)
 
 ---
 
-## Getting started
+## Why Invar
 
-We ship Docker builds of our latest releases which you can pull and run as a 1-liner:
+- **Redis wire protocol compatibility.** Point your existing Redis clients at Invar. Compatibility is tested continuously against real-world libraries, including [BullMQ](https://github.com/taskforcesh/bullmq), not just the raw command spec. See [COMPATIBILITY.md](COMPATIBILITY.md) for the full command matrix.
+- **Diskless by design.** No PVCs, no volumes to size or replicate, no capacity planning. Durable data lives in S3; cost tracks what you store, not what you provision. A small hot working set stays fast via local caching (see [How it works](#how-it-works)).
+- **Defined durability and transactional guarantees.** Invar targets snapshot isolation, with merge support incubating, and is validated against a linearizability test suite — not just "probably works."
+- **Single binary, lightweight.** One process, no cluster coordination required to run. Deploy it like you'd deploy any small service.
+- **Real local dev experience.** Invar runs on [Fjall](https://github.com/fjall-rs/fjall) locally, so you get a fast, fully-functional loop without needing S3 or a mock for it.
+- **Apache 2.0.** Fully open source.
 
+## How it works
+
+Invar is built on [SlateDB](https://slatedb.io), an LSM-tree storage engine designed to sit directly on object storage, with [Fjall](https://github.com/fjall-rs/fjall) as the equivalent local-disk engine for development and cases where talking to S3 isn't practical. Each Invar instance is single-writer by design — it's built to run well as one-database-per-dataset at fleet scale, not as a single large shared cluster.
+
+**"Diskless" refers to the source of truth, not literal I/O.** Invar uses local NVMe as a best-effort read cache to keep hot data fast and mitigate S3 latency on read-heavy workloads. That cache is disposable — Invar's durability guarantees never depend on it, and it can be lost or rebuilt without data loss. Durable state lives in S3 (or Fjall locally); nothing on disk needs to be provisioned, sized, or replicated by you.
+
+## Quickstart
+
+```bash
+docker run -v /tmp/invar:/tmp/invar -p 6379:6379 ghcr.io/hardpointlabs/invar:v1.0.8 --backend fjall --path /tmp/inver --redis
 ```
-docker run -it -v /tmp:/var/run/invar -p 6379:7379 ghcr.io/hardpointlabs/invar:latest redis badger --data-dir /var/run/invar
-```
 
-### Redis client compatibility
+## Compatibility
 
-See the [compatibility](./COMPATIBILITY.md) docs for more details.
+Invar implements a broad, actively-tested subset of the Redis command set, including stream commands. See [COMPATIBILITY.md](COMPATIBILITY.md) for the full list and known gaps.
 
-### Mongo driver compatibility
+## License
 
-We're still working on a stable release with Mongo wire protocol support; please create an [issue](https://github.com/hardpointlabs/invar/issues) if this is something you're interested in.
-
-## Architectural Overview
-
-```mermaid
-
-flowchart TB
-    subgraph Invar["Invar"]
-        direction TB
-
-        subgraph QueryEngines["Query Engines"]
-            direction LR
-            Mongo["Mongo"]
-            Redis["Redis"]
-        end
-
-        subgraph KVS["KVS"]
-            direction LR
-            SlateDB["SlateDB"]
-            BadgerDB["BadgerDB"]
-        end
-
-        Mongo --> KVS
-        Redis --> KVS
-    end
-```
+Apache 2.0. See [LICENSE](LICENSE).
