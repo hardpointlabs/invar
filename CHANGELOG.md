@@ -1,3 +1,10 @@
+## [1.0.10](https://github.com/hardpointlabs/invar/compare/v1.0.9...v1.0.10) (2026-08-25)
+
+
+### Bug Fixes
+
+* ignore intermediate zig cache state ([afdf95e](https://github.com/hardpointlabs/invar/commit/afdf95ef58df45c37fd18cdce544a47ec75f3a62))
+
 ## [1.0.9](https://github.com/hardpointlabs/invar/compare/v1.0.8...v1.0.9) (2026-08-25)
 
 
