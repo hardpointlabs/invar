@@ -10,7 +10,7 @@ path = "lib.rs"
 async-trait = "0.1"
 fjall = "3.1"
 slatedb = { version = "0.15", features = ["aws", "foyer", "compression"] }
-thiserror = "1"
+thiserror = "2.0.20"
 
 [dev-dependencies]
 tempfile = "3"
