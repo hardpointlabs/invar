@@ -2196,7 +2196,7 @@ dependencies = [
  "gc-arena",
  "kv",
  "piccolo",
- "rand 0.9.5",
+ "rand 0.10.2",
  "rmpv",
  "serde_json",
  "sha1",
@@ -3178,7 +3178,7 @@ version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8464ec13c3691491391d9fce00f6416c9a48e46972f72d7865688be2080192c9"
 dependencies = [
- "rand 0.9.5",
+ "rand 0.10.2",
 ]
 
 [[package]]
