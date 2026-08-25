@@ -1,3 +1,10 @@
+## [1.0.9](https://github.com/hardpointlabs/invar/compare/v1.0.8...v1.0.9) (2026-08-25)
+
+
+### Bug Fixes
+
+* doc updates, redis/tokio lifecycle management, lib upgrades ([130b01e](https://github.com/hardpointlabs/invar/commit/130b01eaa036f7135c3729a078cacd9e2380d9fb))
+
 ## [1.0.8](https://github.com/hardpointlabs/invar/compare/v1.0.7...v1.0.8) (2026-08-20)
 
 
