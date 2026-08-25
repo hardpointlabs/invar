@@ -705,7 +705,7 @@ fn run_script(
                     stack.push_back(decoded);
                     Ok(CallbackReturn::Return)
                 }
-                other => {
+                _ => {
                     // Non-string input: try to_string it first
                     let s = data.to_string();
                     let bytes = s.into_bytes();
