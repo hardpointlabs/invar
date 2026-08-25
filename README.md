@@ -10,17 +10,31 @@ Invar gives you Redis-compatible storage without the tradeoff between "cheap" an
 
 ## Why Invar
 
-- **Redis wire protocol compatibility:** Point your existing Redis clients at Invar. Compatibility is tested continuously against real-world libraries, including [BullMQ](https://github.com/taskforcesh/bullmq), not just the raw command spec. See [COMPATIBILITY.md](COMPATIBILITY.md) for the full command matrix.
-- **Diskless by design:** No state replicate, no capacity planning. Durable data lives in S3; cost tracks what you store, not what you provision. A small hot working set stays fast via optional local caching (see [How it works](#how-it-works)).
-- **Defined durability and transactional guarantees:** Invar targets snapshot isolation, with merge support incubating, and is validated against a linearizability test suite — not just "probably works."
-- **Single binary, lightweight:** One process, no cluster coordination required to run. Deploy it like you'd deploy any small service.
-- **Real local dev experience:** Invar runs on [Fjall](https://github.com/fjall-rs/fjall) locally, so you get a fast, fully-functional loop without needing S3 or a mock for it.
-- **Apache 2.0:** Fully open source.
+- **Redis wire protocol compatibility:** Point your existing Redis clients at Invar. Compatibility is tested continuously against real-world libraries, including [BullMQ](https://github.com/taskforcesh/bullmq), not just the raw command spec. See [COMPATIBILITY.md](COMPATIBILITY.md) for the full command matrix
+- **Diskless by design:** No state replicate, no capacity planning. Durable data lives in S3; cost tracks what you store, not what you provision. A small hot working set stays fast via optional local caching (see [How it works](#how-it-works))
+- **Defined durability and transactional guarantees:** Invar targets snapshot isolation, with merge support incubating
+- **Single binary, lightweight:** One process, no cluster coordination
+- **Real local dev experience:** Can persist to disk for simplified local dev & CI
+- **Apache 2.0:** Fully open source
 
 ## Quickstart
 
+### Local FS
+
+This boots up an instance persisting data to `/tmp/invar`:
+
 ```bash
-docker run -v /tmp/invar:/tmp/invar -p 6379:6379 -it ghcr.io/hardpointlabs/invar:v1.0.8 --backend fjall --path /tmp/invar --redis
+docker run -v /tmp/invar:/tmp/invar -p 6379:6379 -it ghcr.io/hardpointlabs/invar:v1.0.9 --backend fjall --path /tmp/invar --redis
+```
+
+#### S3
+
+Pass the usual `AWS_...` variables to configure Invar to run backed by object storage:
+
+```bash
+docker run -v /tmp/invar:/tmp/invar -e AWS_REGION=... -e AWS_ACCESS_KEY_ID=...\
+  -e AWS_SECRET_ACCESS_KEY=... -p 6379:6379 -it ghcr.io/hardpointlabs/invar:v1.0.9 \
+  --backend slate --bucket <my-bucket-name> --redis
 ```
 
 ## How it works
