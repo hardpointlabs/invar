@@ -8,6 +8,7 @@ use kv::{
     slate::{SlateDb, SlateDbOpts},
 };
 use redis::{RedisListener, RedisStore};
+use tokio::time::{Duration, timeout};
 
 #[derive(ValueEnum, Clone, Debug)]
 enum Backend {
@@ -36,14 +37,20 @@ struct Cli {
     // only required when --backend=fjall
     #[arg(long, env = "INVAR_DATA_PATH", required_if_eq("backend", "fjall"))]
     path: Option<PathBuf>,
+
+    #[arg(long, env = "INVAR_BUCKET_PREFIX", default_value = "/invar")]
+    prefix: String,
 }
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
 
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(filter)
         .init();
 
     let store: Arc<dyn RedisStore> = match cli.backend {
@@ -53,8 +60,8 @@ async fn main() {
                 .expect("bucket is required for the SlateDB backend");
             Arc::new(
                 SlateDb::open(SlateDbOpts {
-                    path: "/tmp/invar-slatedb".to_string(),
-                    object_store_url: format!("s3://{bucket}/"),
+                    path: cli.prefix.clone(),
+                    bucket_name: bucket,
                     settings: None,
                 })
                 .await.inspect_err(|e| tracing::error!(error = %e, "operation failed"))
@@ -71,12 +78,25 @@ async fn main() {
 
     if cli.redis {
         let addr: SocketAddr = "0.0.0.0:6379".parse().expect("valid listen address");
-        RedisListener::new(addr, store.clone())
-            .serve()
-            .await
-            .expect("redis listener failed");
+        let listener = RedisListener::new(addr, store.clone());
+
+        tokio::select! {
+            result = listener.serve() => {
+                if let Err(e) = result {
+                    tracing::error!(error = %e, "redis listener failed");
+                }
+            },
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("shutdown signal received, closing store");
+            }
+        }
     }
 
-    store.close().await.expect("failed to close store");
-    println!("done!")
+    match timeout(Duration::from_secs(10), store.close()).await {
+        Ok(Ok(())) => tracing::info!("store closed cleanly"),
+        Ok(Err(e)) => tracing::error!(error = %e, "error closing store"),
+        Err(_) => tracing::warn!("store close timed out after grace period, exiting anyway"),
+    }
+
+    println!("done")
 }
