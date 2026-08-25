@@ -26,7 +26,7 @@ Invar is built on [SlateDB](https://slatedb.io), an LSM-tree storage engine desi
 ## Quickstart
 
 ```bash
-docker run -v /tmp/invar:/tmp/invar -p 6379:6379 ghcr.io/hardpointlabs/invar:v1.0.8 --backend fjall --path /tmp/inver --redis
+docker run -v /tmp/invar:/tmp/invar -p 6379:6379 -it ghcr.io/hardpointlabs/invar:v1.0.8 --backend fjall --path /tmp/invar --redis
 ```
 
 ## Compatibility
