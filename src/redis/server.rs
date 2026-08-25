@@ -32,7 +32,7 @@ static SERVER_START: LazyLock<Instant> = LazyLock::new(Instant::now);
 /// 20 random bytes, hex-encoded, generated once at startup.
 static RUN_ID: LazyLock<String> = LazyLock::new(|| {
     let mut b = [0u8; 20];
-    rand::RngCore::fill_bytes(&mut rand::rng(), &mut b);
+    rand::rand_core::Rng::fill_bytes(&mut rand::rng(), &mut b);
     hex_encode(&b)
 });
 
