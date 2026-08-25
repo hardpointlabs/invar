@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use slatedb::config::{PutOptions, Settings, Ttl};
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
+use slatedb::object_store::aws;
 use slatedb::{Db, DbIterator, DbTransaction, Error as SlateError, ErrorKind, IsolationLevel};
 
 use crate::kv::{BoxFuture, Entry, Error, Item, KeyValueIterator, KeyValueStore, Tx, WriteHandle};
@@ -36,7 +37,7 @@ fn map_slate_error(err: SlateError) -> Error {
 #[derive(Debug, Clone, Default)]
 pub struct SlateDbOpts {
     pub path: String,
-    pub object_store_url: String,
+    pub bucket_name: String,
     /// Optional; applied to the DbBuilder when `Some`.
     pub settings: Option<Settings>,
 }
@@ -49,7 +50,9 @@ pub struct SlateDb {
 
 impl SlateDb {
     pub async fn open(opts: SlateDbOpts) -> Result<SlateDb, Error> {
-        let store = Db::resolve_object_store(&opts.object_store_url).map_err(map_slate_error)?;
+        let store = Arc::new(aws::AmazonS3Builder::from_env()
+            .with_bucket_name(opts.bucket_name)
+            .build().expect("couldn't create s3 client"));
         Self::build(opts.path, store, opts.settings).await
     }
 
@@ -64,7 +67,7 @@ impl SlateDb {
         store: Arc<dyn ObjectStore>,
         settings: Option<Settings>,
     ) -> Result<SlateDb, Error> {
-        let mut builder = Db::builder(path, store);
+        let mut builder = Db::builder(path, store.clone());
         if let Some(settings) = settings {
             builder = builder.with_settings(settings);
         }

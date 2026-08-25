@@ -17,17 +17,17 @@ Invar gives you Redis-compatible storage without the tradeoff between "cheap" an
 - **Real local dev experience.** Invar runs on [Fjall](https://github.com/fjall-rs/fjall) locally, so you get a fast, fully-functional loop without needing S3 or a mock for it.
 - **Apache 2.0.** Fully open source.
 
-## How it works
-
-Invar is built on [SlateDB](https://slatedb.io), an LSM-tree storage engine designed to sit directly on object storage, with [Fjall](https://github.com/fjall-rs/fjall) as the equivalent local-disk engine for development and cases where talking to S3 isn't practical. Each Invar instance is single-writer by design — it's built to run well as one-database-per-dataset at fleet scale, not as a single large shared cluster.
-
-**"Diskless" refers to the source of truth, not literal I/O.** Invar uses local NVMe as a best-effort read cache to keep hot data fast and mitigate S3 latency on read-heavy workloads. That cache is disposable — Invar's durability guarantees never depend on it, and it can be lost or rebuilt without data loss. Durable state lives in S3 (or Fjall locally); nothing on disk needs to be provisioned, sized, or replicated by you.
-
 ## Quickstart
 
 ```bash
 docker run -v /tmp/invar:/tmp/invar -p 6379:6379 -it ghcr.io/hardpointlabs/invar:v1.0.8 --backend fjall --path /tmp/invar --redis
 ```
+
+## How it works
+
+Invar is built on [SlateDB](https://slatedb.io), an LSM-tree storage engine designed to sit directly on object storage, with [Fjall](https://github.com/fjall-rs/fjall) as the equivalent local-disk engine for development and cases where talking to S3 isn't practical. Each Invar instance is single-writer by design — it's built to run well as one-database-per-dataset at fleet scale, not as a single large shared cluster.
+
+**"Diskless" refers to the source of truth, not literal I/O.** Invar uses local NVMe as a best-effort read cache to keep hot data fast and mitigate S3 latency on read-heavy workloads. That cache is disposable — Invar's durability guarantees never depend on it, and it can be lost or rebuilt without data loss. Durable state lives in S3 (or Fjall locally); nothing on disk needs to be provisioned, sized, or replicated by you.
 
 ## Compatibility
 
