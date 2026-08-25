@@ -3,12 +3,12 @@
 Status of all Redis 6.2 core commands (plus JSON and Bloom Filter module commands)
 in this implementation.
 
-**Note!** we have no plans to implement the following command groups:
+At present we have no plans to implement the following command groups:
 
-* Streams
-* Geospatial
-* Cluster
-* Scripting
+* Geospatial: this is rather a large maintenance commitment for a use case we've never been asked about so far
+* Cluster: this one doesn't semantically make sense given Invar's single-writer model
+
+But we're open to convincing :)
 
 ---
 
@@ -83,7 +83,7 @@ in this implementation.
 | LLEN | ✅ | |
 | LMOVE | 🚫 | |
 | LPOP | ✅ | |
-| LPOS | 🚫 | |
+| LPOS | ✅ | RANK/COUNT options accepted but not yet functional |
 | LPUSH | ✅ | |
 | LPUSHX | ✅ | |
 | LRANGE | ✅ | |
@@ -91,7 +91,7 @@ in this implementation.
 | LSET | ✅ | |
 | LTRIM | ✅ | |
 | RPOP | ✅ | |
-| RPOPLPUSH | 🚫 | |
+| RPOPLPUSH | ✅ | |
 | RPUSH | ✅ | |
 | RPUSHX | ✅ | |
 
@@ -114,7 +114,7 @@ in this implementation.
 | SPOP | ✅ | |
 | SRANDMEMBER | ✅ | |
 | SREM | ✅ | |
-| SSCAN | 🚫 | |
+| SSCAN | ✅ | |
 | SUNION | ✅ | |
 | SUNIONSTORE | ✅ | |
 
@@ -186,6 +186,30 @@ in this implementation.
 
 ---
 
+## Stream commands
+
+| Command | Status | Notes |
+|---------|--------|-------|
+| XADD | ✅ | Supports NOMKSTREAM, MAXLEN, MINID trimming |
+| XDEL | ✅ | |
+| XINFO STREAM | ✅ | |
+| XLEN | ✅ | |
+| XREAD | ✅ | Multi-stream support; COUNT option; BLOCK not supported |
+| XRANGE | ✅ | With COUNT option |
+| XREVRANGE | ✅ | With COUNT option |
+| XSETID | ✅ | |
+| XTRIM | ✅ | MAXLEN and MINID modes, approximate (~) treated as exact |
+| XACK | 🚫 | Consumer group support not implemented |
+| XAUTOCLAIM | 🚫 | Consumer group support not implemented |
+| XCLAIM | 🚫 | Consumer group support not implemented |
+| XGROUP | 🚫 | Consumer group support not implemented |
+| XINFO CONSUMERS | 🚫 | Consumer group support not implemented |
+| XINFO GROUPS | 🚫 | Consumer group support not implemented |
+| XPENDING | 🚫 | Consumer group support not implemented |
+| XREADGROUP | 🚫 | Consumer group support not implemented |
+
+---
+
 ## Pub/Sub commands
 
 **Note:** Like Redis, Pub/Sub commands sent to Invar are _not_ persisted and exist in memory only. They're also not subject to regular transactional guarantees. They should therefore be treated as best-effort.
@@ -194,15 +218,15 @@ in this implementation.
 |---------|--------|-------|
 | PSUBSCRIBE | ✅ | |
 | PUBLISH | ✅ | |
-| PUBSUB CHANNELS | 🚫 | |
-| PUBSUB NUMPAT | 🚫 | |
-| PUBSUB NUMSUB | 🚫 | |
-| PUNSUBSCRIBE | 🚫 | |
-| SPUBLISH | 🚫 | |
-| SSUBSCRIBE | 🚫 | |
+| PUBSUB CHANNELS | ✅ | |
+| PUBSUB NUMPAT | ✅ | |
+| PUBSUB NUMSUB | ✅ | |
+| PUNSUBSCRIBE | ✅ | |
+| SPUBLISH | ✅ | Alias for PUBLISH in single-node mode |
+| SSUBSCRIBE | ✅ | Treated as SUBSCRIBE in single-node mode |
 | SUBSCRIBE | ✅ | |
-| SUNSUBSCRIBE | 🚫 | |
-| UNSUBSCRIBE | 🚫 | |
+| SUNSUBSCRIBE | ✅ | Treated as UNSUBSCRIBE in single-node mode |
+| UNSUBSCRIBE | ✅ | |
 
 ---
 
@@ -222,7 +246,8 @@ in this implementation.
 
 | Command | Status | Notes |
 |---------|--------|-------|
-| EVAL | ✅ | Piccolo-backed Lua interpreter; core stdlib only (no I/O); `KEYS`/`ARGV` exposed; Redis commands not exposed yet |
+| EVAL | ✅ | Piccolo-backed Lua interpreter; core stdlib (base, coroutine, math, string, table) + `tonumber`, `unpack`, `table.insert`/`remove`/`sort`/`concat`, `cmsgpack.unpack`, `cjson.encode`; `redis.call()` and `redis.pcall()` exposed |
+| EVALSHA | ✅ | Looks up previously cached script by SHA1 digest |
 
 ---
 
@@ -344,8 +369,8 @@ in this implementation.
 | OBJECT FREQ | 🚫 | |
 | OBJECT IDLETIME | ✅ | No-op, returns nil |
 | OBJECT REFCOUNT | 🚫 | |
-| PERSIST | 🚫 | |
-| PEXPIRE | 🚫 | |
+| PERSIST | ✅ | |
+| PEXPIRE | ✅ | |
 | PEXPIREAT | 🚫 | |
 | PEXPIRETIME | 🚫 | |
 | PTTL | ✅ | |
