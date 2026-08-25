@@ -1220,38 +1220,6 @@ mod tests {
         }
     }
 
-    fn entry_fields(reply: &RespValue) -> Vec<(String, String)> {
-        match reply {
-            RespValue::Array(Some(items)) => {
-                assert_eq!(items.len(), 2);
-                match &items[1] {
-                    RespValue::Array(Some(flat)) => {
-                        assert_eq!(flat.len() % 2, 0);
-                        flat.chunks(2)
-                            .map(|c| {
-                                let f = match &c[0] {
-                                    RespValue::BulkString(Some(b)) => {
-                                        String::from_utf8(b.to_vec()).unwrap()
-                                    }
-                                    other => panic!("expected bulk, got {other:?}"),
-                                };
-                                let v = match &c[1] {
-                                    RespValue::BulkString(Some(b)) => {
-                                        String::from_utf8(b.to_vec()).unwrap()
-                                    }
-                                    other => panic!("expected bulk, got {other:?}"),
-                                };
-                                (f, v)
-                            })
-                            .collect()
-                    }
-                    other => panic!("expected array, got {other:?}"),
-                }
-            }
-            other => panic!("expected array, got {other:?}"),
-        }
-    }
-
     // --- XADD ---
 
     #[tokio::test]
