@@ -6,3 +6,4 @@ dump.rdb
 dist
 .vscode
 target
+.zig-cache
