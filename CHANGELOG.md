@@ -1,3 +1,10 @@
+## [1.0.11](https://github.com/hardpointlabs/invar/compare/v1.0.10...v1.0.11) (2026-08-25)
+
+
+### Bug Fixes
+
+* update compatibility table, allow linker_messages ([32abc56](https://github.com/hardpointlabs/invar/commit/32abc56f4fd5f7a87b97c5e72511a42eef0af3ad))
+
 ## [1.0.10](https://github.com/hardpointlabs/invar/compare/v1.0.9...v1.0.10) (2026-08-25)
 
 
