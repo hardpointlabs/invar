@@ -872,7 +872,7 @@ fn mp_value_to_lua<'gc>(
 /// Tables with contiguous integer keys 1..n are encoded as JSON arrays;
 /// all other tables are encoded as JSON objects.
 fn piccolo_to_json<'gc>(
-    ctx: Context<'gc>,
+    _ctx: Context<'gc>,
     val: Value<'gc>,
 ) -> Result<serde_json::Value, PicError<'gc>> {
     match val {
@@ -894,7 +894,7 @@ fn piccolo_to_json<'gc>(
                 let mut arr = Vec::with_capacity(len as usize);
                 for i in 1..=len {
                     let v = table.get_value(Value::Integer(i));
-                    arr.push(piccolo_to_json(ctx, v)?);
+                    arr.push(piccolo_to_json(_ctx, v)?);
                 }
                 Ok(serde_json::Value::Array(arr))
             } else {
@@ -904,7 +904,7 @@ fn piccolo_to_json<'gc>(
                 while let piccolo::table::NextValue::Found { key: k, value: v } =
                     table.next(key)
                 {
-                    let json_val = piccolo_to_json(ctx, v)?;
+                    let json_val = piccolo_to_json(_ctx, v)?;
                     match k {
                         Value::String(s) => {
                             map.insert(

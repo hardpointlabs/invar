@@ -64,6 +64,12 @@ fn field_from_internal_key(key: &[u8]) -> Vec<u8> {
     }
 }
 
+fn no_op_result() -> Result<DbResult, DbError> {
+    #[allow(clippy::box_default)]
+    let result: DbResult = Box::new(Vec::<Vec<u8>>::new());
+    Ok(result)
+}
+
 /// Reads the hash sentinel, verifying the entry is a hash. A missing key
 /// maps to `Err(KvError::KeyNotFound)`; a key holding another type is
 /// `Err(DbError::WrongType)`.
@@ -607,8 +613,7 @@ impl DbOp for HKeysOp {
             match tx.get(&public_key).await {
                 Ok(_) => {}
                 Err(KvError::KeyNotFound) => {
-                    let result: DbResult = Box::new(Vec::<Vec<u8>>::new());
-                    return Ok(result);
+                    return no_op_result()
                 }
                 Err(e) => return Err(e.into()),
             }
@@ -646,8 +651,7 @@ impl DbOp for HValsOp {
             match tx.get(&public_key).await {
                 Ok(_) => {}
                 Err(KvError::KeyNotFound) => {
-                    let result: DbResult = Box::new(Vec::<Vec<u8>>::new());
-                    return Ok(result);
+                    return no_op_result()
                 }
                 Err(e) => return Err(e.into()),
             }
@@ -685,8 +689,7 @@ impl DbOp for HGetAllOp {
             match tx.get(&public_key).await {
                 Ok(_) => {}
                 Err(KvError::KeyNotFound) => {
-                    let result: DbResult = Box::new(Vec::<Vec<u8>>::new());
-                    return Ok(result);
+                    return no_op_result()
                 }
                 Err(e) => return Err(e.into()),
             }
@@ -958,8 +961,7 @@ impl DbOp for HScanOp {
             match tx.get(&public_key).await {
                 Ok(_) => {}
                 Err(KvError::KeyNotFound) => {
-                    let result: DbResult = Box::new(Vec::<Vec<u8>>::new());
-                    return Ok(result);
+                    return no_op_result()
                 }
                 Err(e) => return Err(e.into()),
             }

@@ -204,7 +204,7 @@ impl PubSubRegistry {
             .iter()
             .filter(|e| e.value().receiver_count() > 0)
             .filter(|e| {
-                pattern.map_or(true, |pat| redis_glob_match(pat, e.key(), true))
+                pattern.is_none_or(|pat| redis_glob_match(pat, e.key(), true))
             })
             .map(|e| e.key().clone())
             .collect()
@@ -239,7 +239,7 @@ impl PubSubRegistry {
     }
 
     pub fn numsub(self: Arc<Self>, channels: Vec<Bytes>) -> QueuedOp {
-        op::wire_only_op(Box::new(NumSubOp { registry: self, channels: channels }), true)
+        op::wire_only_op(Box::new(NumSubOp { registry: self, channels }), true)
     }
 
     /// Returns a [`QueuedOp`] that publishes `payload` to `channel` when executed.

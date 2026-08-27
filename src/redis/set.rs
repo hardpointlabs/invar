@@ -1127,7 +1127,7 @@ fn glob_match_inner(pat: &[char], s: &[char]) -> bool {
                 let charset = &pat[2..idx + 1];
                 let negate = charset.first() == Some(&'^');
                 let chars = if negate { &charset[1..] } else { charset };
-                let matched = s.first().map_or(false, |&c| {
+                let matched = s.first().is_some_and(|&c| {
                     chars.contains(&c) || chars.windows(2).any(|w| w[0] == '-' && c >= w[0] && c <= w[2])
                 });
                 if negate {
