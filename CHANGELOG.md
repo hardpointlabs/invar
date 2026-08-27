@@ -1,3 +1,10 @@
+## [1.0.12](https://github.com/hardpointlabs/invar/compare/v1.0.11...v1.0.12) (2026-08-27)
+
+
+### Bug Fixes
+
+* Merge pull request [#44](https://github.com/hardpointlabs/invar/issues/44) from hardpointlabs/check-audit ([78fa101](https://github.com/hardpointlabs/invar/commit/78fa101c7f84bf9d7320b60376e5e7f9d49eb80e))
+
 ## [1.0.11](https://github.com/hardpointlabs/invar/compare/v1.0.10...v1.0.11) (2026-08-25)
 
 
