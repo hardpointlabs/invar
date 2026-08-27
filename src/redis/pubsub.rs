@@ -204,7 +204,7 @@ impl PubSubRegistry {
             .iter()
             .filter(|e| e.value().receiver_count() > 0)
             .filter(|e| {
-                pattern.map_or(true, |pat| redis_glob_match(pat, e.key(), true))
+                pattern.is_none_or(|pat| redis_glob_match(pat, e.key(), true))
             })
             .map(|e| e.key().clone())
             .collect()

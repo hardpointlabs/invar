@@ -650,12 +650,8 @@ impl DbOp for ScanOp {
                 keys.push(name.to_vec());
             }
 
-            if !exhausted && keys.len() == count {
-                if !it.next().await {
+            if !exhausted && keys.len() == count && (!it.next().await || it.item().is_none_or(|i| !i.key().starts_with(prefix.as_slice()))) {
                     exhausted = true;
-                } else if it.item().map_or(true, |i| !i.key().starts_with(prefix.as_slice())) {
-                    exhausted = true;
-                }
             }
 
             // When the page ended without exhausting the keyspace, resume from

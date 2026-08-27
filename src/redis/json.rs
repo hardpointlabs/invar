@@ -425,7 +425,7 @@ fn ensure_parent<'a>(data: &'a mut JValue, parts: &[Part]) -> Result<&'a mut JVa
                 JValue::Arr(a) => {
                     let mut i = *idx;
                     if i < 0 {
-                        i = a.len() as i64 + i;
+                        i += a.len() as i64;
                     }
                     if i < 0 || i as usize >= a.len() {
                         return Err("err index out of range".to_string());
@@ -1182,7 +1182,7 @@ impl DbOp for DelOp {
 
             let mut deleted = 0usize;
             for path in &paths {
-                if doc.get(&path).is_err() {
+                if doc.get(path).is_err() {
                     continue;
                 }
                 if doc.delete(path).is_ok() {
@@ -1772,7 +1772,7 @@ impl DbOp for ArrPopOp {
             }
             let mut pop_idx = idx;
             if pop_idx < 0 {
-                pop_idx = arr.len() as i64 + pop_idx;
+                pop_idx += arr.len() as i64;
             }
             if pop_idx < 0 || pop_idx >= arr.len() as i64 {
                 return Err(DbError::Redis("err index out of range".to_string()));

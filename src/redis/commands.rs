@@ -2145,7 +2145,7 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
             };
             i += 1;
             let field_values = &args[i..];
-            if field_values.is_empty() || field_values.len() % 2 != 0 {
+            if field_values.is_empty() || !field_values.len().is_multiple_of(2) {
                 return error_op(session, "ERR wrong number of arguments for 'xadd' command");
             }
             stream::xadd(session, key, nomkstream, max_len, min_id, id, field_values)
@@ -2262,7 +2262,7 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
             }
             i += 1;
             let remaining = args.len() - i;
-            if remaining < 2 || remaining % 2 != 0 {
+            if remaining < 2 || !remaining.is_multiple_of(2) {
                 return error_op(session, "ERR wrong number of arguments for 'xread' command");
             }
             let half = remaining / 2;
