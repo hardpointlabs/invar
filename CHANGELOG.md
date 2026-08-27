@@ -1,3 +1,10 @@
+## [1.0.13](https://github.com/hardpointlabs/invar/compare/v1.0.12...v1.0.13) (2026-08-27)
+
+
+### Bug Fixes
+
+* Merge pull request [#47](https://github.com/hardpointlabs/invar/issues/47) from hardpointlabs/sbom ([84b56ca](https://github.com/hardpointlabs/invar/commit/84b56ca843acb3bddd0ef8fcaac2beb28caa3f0f))
+
 ## [1.0.12](https://github.com/hardpointlabs/invar/compare/v1.0.11...v1.0.12) (2026-08-27)
 
 
