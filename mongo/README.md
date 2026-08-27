@@ -4,6 +4,9 @@ This is package includes Invar's compatibility layer for people using MongoDB-co
 
 This documents the goals and functional differences with the off the shelf MongoDB wire protocol and API.
 
+Since the decision to port Invar's codebase in its entirety to Rust, this work has been deprioritized, however it's
+still on our internal roadmap as we work with design partners. 
+
 ## Development provenance
 
 This is a ground-up cleanroom implementation of parts of the MongoDB wire protocol and associated API needed to support existing drivers.
