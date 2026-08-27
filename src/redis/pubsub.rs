@@ -239,7 +239,7 @@ impl PubSubRegistry {
     }
 
     pub fn numsub(self: Arc<Self>, channels: Vec<Bytes>) -> QueuedOp {
-        op::wire_only_op(Box::new(NumSubOp { registry: self, channels: channels }), true)
+        op::wire_only_op(Box::new(NumSubOp { registry: self, channels }), true)
     }
 
     /// Returns a [`QueuedOp`] that publishes `payload` to `channel` when executed.

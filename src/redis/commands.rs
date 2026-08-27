@@ -1889,7 +1889,7 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"hset" => {
             // HSET key field value [field value ...]
-            if args.len() < 4 || (args.len() - 2) % 2 != 0 {
+            if args.len() < 4 || !(args.len() - 2).is_multiple_of(2) {
                 return error_op(session, "ERR wrong number of arguments for 'hset' command");
             }
             hash::hset(session, &args[1], &args[2..])
@@ -1950,7 +1950,7 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"hmset" => {
             // HMSET key field value [field value ...]
-            if args.len() < 4 || (args.len() - 2) % 2 != 0 {
+            if args.len() < 4 || !(args.len() - 2).is_multiple_of(2) {
                 return error_op(session, "ERR wrong number of arguments for 'hmset' command");
             }
             hash::hmset(session, &args[1], &args[2..])
@@ -2044,7 +2044,7 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
             // Outside MULTI these commands are intercepted before dispatch_command
             // is called (in listener.rs), so if we reach here outside a MULTI
             // context that is also an error (belt-and-suspenders).
-            return error_op(session, "ERR Command not allowed inside a transaction");
+            error_op(session, "ERR Command not allowed inside a transaction")
         }
         b"publish" | b"spublish" => {
             // SPUBLISH is a thin alias for PUBLISH in single-node mode.
@@ -2077,7 +2077,7 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                     pubsub::help()
                 }
                 _ => {
-                    return error_op(session, format!( "ERR unknown subcommand '{}'. Try PUBSUB HELP.", String::from_utf8_lossy(&sub_cmd)));
+                    error_op(session, format!( "ERR unknown subcommand '{}'. Try PUBSUB HELP.", String::from_utf8_lossy(&sub_cmd)))
                 }
             }
         }
@@ -2352,7 +2352,7 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
             }
         }
         _ => {
-            return error_op(session, format!("ERR unknown command '{}'", String::from_utf8_lossy(&name)));
+            error_op(session, format!("ERR unknown command '{}'", String::from_utf8_lossy(&name)))
         }
     }
 }

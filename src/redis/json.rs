@@ -372,7 +372,7 @@ fn resolve_recursive(
             JValue::Arr(a) => {
                 let mut i = *idx;
                 if i < 0 {
-                    i = a.len() as i64 + i;
+                    i += a.len() as i64;
                 }
                 if i < 0 || i as usize >= a.len() {
                     return Err("err index out of range".to_string());
@@ -517,7 +517,7 @@ impl JsonDocument {
                 JValue::Arr(a) => {
                     let mut i = *idx;
                     if i < 0 {
-                        i = a.len() as i64 + i;
+                        i += a.len() as i64;
                     }
                     if i < 0 || i as usize >= a.len() {
                         return Err("err index out of range".to_string());
@@ -555,7 +555,7 @@ impl JsonDocument {
                 JValue::Arr(a) => {
                     let mut i = *idx;
                     if i < 0 {
-                        i = a.len() as i64 + i;
+                        i += a.len() as i64;
                     }
                     if i < 0 || i as usize >= a.len() {
                         return Err("err index out of range".to_string());
@@ -605,7 +605,7 @@ impl JsonDocument {
                 };
                 let mut i = *idx;
                 if i < 0 {
-                    i = arr.len() as i64 + i;
+                    i += arr.len() as i64;
                 }
                 if i < 0 || i as usize >= arr.len() {
                     return Err("err index out of range".to_string());
@@ -659,7 +659,7 @@ impl JsonDocument {
                 JValue::Arr(a) => {
                     let mut i = *idx;
                     if i < 0 {
-                        i = a.len() as i64 + i;
+                        i += a.len() as i64;
                     }
                     if i < 0 || i as usize >= a.len() {
                         return Err("err index out of range".to_string());
@@ -793,7 +793,7 @@ impl JsonDocument {
                 JValue::Arr(a) => {
                     let mut i = *idx;
                     if i < 0 {
-                        i = a.len() as i64 + i;
+                        i += a.len() as i64;
                     }
                     if i < 0 || i as usize >= a.len() {
                         return Err("err index out of range".to_string());
@@ -916,7 +916,7 @@ impl WireOp for JsonWire {
         match result {
             Err(e) => err_resp(&e),
             Ok(res) => match res.downcast::<JsonResult>() {
-                Ok(outcome) => render_json_result(outcome),
+                Ok(outcome) => render_json_result(*outcome),
                 Err(_) => RespValue::Error(Bytes::from_static(
                     b"ERR internal error: bad json result",
                 )),
@@ -925,8 +925,8 @@ impl WireOp for JsonWire {
     }
 }
 
-fn render_json_result(outcome: Box<JsonResult>) -> RespValue {
-    match *outcome {
+fn render_json_result(outcome: JsonResult) -> RespValue {
+    match outcome {
         JsonResult::Ok => RespValue::SimpleString(Bytes::from_static(b"OK")),
         JsonResult::Null => RespValue::BulkString(None),
         JsonResult::Int(n) => RespValue::Integer(n),

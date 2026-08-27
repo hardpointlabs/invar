@@ -71,9 +71,9 @@ impl StreamEntryId {
 
     pub fn from_str_bytes(s: &[u8]) -> Option<Self> {
         let s = std::str::from_utf8(s).ok()?;
-        let mut parts = s.splitn(2, '-');
-        let ms = parts.next()?.parse::<u64>().ok()?;
-        let seq = parts.next()?.parse::<u64>().ok()?;
+        let parts = s.split_once('-').expect("invalid string");
+        let ms = parts.0.parse::<u64>().ok()?;
+        let seq = parts.1.parse::<u64>().ok()?;
         Some(Self { ms, seq })
     }
 }
@@ -187,9 +187,9 @@ fn entry_prefix(node_prefix: &[u8], version: u64) -> Vec<u8> {
 fn entry_id_from_key(key: &[u8], prefix_len: usize) -> Option<StreamEntryId> {
     let suffix = key.get(prefix_len..)?;
     let s = std::str::from_utf8(suffix).ok()?;
-    let mut parts = s.splitn(2, '-');
-    let ms_s = parts.next()?;
-    let seq_s = parts.next()?;
+    let parts = s.split_once('-').expect("invalid string");
+    let ms_s = parts.0;
+    let seq_s = parts.1;
     let ms = ms_s.trim_start_matches('0').parse::<u64>().unwrap_or(0);
     let seq = seq_s.trim_start_matches('0').parse::<u64>().unwrap_or(0);
     Some(StreamEntryId::new(ms, seq))
@@ -618,7 +618,7 @@ impl DbOp for XAddOp {
             };
 
             // Parse field-value pairs.
-            if field_values.len() % 2 != 0 {
+            if !field_values.len().is_multiple_of(2) {
                 return Err(DbError::Redis(
                     "ERR wrong number of arguments for XADD".to_string(),
                 ));
