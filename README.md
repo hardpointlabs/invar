@@ -1,21 +1,30 @@
-# Invar — A Diskless, Redis-Compatible Document Database
+<div align="center">
+  <a href='https://hardpoint.dev/?utm_source=github'>
+    <img src="logo.png" alt="Invar, a diskless, Redis-compatible document store"></img>
+  </a>
+</div>
 
-Durable storage lives in S3, not on disks you have to provision or manage.
+---
 
-Invar gives you Redis-compatible storage without the tradeoff between "cheap" and "durable." There are no attached volumes to size, replicate, or run out of — source of truth lives in object storage, so cost scales with what you store, not what you provision. A single binary can idle at a few MB of RAM, making it practical to run thousands of isolated instances on modest hardware.
+# Invar
 
 [![Apache 2.0 License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE) ![GitHub Release](https://img.shields.io/github/v/release/hardpointlabs/invar) ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/hardpointlabs/invar/release.yml) ![Discord](https://img.shields.io/discord/1481682538291400758)
+
+Invar is a diskless, Redis-compatible document store.
+
+Invar gives you Redis persistence without having to manage disks. Instead it uses object storage, meaning your cloud bill scales with what you store, not what you provision.
+It's explicitly designed for single-writer operation and to run at fleet-scale for instance-per-tenant scenarios. Have a read of [this post](https://blog.hardpoint.dev/announcing-invar-a-diskless-transactional-document-db?utm_source=github) for more context about Invar's evolution.
 
 ---
 
 ## Why Invar
 
-- **Redis wire protocol compatibility:** Point your existing Redis clients at Invar. Compatibility is tested continuously against real-world libraries, including [BullMQ](https://github.com/taskforcesh/bullmq), not just the raw command spec. See [COMPATIBILITY.md](COMPATIBILITY.md) for the full command matrix
-- **Diskless by design:** No state replicate, no capacity planning. Durable data lives in S3; cost tracks what you store, not what you provision. A small hot working set stays fast via optional local caching (see [How it works](#how-it-works))
-- **Defined durability and transactional guarantees:** Invar targets snapshot isolation, with merge support incubating
-- **Single binary, lightweight:** One process, no cluster coordination
-- **Real local dev experience:** Can persist to disk for simplified local dev & CI
-- **Apache 2.0:** Fully open source
+- **Redis wire protocol compatibility:** Works with your existing code. Compatibility is tested continuously against real-world libraries like [BullMQ](https://github.com/taskforcesh/bullmq), as well as integration tests for the command spec. See [COMPATIBILITY.md](COMPATIBILITY.md) for the full command matrix
+- **Diskless by design:** Invar uses [SlateDB](https://slatedb.io) under the hood. Data lives in S3. No replication issues, capacity planning, e.t.c
+- **Defined transactional guarantees:** Invar targets snapshot isolation, with merge support incubating
+- **Single binary:** One process, no cluster coordination
+- **Real local dev experience:** Can persist to disk for simplified local dev & CI, without an S3 service dependency
+- **Apache 2.0:** Committed to open source
 
 ## Quickstart
 
@@ -37,15 +46,9 @@ docker run -v /tmp/invar:/tmp/invar -e AWS_REGION=... -e AWS_ACCESS_KEY_ID=...\
   --backend slate --bucket <my-bucket-name> --redis
 ```
 
-## How it works
-
-Invar is built on [SlateDB](https://slatedb.io), an LSM-tree storage engine designed to sit directly on object storage, with [Fjall](https://github.com/fjall-rs/fjall) as the equivalent local-disk engine for development and cases where talking to S3 isn't practical. Each Invar instance is single-writer by design — it's built to run well as one-database-per-dataset at fleet scale, not as a single large shared cluster.
-
-**"Diskless" refers to the source of truth, not literal I/O.** Invar uses local NVMe as a best-effort read cache to keep hot data fast and mitigate S3 latency on read-heavy workloads. That cache is disposable — Invar's durability guarantees never depend on it, and it can be lost or rebuilt without data loss. Durable state lives in S3 (or Fjall locally); nothing on disk needs to be provisioned, sized, or replicated by you.
-
 ## Compatibility
 
-Invar implements a broad, actively-tested subset of the Redis command set, including stream commands. See [COMPATIBILITY.md](COMPATIBILITY.md) for the full list and known gaps.
+Invar implements a broad, actively-tested subset of the Redis command set. See [COMPATIBILITY.md](COMPATIBILITY.md) for the full list and known gaps.
 
 ## License
 

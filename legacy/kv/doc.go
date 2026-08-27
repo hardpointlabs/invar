@@ -22,9 +22,9 @@
 //
 // All Get/Set/Delete calls made through a Tx observe a consistent
 // snapshot fixed at the transaction's start, and a Tx's buffered writes
-// apply as a single indivisible unit on successful Commit, or not at all
+// apply as a single indivisible unit on successful commit, or not at all
 // on error. Two concurrent mutating transactions whose write sets
-// intersect cannot both commit — the loser's Commit returns ErrConflict.
+// intersect cannot both commit. The loser's commit returns ErrConflict.
 //
 // This is Snapshot Isolation, which is weaker than full serializability:
 // write skew (two transactions each individually preserve an invariant
@@ -32,9 +32,9 @@
 // possible depending on the backend's default conflict-detection
 // behavior. Do not assume write skew is prevented unless you've checked
 // TestKvWriteSkewPinnedDown in linearizability_test.go for the backend
-// you're using — that test exists specifically to pin this down
+// you're using. That test exists specifically to pin this down
 // empirically per backend rather than let it be assumed, since it can
-// legitimately differ between BadgerDB (read-write conflict detection by
+// differ between BadgerDB (read-write conflict detection by
 // default, closer to SSI) and SlateDB (isolation level is an explicit,
 // separately-configured choice).
 //
@@ -49,8 +49,8 @@
 // # Iterators
 //
 // Tx.NewIterator(prefix) shares its enclosing Tx's snapshot: a key
-// inserted by another transaction — even one that commits during the
-// iteration — must never appear (TestKvIteratorSnapshotScope). Iteration
+// inserted by another transaction, even one that commits during the
+// iteration, must never appear (TestKvIteratorSnapshotScope). Iteration
 // order is lexicographic by key (TestKvIteratorOrdering).
 //
 // Range reads are not automatically phantom-safe. A transaction that
@@ -80,7 +80,7 @@
 //
 // Commit() returning nil means the write is applied and visible; it does
 // NOT yet mean the write is guaranteed durable against an unclean process
-// restart — that depends on backend-level configuration (e.g. Badger's
+// restart; that depends on backend-level configuration (e.g. Badger's
 // SyncWrites, SlateDB's AwaitDurable) which is not currently exposed as a
 // per-call choice on this interface. If a caller needs "acknowledged
 // implies durable" (e.g. job-queue state that must survive a crash), that

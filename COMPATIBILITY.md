@@ -214,19 +214,19 @@ But we're open to convincing :)
 
 **Note:** Like Redis, Pub/Sub commands sent to Invar are _not_ persisted and exist in memory only. They're also not subject to regular transactional guarantees. They should therefore be treated as best-effort.
 
-| Command | Status | Notes |
-|---------|--------|-------|
-| PSUBSCRIBE | ✅ | |
-| PUBLISH | ✅ | |
-| PUBSUB CHANNELS | ✅ | |
-| PUBSUB NUMPAT | ✅ | |
-| PUBSUB NUMSUB | ✅ | |
-| PUNSUBSCRIBE | ✅ | |
-| SPUBLISH | ✅ | Alias for PUBLISH in single-node mode |
-| SSUBSCRIBE | ✅ | Treated as SUBSCRIBE in single-node mode |
-| SUBSCRIBE | ✅ | |
-| SUNSUBSCRIBE | ✅ | Treated as UNSUBSCRIBE in single-node mode |
-| UNSUBSCRIBE | ✅ | |
+| Command | Status | Notes                 |
+|---------|--------|-----------------------|
+| PSUBSCRIBE | ✅ |                       |
+| PUBLISH | ✅ |                       |
+| PUBSUB CHANNELS | ✅ |                       |
+| PUBSUB NUMPAT | ✅ |                       |
+| PUBSUB NUMSUB | ✅ |                       |
+| PUNSUBSCRIBE | ✅ |                       |
+| SPUBLISH | ✅ | Alias for PUBLISH     |
+| SSUBSCRIBE | ✅ | Alias for SUBSCRIBE   |
+| SUBSCRIBE | ✅ |                       |
+| SUNSUBSCRIBE | ✅ | Alias for UNSUBSCRIBE |
+| UNSUBSCRIBE | ✅ |                       |
 
 ---
 
@@ -244,10 +244,10 @@ But we're open to convincing :)
 
 ## Scripting commands
 
-| Command | Status | Notes |
-|---------|--------|-------|
-| EVAL | ✅ | Piccolo-backed Lua interpreter; core stdlib (base, coroutine, math, string, table) + `tonumber`, `unpack`, `table.insert`/`remove`/`sort`/`concat`, `cmsgpack.unpack`, `cjson.encode`; `redis.call()` and `redis.pcall()` exposed |
-| EVALSHA | ✅ | Looks up previously cached script by SHA1 digest |
+| Command | Status | Notes                                                                                                                                                                                                                                                                 |
+|---------|--------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| EVAL | ✅ | [Piccolo](https://github.com/kyren/piccolo)-backed Lua interpreter; core stdlib (base, coroutine, math, string, table) + `tonumber`, `unpack`, `table.insert`/`remove`/`sort`/`concat`, `cmsgpack.unpack`, `cjson.encode`; `redis.call()` and `redis.pcall()` exposed |
+| EVALSHA | ✅ | Looks up previously cached script by SHA1 digest                                                                                                                                                                                                                      |
 
 ---
 
@@ -284,70 +284,70 @@ But we're open to convincing :)
 
 ## Server commands
 
-| Command | Status | Notes |
-|---------|--------|-------|
-| ACL CAT | 🚫 | |
-| ACL DELUSER | 🚫 | |
-| ACL DRYRUN | 🚫 | |
-| ACL GENPASS | 🚫 | |
-| ACL GETUSER | 🚫 | |
-| ACL LIST | 🚫 | |
-| ACL LOAD | 🚫 | |
-| ACL LOG | 🚫 | |
-| ACL SAVE | 🚫 | |
-| ACL SETUSER | 🚫 | |
-| ACL USERS | 🚫 | |
-| ACL WHOAMI | 🚫 | |
-| BGREWRITEAOF | 🚫 | |
-| BGSAVE | ✅ | no-op |
-| COMMAND | 🚫 | |
-| COMMAND COUNT | 🚫 | |
-| COMMAND DOCS | 🚫 | |
-| COMMAND GETKEYS | 🚫 | |
-| COMMAND GETKEYSANDFLAGS | 🚫 | |
-| COMMAND INFO | 🚫 | |
-| COMMAND LIST | 🚫 | |
-| CONFIG GET | 🚫 | |
-| CONFIG RESETSTAT | 🚫 | |
-| CONFIG REWRITE | 🚫 | |
-| CONFIG SET | 🚫 | |
-| DBSIZE | ✅ | Runs in O(n) time |
-| DEBUG | 🚫 | |
-| FAILOVER | 🚫 | |
-| FLUSHALL | ✅ | |
-| FLUSHDB | ✅ | |
+| Command | Status | Notes                                       |
+|---------|--------|---------------------------------------------|
+| ACL CAT | 🚫 |                                             |
+| ACL DELUSER | 🚫 |                                             |
+| ACL DRYRUN | 🚫 |                                             |
+| ACL GENPASS | 🚫 |                                             |
+| ACL GETUSER | 🚫 |                                             |
+| ACL LIST | 🚫 |                                             |
+| ACL LOAD | 🚫 |                                             |
+| ACL LOG | 🚫 |                                             |
+| ACL SAVE | 🚫 |                                             |
+| ACL SETUSER | 🚫 |                                             |
+| ACL USERS | 🚫 |                                             |
+| ACL WHOAMI | 🚫 |                                             |
+| BGREWRITEAOF | 🚫 |                                             |
+| BGSAVE | ✅ | no-op                                       |
+| COMMAND | 🚫 |                                             |
+| COMMAND COUNT | 🚫 |                                             |
+| COMMAND DOCS | 🚫 |                                             |
+| COMMAND GETKEYS | 🚫 |                                             |
+| COMMAND GETKEYSANDFLAGS | 🚫 |                                             |
+| COMMAND INFO | 🚫 |                                             |
+| COMMAND LIST | 🚫 |                                             |
+| CONFIG GET | 🚫 |                                             |
+| CONFIG RESETSTAT | 🚫 |                                             |
+| CONFIG REWRITE | 🚫 |                                             |
+| CONFIG SET | 🚫 |                                             |
+| DBSIZE | ✅ | ⚠️ Runs in O(n) time                        |
+| DEBUG | 🚫 |                                             |
+| FAILOVER | 🚫 |                                             |
+| FLUSHALL | ✅ |                                             |
+| FLUSHDB | ✅ |                                             |
 | INFO | ✅ | Reports redis_version:6.2.0 + invar_version |
-| LASTSAVE | 🚫 | |
-| LATENCY DOCTOR | 🚫 | |
-| LATENCY GRAPH | 🚫 | |
-| LATENCY HISTORY | 🚫 | |
-| LATENCY LATEST | 🚫 | |
-| LATENCY RESET | 🚫 | |
-| LOLWUT | ✅ | Returns version info instead of ASCII art |
-| MEMORY DOCTOR | 🚫 | |
-| MEMORY MALLOC-STATS | 🚫 | |
-| MEMORY PURGE | 🚫 | |
-| MEMORY STATS | 🚫 | |
-| MEMORY USAGE | 🚫 | |
-| MODULE LIST | ✅ | |
-| MODULE LOAD | 🚫 | |
-| MODULE LOADEX | 🚫 | |
-| MODULE UNLOAD | 🚫 | |
-| MONITOR | 🚫 | |
-| PSYNC | ✅ | No-op |
-| REPLCONF | 🚫 | |
-| REPLICAOF | 🚫 | |
-| RESTORE-ASKING | 🚫 | |
-| ROLE | 🚫 | |
-| SAVE | ✅ | |
-| SHUTDOWN | 🚫 | |
-| SLAVEOF | 🚫 | |
-| SLOWLOG GET | 🚫 | |
-| SLOWLOG LEN | 🚫 | |
-| SLOWLOG RESET | 🚫 | |
-| SWAPDB | 🚫 | |
-| SYNC | ✅ | |
-| TIME | ✅ | |
+| LASTSAVE | 🚫 |                                             |
+| LATENCY DOCTOR | 🚫 |                                             |
+| LATENCY GRAPH | 🚫 |                                             |
+| LATENCY HISTORY | 🚫 |                                             |
+| LATENCY LATEST | 🚫 |                                             |
+| LATENCY RESET | 🚫 |                                             |
+| LOLWUT | ✅ | Returns version info instead of ASCII art   |
+| MEMORY DOCTOR | 🚫 |                                             |
+| MEMORY MALLOC-STATS | 🚫 |                                             |
+| MEMORY PURGE | 🚫 |                                             |
+| MEMORY STATS | 🚫 |                                             |
+| MEMORY USAGE | 🚫 |                                             |
+| MODULE LIST | ✅ |                                             |
+| MODULE LOAD | 🚫 |                                             |
+| MODULE LOADEX | 🚫 |                                             |
+| MODULE UNLOAD | 🚫 |                                             |
+| MONITOR | 🚫 |                                             |
+| PSYNC | ✅ | No-op                                       |
+| REPLCONF | 🚫 |                                             |
+| REPLICAOF | 🚫 |                                             |
+| RESTORE-ASKING | 🚫 |                                             |
+| ROLE | 🚫 |                                             |
+| SAVE | ✅ |                                             |
+| SHUTDOWN | 🚫 |                                             |
+| SLAVEOF | 🚫 |                                             |
+| SLOWLOG GET | 🚫 |                                             |
+| SLOWLOG LEN | 🚫 |                                             |
+| SLOWLOG RESET | 🚫 |                                             |
+| SWAPDB | 🚫 |                                             |
+| SYNC | ✅ |                                             |
+| TIME | ✅ |                                             |
 
 ---
 

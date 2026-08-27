@@ -21,7 +21,7 @@ with many instances + key-value stores running in parallel as discrete datasets.
 
 The project is a Cargo-based Rust project. A legacy golang implementation is present and can be used for reference; it
 is scheduled for removal. While the Rust project diverges in idiomatic language/framework-specific ways such as
-threading model, it preserves the key layout of the original implementation.
+threading model, it preserves the functional layout of keys in the LSM tree which the original implementation devised.
 
 ## Overall structure
 
