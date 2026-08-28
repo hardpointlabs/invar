@@ -34,6 +34,7 @@ dockers_v2:
     dockerfile: Dockerfile
     images:
       - ghcr.io/hardpointlabs/invar
+      - docker.io/hardpointlabs/invar
     tags:
       - "{{.Tag}}"
       - latest
