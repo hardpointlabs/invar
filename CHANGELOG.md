@@ -1,3 +1,10 @@
+## [1.0.14](https://github.com/hardpointlabs/invar/compare/v1.0.13...v1.0.14) (2026-08-28)
+
+
+### Bug Fixes
+
+* Merge pull request [#49](https://github.com/hardpointlabs/invar/issues/49) from hardpointlabs/default-path ([c5a19ae](https://github.com/hardpointlabs/invar/commit/c5a19ae9dd09b4c36c53bfb59b4d69225b66ba5a))
+
 ## [1.0.13](https://github.com/hardpointlabs/invar/compare/v1.0.12...v1.0.13) (2026-08-27)
 
 
