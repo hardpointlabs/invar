@@ -34,8 +34,7 @@ struct Cli {
     #[arg(long, env = "INVAR_S3_BUCKET", required_if_eq("backend", "slate"))]
     bucket: Option<String>,
 
-    // only required when --backend=fjall
-    #[arg(long, env = "INVAR_DATA_PATH", required_if_eq("backend", "fjall"))]
+    #[arg(long, env = "INVAR_DATA_PATH", default_value = "/tmp/invar")]
     path: Option<PathBuf>,
 
     #[arg(long, env = "INVAR_BUCKET_PREFIX", default_value = "/invar")]
