@@ -19,9 +19,7 @@ with many instances + key-value stores running in parallel as discrete datasets.
 
 ## Tech stack
 
-The project is a Cargo-based Rust project. A legacy golang implementation is present and can be used for reference; it
-is scheduled for removal. While the Rust project diverges in idiomatic language/framework-specific ways such as
-threading model, it preserves the functional layout of keys in the LSM tree which the original implementation devised.
+The project is a Cargo-based Rust project.
 
 ## Overall structure
 
@@ -49,8 +47,7 @@ Create a new branch based on latest master for new feature development. Create a
 
 * To run all Rust-based unit tests, run `cargo test --workspace`
 * To run al the unit tests + the integration tests, run `./run-tests.sh` from the project root
-
-If the invar executable is hanging for some reason (e.g. resource contention, typo causing infinite loop, e.t.c) you can use the `pprof` tool that's built into go as outlined in the [`net/http/pprof`](https://pkg.go.dev/net/http/pprof) docs and the main [pprof](https://github.com/google/pprof) docs to pinpoint execution points in the program. The pprof HTTP handler listens on `localhost:6060`.
+* Ensure `cargo clippy` doesn't emit any warnings caused by your modifications
 
 ## Redis key structure
 
