@@ -22,41 +22,83 @@ pub struct PopResult {
     pub score: f64,
 }
 
-/// An in-flight blocked client waiting for a pop result on one or more keys.
+/// A wake signal delivered to a blocked `XREAD` waiter.
+///
+/// The blocker (`XADD`) has appended an entry to [`Self::public_key`] and that
+/// write has committed; the blocked XREAD re-reads the streams it registered
+/// for and returns the fresh entries.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StreamResult {
+    /// The public key of the stream that gained the new entry.
+    pub public_key: Vec<u8>,
+}
+
+/// The kind of blocked operation a waiter belongs to. The writer claims a
+/// waiter only from a queue it shares, so a queue never mixes kinds, but the
+/// registry records the kind so a writer can confirm it is serving the right
+/// kind of waiter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitKind {
+    /// A `BZPOPMIN` (`want_min == true`) or `BZPOPMAX` waiter.
+    Pop { want_min: bool },
+    /// A blocked `XREAD` waiter.
+    Stream,
+}
+
+/// The single value delivered to a blocked waiter by the writer that claims
+/// it. One variant per blocking command, so the registry's register/claim/wake
+/// bookkeeping stays identical as more blocking commands (`BLPOP`, `BRPOP`,
+/// `BRPOPLPUSH`, &c.) are added — each gains a variant carrying the result its
+/// waiter needs.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BlockResult {
+    /// The element popped on a `BZPOPMIN`/`BZPOPMAX` waiter's behalf.
+    Pop(PopResult),
+    /// A wake signal telling a blocked `XREAD` waiter to re-read its streams.
+    Stream(StreamResult),
+}
+
+/// An in-flight blocked client waiting for a result on one or more keys.
 struct Waiter {
     id: u64,
     /// Every public key this waiter is registered under, so it can be found
     /// and removed in O(queues) without an ownership registry.
     keys: Vec<Vec<u8>>,
-    /// `true` = BZPOPMIN (pop the lowest score), `false` = BZPOPMAX.
-    want_min: bool,
+    /// What the waiter is waiting for and how the writer must serve it.
+    kind: WaitKind,
     /// The delivery channel; `None` once a claim has woken the waiter.
-    tx: Mutex<Option<oneshot::Sender<PopResult>>>,
+    tx: Mutex<Option<oneshot::Sender<BlockResult>>>,
 }
 
 /// A single decision recorded inside a [`crate::common::DbOp`]: "this waiter
 /// will receive this result".
 ///
-/// The writer's DbOp calls [`Claim::set_result`] after consuming the element
-/// on the waiter's behalf, then either:
+/// The writer's DbOp calls [`Claim::set_result`] after building the result on
+/// the waiter's behalf, then either:
 /// - [`Claim::wake`] once the transaction has committed, delivering the
 ///   result to the blocked client, or
 /// - [`WatchRegistry::release_front`] on any failure, returning the waiter to
 ///   the front of its queues so it remains the longest-waiting client.
 pub struct Claim {
     waiter: Arc<Waiter>,
-    result: Option<PopResult>,
+    result: Option<BlockResult>,
 }
 
 impl Claim {
     /// `true` = BZPOPMIN, `false` = BZPOPMAX; informs the DbOp which element
-    /// to pop.
+    /// to pop. Only meaningful for pop waiters.
     pub fn want_min(&self) -> bool {
-        self.waiter.want_min
+        matches!(self.waiter.kind, WaitKind::Pop { want_min: true })
     }
 
-    /// Attaches the popped result to the claim. Call before [`Claim::wake`].
-    pub fn set_result(&mut self, result: PopResult) {
+    /// Reports whether this is a blocked `XREAD` waiter rather than a pop
+    /// waiter.
+    pub fn is_stream(&self) -> bool {
+        matches!(self.waiter.kind, WaitKind::Stream)
+    }
+
+    /// Attaches the claimed result to the claim. Call before [`Claim::wake`].
+    pub fn set_result(&mut self, result: BlockResult) {
         self.result = Some(result);
     }
 
@@ -149,20 +191,50 @@ impl WatchRegistry {
         }
     }
 
-    /// Registers the caller as a waiter on all `keys`, then blocks until one
-    /// of them delivers a pop result or `timeout` elapses (`None` = wait
-    /// indefinitely).
-    ///
-    /// Returns `None` on a clean timeout. If a writer claimed this waiter
-    /// concurrently, the registration is gone, so the channel is drained
-    /// instead — discarding a real result that was already removed from the
-    /// sorted set would lose data.
+    /// Registers the caller as a `BZPOPMIN`/`BZPOPMAX` waiter on all `keys`,
+    /// then blocks until one of them delivers a pop result or `timeout`
+    /// elapses (`None` = wait indefinitely). See [`Self::block_inner`].
     pub async fn block(
         &self,
         keys: &[Vec<u8>],
         want_min: bool,
         timeout: Option<Duration>,
     ) -> Option<PopResult> {
+        match self
+            .block_inner(keys, WaitKind::Pop { want_min }, timeout)
+            .await
+        {
+            Some(BlockResult::Pop(result)) => Some(result),
+            Some(BlockResult::Stream(_)) => None,
+            None => None,
+        }
+    }
+
+    /// Registers the caller as a blocked XREAD waiter on all `keys`, then
+    /// blocks until one of them gains a new entry or `timeout` elapses
+    /// (`None` = wait indefinitely). See [`Self::block_inner`].
+    pub async fn block_stream(
+        &self,
+        keys: &[Vec<u8>],
+        timeout: Option<Duration>,
+    ) -> Option<BlockResult> {
+        self.block_inner(keys, WaitKind::Stream, timeout).await
+    }
+
+    /// Registers `kind` as a waiter on all `keys`, then blocks until a writer
+    /// claims it and delivers a result, or `timeout` elapses (`None` = wait
+    /// indefinitely).
+    ///
+    /// Returns `None` on a clean timeout. If a writer claimed this waiter
+    /// concurrently, the registration is gone, so the channel is drained
+    /// instead — discarding a real result that was already removed from the
+    /// sorted set would lose data.
+    async fn block_inner(
+        &self,
+        keys: &[Vec<u8>],
+        kind: WaitKind,
+        timeout: Option<Duration>,
+    ) -> Option<BlockResult> {
         let (tx, mut rx) = oneshot::channel();
         let id = {
             let mut inner = self.inner.lock().unwrap();
@@ -173,7 +245,7 @@ impl WatchRegistry {
         let waiter = Arc::new(Waiter {
             id,
             keys: keys.to_vec(),
-            want_min,
+            kind,
             tx: Mutex::new(Some(tx)),
         });
         {
@@ -270,6 +342,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn block_stream_wakes_blocked_reader() {
+        let registry = Arc::new(WatchRegistry::new());
+        let r = registry.clone();
+        let keys = vec![key()];
+        let handle =
+            tokio::spawn(async move { r.block_stream(&keys, None).await });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let mut claim = registry.try_claim(&key()).expect("waiter registered");
+        assert!(claim.is_stream());
+        claim.set_result(BlockResult::Stream(StreamResult {
+            public_key: key(),
+        }));
+        claim.wake();
+
+        let delivered = handle.await.unwrap().expect("blocked client woke");
+        match delivered {
+            BlockResult::Stream(s) => assert_eq!(s.public_key, key()),
+            other => panic!("expected stream result, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn claim_wakes_blocked_client() {
         let registry = Arc::new(WatchRegistry::new());
         let r = registry.clone();
@@ -279,7 +374,7 @@ mod tests {
 
         let mut claim = registry.try_claim(&key()).expect("waiter registered");
         assert!(claim.want_min());
-        claim.set_result(result(b"m"));
+        claim.set_result(BlockResult::Pop(result(b"m")));
         claim.wake();
 
         let delivered = handle.await.unwrap().expect("blocked client woke");
@@ -308,14 +403,14 @@ mod tests {
 
         let mut again = registry.try_claim(&key()).expect("waiter A again");
         assert!(again.want_min());
-        again.set_result(result(b"a"));
+        again.set_result(BlockResult::Pop(result(b"a")));
         again.wake();
         let a_result = ha.await.unwrap().expect("A delivered");
         assert_eq!(a_result.member, b"a");
 
         let mut bclaim = registry.try_claim(&key()).expect("waiter B");
         assert!(!bclaim.want_min());
-        bclaim.set_result(result(b"b"));
+        bclaim.set_result(BlockResult::Pop(result(b"b")));
         bclaim.wake();
         let b_result = hb.await.unwrap().expect("B delivered");
         assert_eq!(b_result.member, b"b");
@@ -338,7 +433,7 @@ mod tests {
 
         // The block's timeout fired and it must be draining the channel, so a
         // result sent now still gets through rather than being discarded.
-        claim.set_result(result(b"m"));
+        claim.set_result(BlockResult::Pop(result(b"m")));
         claim.wake();
 
         let delivered = handle.await.unwrap().expect("result not discarded");

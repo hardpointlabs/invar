@@ -2847,6 +2847,29 @@
     "description": "XREAD on missing stream returns nil"
   },
   {
+    "name": "XREAD BLOCK with data returns immediately",
+    "command": ["XREAD", "BLOCK", "1000", "STREAMS", "stream_xrdb", "0-0"],
+    "type": "array",
+    "version": "5.0.0",
+    "description": "XREAD BLOCK returns immediately when entries already exist",
+    "setup": [
+      ["XADD", "stream_xrdb", "1-0", "f", "v1"]
+    ],
+    "expected": [
+      ["stream_xrdb", [
+        ["1-0", ["f", "v1"]]
+      ]]
+    ]
+  },
+  {
+    "name": "XREAD BLOCK negative timeout errors",
+    "command": ["XREAD", "BLOCK", "-1", "STREAMS", "stream_xrdneg", "0-0"],
+    "expected": "ERR timeout is negative",
+    "type": "error",
+    "version": "5.0.0",
+    "description": "XREAD BLOCK rejects a negative timeout with an error"
+  },
+  {
     "name": "WRONGTYPE XLEN on string key",
     "command": ["XLEN", "wt_xlen_str"],
     "expected": "WRONGTYPE",

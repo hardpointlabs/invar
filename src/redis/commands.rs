@@ -2236,6 +2236,7 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                 return error_op(session, "ERR wrong number of arguments for 'xread' command");
             }
             let mut count = usize::MAX;
+            let mut block_ms: Option<i64> = None;
             let mut i = 1;
             while i < args.len() && !args[i].eq_ignore_ascii_case(b"streams") {
                 if args[i].eq_ignore_ascii_case(b"count") {
@@ -2252,7 +2253,18 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                     count = n as usize;
                     i += 1;
                 } else if args[i].eq_ignore_ascii_case(b"block") {
-                    return error_op(session, "ERR BLOCK is not supported in this version");
+                    i += 1;
+                    if i >= args.len() {
+                        return error_op(session, "ERR syntax error");
+                    }
+                    let Some(n) = parse_i64(&args[i]) else {
+                        return error_op(session, "ERR value is not an integer or out of range");
+                    };
+                    if n < 0 {
+                        return error_op(session, "ERR timeout is negative");
+                    }
+                    block_ms = Some(n);
+                    i += 1;
                 } else {
                     return error_op(session, "ERR syntax error");
                 }
@@ -2277,7 +2289,7 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                     }
                 }
             }
-            stream::xread(session, &keys, ids, count)
+            stream::xread(session, &keys, ids, count, block_ms)
         }
         b"xdel" => {
             // XDEL key id [id ...]

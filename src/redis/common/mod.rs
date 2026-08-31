@@ -9,7 +9,7 @@ pub mod session;
 pub mod store;
 
 pub use op::{DbError, DbOp, DbResult, QueuedOp, WireOp};
-pub use registry::{Claim, PopResult, WatchRegistry};
+pub use registry::{BlockResult, Claim, PopResult, StreamResult, WaitKind, WatchRegistry};
 pub use session::{Session, SessionError};
 pub use store::RedisStore;
 

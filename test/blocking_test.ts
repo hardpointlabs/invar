@@ -236,3 +236,73 @@ Deno.test("BZPOPMIN unblocks the longest-waiting consumer first (FIFO)", async (
     await producer.quit();
   }
 });
+
+Deno.test("XREAD BLOCK returns immediately when an entry already exists", async () => {
+  const client = await connect();
+  try {
+    await client.del("xread_block_existing");
+    await client.xAdd("xread_block_existing", "*", { f: "v" });
+
+    // A small BLOCK on a stream that already has data returns it at once; the
+    // absolute id "0-0" reads every entry from the start.
+    const reply = await client.sendCommand([
+      "XREAD", "BLOCK", "1000",
+      "STREAMS", "xread_block_existing", "0-0"
+    ]);
+    const streams = reply as Array<[string, unknown[]]>;
+    assertEquals(streams.length, 1);
+    assertEquals(streams[0][0], "xread_block_existing");
+  } finally {
+    await client.quit();
+  }
+});
+
+Deno.test("XREAD BLOCK times out and returns null when nothing arrives", async () => {
+  const client = await connect();
+  try {
+    await client.del("xread_block_timeout");
+    const reply = await client.sendCommand([
+      "XREAD", "BLOCK", "50",
+      "STREAMS", "xread_block_timeout", "$"
+    ]);
+    assertEquals(reply, null);
+  } finally {
+    await client.quit();
+  }
+});
+
+Deno.test("XREAD BLOCK blocks then receives an entry appended by another connection", async () => {
+  const consumer = await connect();
+  const producer = await connect();
+  try {
+    await consumer.del("xread_block_wake");
+
+    const read = withDeadline(
+      consumer.sendCommand([
+        "XREAD",
+        "BLOCK", "5000",
+        "STREAMS", "xread_block_wake", "$"
+      ]),
+      "XREAD BLOCK never unblocked"
+    );
+
+    // Give the server a moment to park the reader before appending.
+    await sleep(WAITER_REGISTRATION_MS);
+
+    await producer.xAdd("xread_block_wake", "*", { f: "v" });
+
+    const reply = await read;
+    assertEquals(Array.isArray(reply), true);
+    const streams = reply as Array<[string, Array<[string, Array<string>]>]>;
+    assertEquals(streams.length, 1);
+    assertEquals(streams[0][0], "xread_block_wake");
+    // One new entry carrying field f -> v (auto-generated timestamp id).
+    const entries = streams[0][1];
+    assertEquals(entries.length, 1);
+    const [, fields] = entries[0];
+    assertEquals(fields, ["f", "v"]);
+  } finally {
+    await consumer.quit();
+    await producer.quit();
+  }
+});
