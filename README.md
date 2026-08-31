@@ -50,6 +50,10 @@ docker run -v /tmp/invar:/tmp/invar -e AWS_REGION=... -e AWS_ACCESS_KEY_ID=...\
 
 Invar implements a broad, actively-tested subset of the Redis command set. See [COMPATIBILITY.md](COMPATIBILITY.md) for the full list and known gaps.
 
+## Local development and contributions
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for details about building Invar itself and how you can contribute.
+
 ## License
 
 Apache 2.0. See [LICENSE](LICENSE).
