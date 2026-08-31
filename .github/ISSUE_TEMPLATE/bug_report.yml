@@ -1,0 +1,70 @@
+name: Bug report
+description: Something isn't working the way it should
+title: "[Bug]: "
+labels: ["type: bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. Please check open issues first to
+        avoid duplicates — if a command is simply unimplemented, use the
+        "Compatibility" template instead.
+
+  - type: input
+    id: version
+    attributes:
+      label: Invar version
+      description: Output of `invar --version`, or the container tag you're running
+      placeholder: v1.0.14
+    validations:
+      required: true
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Storage backend
+      options:
+        - Fjall (local disk)
+        - S3-compatible object storage
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the unexpected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Ideally a minimal set of commands (e.g. via redis-cli) that trigger it
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or config
+      description: Paste any relevant Invar logs, config, or client-side error output
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and didn't find a duplicate
+          required: true

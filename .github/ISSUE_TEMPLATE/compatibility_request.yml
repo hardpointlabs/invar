@@ -1,0 +1,65 @@
+name: Compatibility gap
+description: A specific Redis or MongoDB command is missing, partial, or behaves incorrectly
+title: "[Compat]: "
+labels: ["type: compatibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check [COMPATIBILITY.md](../../COMPATIBILITY.md) first. If the command is
+        marked 🚧 (not yet implemented), consider opening a PR directly instead — see
+        CONTRIBUTING.md. This template is the right place for 🚫 commands (make the
+        case for why it should be reconsidered) or for anything marked ✅ that isn't
+        actually behaving correctly.
+
+  - type: dropdown
+    id: protocol
+    attributes:
+      label: Protocol
+      options:
+        - Redis
+        - MongoDB
+    validations:
+      required: true
+
+  - type: input
+    id: command
+    attributes:
+      label: Command (and subcommand, if applicable)
+      placeholder: "e.g. OBJECT ENCODING, or XREADGROUP"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: status
+    attributes:
+      label: Current status in COMPATIBILITY.md
+      options:
+        - "🚫 marked no plan to implement — I want to make the case for it"
+        - "✅ marked implemented, but it's behaving incorrectly"
+        - "✅ marked implemented, but a specific option/flag doesn't work"
+        - Not sure / not listed
+    validations:
+      required: true
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: What are you trying to do?
+      description: The library/framework involved (e.g. BullMQ, Sidekiq, an ORM) is very useful context
+    validations:
+      required: true
+
+  - type: textarea
+    id: details
+    attributes:
+      label: Current behavior, if applicable
+      description: For "incorrect" or "partial" reports — what actually happens vs. what you expected
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I checked COMPATIBILITY.md before filing this
+          required: true

@@ -28,8 +28,8 @@ scripting.
 
 - `./src`: implementation source
 - `./src/kv`: vendor-neutral abstraction over LSM-tree-based key-value stores. Gives a single interface to build upon with common minimum consistency and isolation guarantees
-- `./src/redis` package: main implementation code for the Redis listener. Relies on github.com/tidwall/redcon for Redis wire command [de]serialization the `kv` module for the actual persistence. This package therefore destructures Redis command data into individual keys that are stored in the kv store, and then looked up & translated back into Redis responses. See the later section about 'redis key structure'.
-- `test`: a test suite where Deno boots a test script containing a Redis client, and runs through a set of Redis commands with known expected responses, and evaluates the correctness of what comes back to the client.
+- `./src/redis` package: main implementation code for the Redis listener. This includes RESP protocol parsing and the command implementations themselves
+- `test`: a test suite where Deno boots a test script containing a Redis client, and runs through a set of Redis commands with known expected responses, and evaluates the correctness of what comes back to the client
 
 ## Development
 
@@ -37,7 +37,7 @@ This is a normal Rust project. To build:
 
 `cargo build`
 
-To run, the storage backend is a mandatory subcommand. For example, invoke the resulting executable as `./target/debug/invar --backend fjall --path /tmp/invar --redis` to spin up a daemon with BadgerDB listening on `:6379`. The Redis and Mongo protocol subcommands each accept `badger` or `slatedb`:
+To run, the storage backend is a mandatory subcommand. For example, invoke the resulting executable as `./target/debug/invar --backend fjall --redis` to spin up a daemon with Fjall listening on `:6379`. `--redis` is the only supported protocol flag at this time.
 
 ## Branching strategy
 
@@ -66,4 +66,5 @@ For internal (i.e. non-user-accessible keys):
 
 `-<current DB>:<keyname>:<rest...>`
 
-For the semantics of how internal keys reference each other, see inline comments (e.g. for the linked list implementation in `./src/redis/list.rs`)
+The semantics of how internal keys reference each other is specific to each data structure. See inline comments
+(e.g. for the linked list implementation in `./src/redis/list.rs`) for more details relating to a particular key layout

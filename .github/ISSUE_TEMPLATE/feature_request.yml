@@ -1,0 +1,41 @@
+name: Feature request
+description: Suggest something beyond a specific Redis/Mongo command (see the Compatibility template for those)
+title: "[Feature]: "
+labels: ["type: enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a missing or misbehaving Redis/MongoDB command specifically, please use the
+        "Compatibility" template instead — it's a better fit and easier to track against
+        COMPATIBILITY.md.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Context on the use case, not just the solution you have in mind
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What you'd like to see, if you have something specific in mind
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you're using today, or other approaches you considered
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I'd be willing to help implement this
+          required: false
+        - label: I searched existing issues and didn't find a duplicate
+          required: true

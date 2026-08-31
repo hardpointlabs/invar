@@ -1,21 +1,34 @@
 # Redis Compatibility
 
-Status of all Redis 6.2 core commands (plus JSON and Bloom Filter module commands)
-in this implementation.
+Invar aims for compatibility with major projects which depend on Redis such as [BullMQ](https://bullmq.io). Concretely,
+that means we aim for broad compatibility with comands as of Redis' 6.2 release, with the following provisos:
+
+* they should be feasible on the underlying LSM store without compromising behavior (generally have the time/space complexity)
+* they should semantically make sense in the context of Invar (cluster management doesn't, for example)
 
 At present we have no plans to implement the following command groups:
 
 * Geospatial: this is rather a large maintenance commitment for a use case we've never been asked about so far
-* Cluster: this one doesn't semantically make sense given Invar's single-writer model
-
-But we're open to convincing :)
+* Cluster management: this one doesn't semantically make sense given Invar's single-node/single-writer model
+* RBAC: Authz/authn is strictly out of scope for Invar itself. If you need this, consider our [managed options](https://hardpoint.dev).
 
 ---
 
 ## Legend
 
-- ✅ — implemented
-- 🚫 — not implemented
+- ✅ implemented
+- 🚧 not yet implemented
+- 🚫 no plan to implement
+
+*note*: entire command groups which currently have no support, but we have not ruled out implementing, are omitted
+from the below list.
+
+## Contributing
+
+Contributions for extending our command coverage are greatly appreciated! Before implementing anything, please consult
+the table of commands below. For commands marked as not yet implemented (`🚧`), you are more than welcome to go ahead
+and submit a PR with an implementation proposal. For commands explicitly marked as off the roadmap (`🚫`), please create
+and issue to discuss the merits of the change before spending time implementing anything.
 
 ---
 
@@ -72,28 +85,28 @@ But we're open to convincing :)
 
 ## List commands
 
-| Command | Status | Notes |
-|---------|--------|-------|
-| BLMOVE | 🚫 | |
-| BLPOP | 🚫 | |
-| BRPOP | 🚫 | |
-| BRPOPLPUSH | 🚫 | |
-| LINDEX | ✅ | |
-| LINSERT | ✅ | |
-| LLEN | ✅ | |
-| LMOVE | 🚫 | |
-| LPOP | ✅ | |
-| LPOS | ✅ | RANK/COUNT options accepted but not yet functional |
-| LPUSH | ✅ | |
-| LPUSHX | ✅ | |
-| LRANGE | ✅ | |
-| LREM | ✅ | |
-| LSET | ✅ | |
-| LTRIM | ✅ | |
-| RPOP | ✅ | |
-| RPOPLPUSH | ✅ | |
-| RPUSH | ✅ | |
-| RPUSHX | ✅ | |
+| Command | Status | Notes                                                      |
+|---------|--------|------------------------------------------------------------|
+| BLMOVE | 🚧 |                                                            |
+| BLPOP | 🚧 |                                                            |
+| BRPOP | 🚧 |                                                            |
+| BRPOPLPUSH | 🚧 |                                                            |
+| LINDEX | ✅ |                                                            |
+| LINSERT | ✅ |                                                            |
+| LLEN | ✅ |                                                            |
+| LMOVE | 🚧 |                                                            |
+| LPOP | ✅ |                                                            |
+| LPOS | 🚧 | missing RANK/COUNT options |
+| LPUSH | ✅ |                                                            |
+| LPUSHX | ✅ |                                                            |
+| LRANGE | ✅ |                                                            |
+| LREM | ✅ |                                                            |
+| LSET | ✅ |                                                            |
+| LTRIM | ✅ |                                                            |
+| RPOP | ✅ |                                                            |
+| RPOPLPUSH | ✅ |                                                            |
+| RPUSH | ✅ |                                                            |
+| RPUSHX | ✅ |                                                            |
 
 ---
 
@@ -109,7 +122,7 @@ But we're open to convincing :)
 | SINTERSTORE | ✅ | |
 | SISMEMBER | ✅ | |
 | SMEMBERS | ✅ | |
-| SMISMEMBER | 🚫 | |
+| SMISMEMBER | 🚧 | |
 | SMOVE | ✅ | |
 | SPOP | ✅ | |
 | SRANDMEMBER | ✅ | |
@@ -152,7 +165,7 @@ But we're open to convincing :)
 | ZREVRANGEBYLEX | ✅ | |
 | ZREVRANGEBYSCORE | ✅ | |
 | ZREVRANK | ✅ | |
-| ZSCAN | 🚫 | |
+| ZSCAN | 🚧 | |
 | ZSCORE | ✅ | |
 | ZUNION | ✅ | |
 | ZUNIONSTORE | ✅ | |
@@ -165,8 +178,8 @@ But we're open to convincing :)
 | Command | Status | Notes |
 |---------|--------|-------|
 | BITCOUNT | ✅ | Supports BYTE and BIT range modes |
-| BITFIELD | 🚫 | |
-| BITFIELD_RO | 🚫 | |
+| BITFIELD | 🚧 | |
+| BITFIELD_RO | 🚧 | |
 | BITOP | ✅ | Supports AND, OR, XOR, NOT, DIFF, DIFF1, ANDOR, ONE |
 | BITPOS | ✅ | Supports BYTE and BIT range modes |
 | GETBIT | ✅ | |
@@ -180,9 +193,9 @@ But we're open to convincing :)
 |---------|--------|-------|
 | PFADD | ✅ | |
 | PFCOUNT | ✅ | |
-| PFDEBUG | 🚫 | |
+| PFDEBUG | 🚧 | |
 | PFMERGE | ✅ | |
-| PFSELFTEST | 🚫 | |
+| PFSELFTEST | 🚧 | |
 
 ---
 
@@ -199,14 +212,14 @@ But we're open to convincing :)
 | XREVRANGE | ✅ | With COUNT option |
 | XSETID | ✅ | |
 | XTRIM | ✅ | MAXLEN and MINID modes, approximate (~) treated as exact |
-| XACK | 🚫 | Consumer group support not implemented |
-| XAUTOCLAIM | 🚫 | Consumer group support not implemented |
-| XCLAIM | 🚫 | Consumer group support not implemented |
-| XGROUP | 🚫 | Consumer group support not implemented |
-| XINFO CONSUMERS | 🚫 | Consumer group support not implemented |
-| XINFO GROUPS | 🚫 | Consumer group support not implemented |
-| XPENDING | 🚫 | Consumer group support not implemented |
-| XREADGROUP | 🚫 | Consumer group support not implemented |
+| XACK | 🚧 | Consumer group support not implemented |
+| XAUTOCLAIM | 🚧 | Consumer group support not implemented |
+| XCLAIM | 🚧 | Consumer group support not implemented |
+| XGROUP | 🚧 | Consumer group support not implemented |
+| XINFO CONSUMERS | 🚧 | Consumer group support not implemented |
+| XINFO GROUPS | 🚧 | Consumer group support not implemented |
+| XPENDING | 🚧 | Consumer group support not implemented |
+| XREADGROUP | 🚧 | Consumer group support not implemented |
 
 ---
 
@@ -237,8 +250,8 @@ But we're open to convincing :)
 | DISCARD | ✅ | |
 | EXEC | ✅ | |
 | MULTI | ✅ | |
-| UNWATCH | 🚫 | |
-| WATCH | 🚫 | |
+| UNWATCH | 🚧 | |
+| WATCH | 🚧 | |
 
 ---
 
@@ -254,30 +267,30 @@ But we're open to convincing :)
 ## Connection commands
 
 | Command | Status | Notes |
-|---------|--------|-------|
-| AUTH | 🚫 | Not implementing |
-| CLIENT CACHING | 🚫 | Not implementing |
+|---------|--------|-|
+| AUTH | 🚫 | |
+| CLIENT CACHING | 🚫 | |
 | CLIENT GETNAME | ✅ | Per-connection name via CLIENT SETNAME |
-| CLIENT GETREDIR | 🚫 | Not implementing |
+| CLIENT GETREDIR | 🚫 | |
 | CLIENT ID | ✅ | |
 | CLIENT INFO | ✅ | |
-| CLIENT KILL | 🚫 | Not implementing |
+| CLIENT KILL | 🚫 | |
 | CLIENT LIST | ✅ | Reports the current connection only |
-| CLIENT NO-EVICT | 🚫 | Not implementing |
-| CLIENT NO-TOUCH | 🚫 | Not implementing |
-| CLIENT PAUSE | 🚫 | Not implementing |
-| CLIENT REPLY | 🚫 | Not implementing |
+| CLIENT NO-EVICT | 🚫 | |
+| CLIENT NO-TOUCH | 🚫 | |
+| CLIENT PAUSE | 🚫 | |
+| CLIENT REPLY | 🚫 | |
 | CLIENT SETNAME | ✅ | |
 | CLIENT SETINFO | ✅ | LIB-NAME / LIB-VER |
-| CLIENT TRACKING | 🚫 | Not implementing |
-| CLIENT TRACKINGINFO | 🚫 | Not implementing |
-| CLIENT UNBLOCK | 🚫 | Not implementing |
-| CLIENT UNPAUSE | 🚫 | Not implementing |
+| CLIENT TRACKING | 🚫 | |
+| CLIENT TRACKINGINFO | 🚫 | |
+| CLIENT UNBLOCK | 🚫 | |
+| CLIENT UNPAUSE | 🚫 | |
 | ECHO | ✅ | |
 | HELLO | ✅ | RESP2 only; RESP3 refused with NOPROTO |
 | PING | ✅ | |
 | QUIT | ✅ | |
-| RESET | 🚫 | |
+| RESET | 🚧 | |
 | SELECT | ✅ | |
 
 ---
@@ -355,33 +368,33 @@ But we're open to convincing :)
 
 | Command | Status | Notes |
 |---------|--------|-------|
-| COPY | 🚫 | |
+| COPY | 🚧 | |
 | DEL | ✅ | |
-| DUMP | 🚫 | |
+| DUMP | 🚧 | |
 | EXISTS | ✅ | |
 | EXPIRE | ✅ | |
-| EXPIREAT | 🚫 | |
-| EXPIRETIME | 🚫 | |
-| KEYS | 🚫 | |
-| MIGRATE | 🚫 | |
+| EXPIREAT | 🚧 | |
+| EXPIRETIME | 🚧 | |
+| KEYS | 🚧 | |
+| MIGRATE | 🚧 | |
 | MOVE | ✅ | |
-| OBJECT ENCODING | 🚫 | |
-| OBJECT FREQ | 🚫 | |
+| OBJECT ENCODING | 🚧 | |
+| OBJECT FREQ | 🚧 | |
 | OBJECT IDLETIME | ✅ | No-op, returns nil |
-| OBJECT REFCOUNT | 🚫 | |
+| OBJECT REFCOUNT | 🚧 | |
 | PERSIST | ✅ | |
 | PEXPIRE | ✅ | |
-| PEXPIREAT | 🚫 | |
-| PEXPIRETIME | 🚫 | |
+| PEXPIREAT | 🚧 | |
+| PEXPIRETIME | 🚧 | |
 | PTTL | ✅ | |
-| RANDOMKEY | 🚫 | |
+| RANDOMKEY | 🚧 | |
 | RENAME | ✅ | |
 | RENAMENX | ✅ | |
-| RESTORE | 🚫 | |
+| RESTORE | 🚧 | |
 | SCAN | ✅ | MATCH, COUNT, and TYPE options supported |
-| SORT | 🚫 | |
-| SORT_RO | 🚫 | |
-| TOUCH | 🚫 | |
+| SORT | 🚧 | |
+| SORT_RO | 🚧 | |
+| TOUCH | 🚧 | |
 | TTL | ✅ | |
 | TYPE | ✅ | |
 | UNLINK | ✅ | Equivalant behavior to `DEL` |
@@ -400,14 +413,14 @@ But we're open to convincing :)
 | JSON.ARRPOP | ✅ | |
 | JSON.ARRTRIM | ✅ | |
 | JSON.CLEAR | ✅ | |
-| JSON.DEBUG | 🚫 | |
-| JSON.DEBUG MEMORY | 🚫 | |
+| JSON.DEBUG | 🚧 | |
+| JSON.DEBUG MEMORY | 🚧 | |
 | JSON.DEL | ✅ | |
-| JSON.FORGET | 🚫 | |
+| JSON.FORGET | 🚧 | |
 | JSON.GET | ✅ | |
-| JSON.MERGE | 🚫 | |
+| JSON.MERGE | 🚧 | |
 | JSON.MGET | ✅ | |
-| JSON.MSET | 🚫 | |
+| JSON.MSET | 🚧 | |
 | JSON.NUMINCRBY | ✅ | |
 | JSON.NUMMULTBY | ✅ | |
 | JSON.OBJKEYS | ✅ | |
@@ -416,7 +429,7 @@ But we're open to convincing :)
 | JSON.SET | ✅ | |
 | JSON.STRAPPEND | ✅ | |
 | JSON.STRLEN | ✅ | |
-| JSON.TOGGLE | 🚫 | |
+| JSON.TOGGLE | 🚧 | |
 | JSON.TYPE | ✅ | |
 
 ---
@@ -426,12 +439,12 @@ But we're open to convincing :)
 | Command | Status | Notes |
 |---------|--------|-------|
 | BF.ADD | ✅ | |
-| BF.CARD | 🚫 | |
+| BF.CARD | 🚧 | |
 | BF.EXISTS | ✅ | |
 | BF.INFO | ✅ | |
 | BF.INSERT | ✅ | |
-| BF.LOADCHUNK | 🚫 | |
+| BF.LOADCHUNK | 🚧 | |
 | BF.MADD | ✅ | |
 | BF.MEXISTS | ✅ | |
 | BF.RESERVE | ✅ | |
-| BF.SCANDUMP | 🚫 | |
+| BF.SCANDUMP | 🚧 | |
