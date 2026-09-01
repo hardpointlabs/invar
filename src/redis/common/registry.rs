@@ -102,9 +102,13 @@ impl Claim {
         self.result = Some(result);
     }
 
-    /// Delivers the claimed result to the blocked client. Call from a wire op,
-    /// i.e. only after the transaction committed.
+    /// Sends the claimed result to the blocked client while the write
+    /// transaction that produced it has committed. Removes the delivery
+    /// channel from the waiter afterwards.
     pub fn wake(&self) {
+        if let WaitKind::Stream = self.waiter.kind {
+            tracing::debug!(waiter_id = self.waiter.id, "stream waiter woken");
+        }
         let sender = self.waiter.tx.lock().unwrap().take();
         if let (Some(sender), Some(result)) = (sender, &self.result) {
             let _ = sender.send(result.clone());
@@ -153,6 +157,13 @@ impl WatchRegistry {
         let mut inner = self.inner.lock().unwrap();
         let queue = inner.waiters.get_mut(public_key)?;
         let waiter = queue.pop_front()?;
+        if matches!(waiter.kind, WaitKind::Stream) {
+            tracing::debug!(
+                waiter_id = waiter.id,
+                key = %String::from_utf8_lossy(public_key),
+                "stream waiter claimed by writer"
+            );
+        }
         if queue.is_empty() {
             inner.waiters.remove(public_key);
         }
@@ -218,6 +229,7 @@ impl WatchRegistry {
         keys: &[Vec<u8>],
         timeout: Option<Duration>,
     ) -> Option<BlockResult> {
+        tracing::debug!(keys = ?keys, timeout = ?timeout, "xread requesting block");
         self.block_inner(keys, WaitKind::Stream, timeout).await
     }
 
@@ -258,6 +270,13 @@ impl WatchRegistry {
                     .push_back(waiter.clone());
             }
         }
+        if let WaitKind::Stream = kind {
+            tracing::debug!(
+                waiter_id = id,
+                keys = ?keys,
+                "stream waiter registered (xread blocking)"
+            );
+        }
 
         match timeout {
             Some(duration) => {
@@ -265,6 +284,13 @@ impl WatchRegistry {
                     Ok(result) => result.ok(),
                     Err(_elapsed) => {
                         if self.remove_waiter(&waiter) {
+                            if let WaitKind::Stream = waiter.kind {
+                                tracing::debug!(
+                                    waiter_id = waiter.id,
+                                    keys = ?waiter.keys,
+                                    "stream waiter timed out (wake missed)"
+                                );
+                            }
                             // Cleanly removed ourselves: a genuine timeout.
                             None
                         } else {

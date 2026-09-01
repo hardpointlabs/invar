@@ -16,7 +16,7 @@
 //!   value is the serialized field-value pairs (see [`encode_entry_value`]).
 
 use std::ops::Bound;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
@@ -662,6 +662,25 @@ impl DbOp for XAddOp {
                 .map(|c| (c[0].clone(), c[1].clone()))
                 .collect();
 
+            if let Some(event_field) = fields.iter().find(|(k, _)| k.as_slice() == b"event") {
+                if event_field.1 == b"delayed" {
+                    let job_id = fields
+                        .iter()
+                        .find(|(k, _)| k.as_slice() == b"jobId")
+                        .map(|(_, v)| String::from_utf8_lossy(v).into_owned());
+                    let delay = fields
+                        .iter()
+                        .find(|(k, _)| k.as_slice() == b"delay")
+                        .map(|(_, v)| String::from_utf8_lossy(v).into_owned());
+                    tracing::debug!(
+                        key = %String::from_utf8_lossy(&public_key),
+                        jobId = %job_id.unwrap_or_default(),
+                        delay = %delay.unwrap_or_default(),
+                        "delayed event xadd"
+                    );
+                }
+            }
+
             // Write entry.
             let key = entry_key(&node_prefix, meta.version, &id);
             let value = encode_entry_value(&fields);
@@ -706,6 +725,16 @@ impl DbOp for XAddOp {
 
     fn release_claims(&self, result: &DbResult) {
         self.release_claims_impl(result);
+    }
+
+    /// The script path may not wake a claim until its transaction commits, so
+    /// strip it out here and hand it to the script for deferred delivery.
+    fn defer_claims(&self, result: &mut DbResult, into: &Mutex<Vec<Claim>>) {
+        if let Some(xadd) = result.downcast_mut::<XAddResult>() {
+            if let Some(claim) = xadd.claim.take() {
+                into.lock().expect("deferred claims mutex poisoned").push(claim);
+            }
+        }
     }
 }
 
@@ -889,6 +918,7 @@ async fn read_streams(
 impl DbOp for XReadOp {
     fn run<'a>(&'a self, tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
         if !self.can_block {
+            tracing::debug!(blockers = 0, streams = self.streams.len(), "xread op non-blocking");
             // Non-blocking, and the MULTI/script degrade path: use the
             // dispatcher's batch transaction.
             let streams = self.streams.clone();
@@ -928,6 +958,11 @@ impl DbOp for XReadOp {
                     return Err(e);
                 }
             };
+            tracing::debug!(
+                resolved = ?resolved.iter().map(|o| o.map(|i| i.display())).collect::<Vec<_>>(),
+                first_counts = ?first.iter().map(|(_, e)| e.len()).collect::<Vec<_>>(),
+                "xread blocking initial read"
+            );
             if first.iter().any(|(_, e)| !e.is_empty()) {
                 let result: DbResult = Box::new(first);
                 return Ok(result);
@@ -947,6 +982,12 @@ impl DbOp for XReadOp {
             // after the writer's XADD committed, so the entry is visible.
             let fresh_tx = store.begin(false).await.map_err(DbError::Kv)?;
             let results = read_streams(&*fresh_tx, &streams, &resolved, count).await?;
+            tracing::debug!(
+                resolved = ?resolved.iter().map(|o| o.map(|i| i.display())).collect::<Vec<_>>(),
+                post_counts = ?results.iter().map(|(_, e)| e.len()).collect::<Vec<_>>(),
+                post_last = ?results.iter().map(|(_, e)| e.last().map(|(id, _)| id.display())).collect::<Vec<_>>(),
+                "xread blocking after wake"
+            );
             let result: DbResult = Box::new(results);
             Ok(result)
         })

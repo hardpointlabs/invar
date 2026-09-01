@@ -107,6 +107,7 @@ async fn handle_connection(
     if let Ok(peer) = socket.peer_addr() {
         session.set_peer_addr(peer);
     }
+    let _registry_guard = crate::server::register_session(&session);
     let mut framed = Framed::new(socket, RespDecoder::new());
     let mut subs = ConnectionSubs::new(pubsub.clone());
 

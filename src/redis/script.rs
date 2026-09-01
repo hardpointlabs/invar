@@ -28,7 +28,7 @@ use sha1::{Digest, Sha1};
 
 use crate::commands::dispatch_command;
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
-use crate::common::registry::WatchRegistry;
+use crate::common::registry::{Claim, WatchRegistry};
 use crate::common::session::Session;
 use crate::common::store::RedisStore;
 use crate::resp::RespValue;
@@ -81,6 +81,12 @@ struct ScriptContext {
     registry: Arc<WatchRegistry>,
     /// The current Redis DB number for key derivation.
     current_db: i32,
+    /// Claims (`XREAD`, `BZPOP*`...) made by `redis.call()` commands issued
+    /// inside the script. A script runs against a transaction that does not
+    /// commit until after the Lua code finishes, so a claim must not be woken
+    /// mid-script (the reader would wake up before the write is committed).
+    /// These are woken by the post-commit `EvalWire::reply` instead.
+    deferred_claims: Mutex<Vec<Claim>>,
 }
 
 // SAFETY: ScriptContext is used within a single-threaded Lua interpreter.
@@ -130,7 +136,10 @@ fn resp_to_piccolo<'gc>(ctx: Context<'gc>, resp: RespValue) -> Value<'gc> {
         RespValue::Integer(n) => Value::Integer(n),
         RespValue::BulkString(opt) => match opt {
             Some(b) => Value::from(ctx.intern(b.as_ref())),
-            None => Value::Nil,
+            // Redis maps null bulk replies (`$-1`) to Lua `false`, not `nil`,
+            // so arrays with missing fields (`HMGET`) keep their positions for
+            // `ipairs`/`#` handling (e.g. BullMQ's getTimestamp).
+            None => Value::from(false),
         },
         RespValue::Array(opt) => match opt {
             Some(items) => {
@@ -142,7 +151,7 @@ fn resp_to_piccolo<'gc>(ctx: Context<'gc>, resp: RespValue) -> Value<'gc> {
                 }
                 Value::Table(table)
             }
-            None => Value::Nil,
+            None => Value::from(false),
         },
     }
 }
@@ -560,9 +569,16 @@ fn execute_redis_call<'gc>(
 
     // Run the database operation - this is effectively synchronous for Fjall
     let future = cmd.db_op.run(tx);
-    let outcome = futures::executor::block_on(future);
+    let mut outcome = futures::executor::block_on(future);
 
-    // Convert the result to a piccolo Value using the wire_op
+    // Push any claim the op made (XADD/ZADD waking a blocked reader) onto the
+    // script's deferred list. Requesting a `WireOp::reply` here would wake the
+    // reader before this EVAL's transaction commits, losing the entry. The
+    // claims are woken by `EvalWire::reply` after the script transaction
+    // commits.
+    if let Ok(result) = &mut outcome {
+        cmd.db_op.defer_claims(result, &script_ctx.deferred_claims);
+    }
     let resp = cmd.wire_op.reply(outcome);
 
     // Check if the response is an error - if so, raise it as a Lua error
@@ -589,6 +605,27 @@ enum EvalResult {
     /// table.
     Err(Vec<u8>),
     Array(Vec<EvalResult>),
+}
+
+fn debug_fmt(r: &EvalResult) -> String {
+    match r {
+        EvalResult::Nil => "nil".to_string(),
+        EvalResult::Integer(i) => format!("int({i})"),
+        EvalResult::Bulk(b) => format!("bulk({})", String::from_utf8_lossy(b)),
+        EvalResult::Status(s) => format!("status({})", String::from_utf8_lossy(s)),
+        EvalResult::Err(e) => format!("err({})", String::from_utf8_lossy(e)),
+        EvalResult::Array(v) => {
+            let mut out = String::from("[");
+            for (i, item) in v.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&debug_fmt(item));
+            }
+            out.push(']');
+            out
+        }
+    }
 }
 
 /// `EVAL script numkeys [key ...] [arg ...]`.
@@ -680,6 +717,14 @@ impl WireOp for NoscriptWire {
     }
 }
 
+/// The boxed outcome of an `EVAL`: the script's Lua reply plus any deferred
+/// waiter claims its `redis.call()` commands made. Delivered to [`EvalWire`]
+/// only after the transaction commits, at which point the claims are woken.
+struct EvalOutcome {
+    result: EvalResult,
+    claims: Vec<Claim>,
+}
+
 struct EvalOp {
     script: Bytes,
     keys: Vec<Bytes>,
@@ -697,12 +742,37 @@ impl DbOp for EvalOp {
         let store = self.store.clone();
         let registry = self.registry.clone();
         let current_db = self.current_db;
+        let sha1 = sha1_hex(&self.script);
+        let hint = String::from_utf8_lossy(&self.script[..self.script.len().min(48)])
+            .replace('\n', " ")
+            .to_string();
         Box::pin(async move {
+            tracing::debug!(
+                %sha1,
+                hints = %hint,
+                keys = keys.len(),
+                argv = argv.len(),
+                "eval script",
+            );
             let result = run_script(&script, &keys, &argv, &store, &registry, current_db, tx);
-            let result = result?;
-            let result: DbResult = Box::new(result);
+            match &result {
+                Ok((r, _)) => tracing::debug!(%sha1, reply = %debug_fmt(r), "eval ok"),
+                Err(e) => tracing::warn!(%sha1, error = %e, "eval failed"),
+            }
+            let (result, claims) = result?;
+            let result: DbResult = Box::new(EvalOutcome { result, claims });
             Ok(result)
         })
+    }
+
+    /// The script's transaction failed to commit: return each deferred claim
+    /// to the front of its queue so no blocked client is left waiting forever.
+    fn release_claims(&self, result: &DbResult) {
+        if let Some(outcome) = result.downcast_ref::<EvalOutcome>() {
+            for claim in &outcome.claims {
+                self.registry.release_front(claim);
+            }
+        }
     }
 }
 
@@ -711,8 +781,15 @@ struct EvalWire;
 impl WireOp for EvalWire {
     fn reply(&self, result: Result<DbResult, DbError>) -> RespValue {
         match result {
-            Ok(result) => match result.downcast::<EvalResult>() {
-                Ok(result) => result_reply(&result),
+            Ok(result) => match result.downcast::<EvalOutcome>() {
+                Ok(outcome) => {
+                    // Post-commit: the script's transaction has landed, so any
+                    // XADD/ZADD wake is now safe to deliver.
+                    for claim in &outcome.claims {
+                        claim.wake();
+                    }
+                    result_reply(&outcome.result)
+                }
                 Err(_) => RespValue::Error(Bytes::from_static(b"ERR internal error")),
             },
             Err(err) => err_resp(&err),
@@ -722,6 +799,11 @@ impl WireOp for EvalWire {
 
 /// Runs `script` once and converts its return value to [`EvalResult`], mapping
 /// compile and runtime failures to the messages Redis emits.
+///
+/// Returns the script's reply plus any `XADD`/`ZADD` claims it made. A claim
+/// must only be woken after the transaction that ran this script commits, so
+/// the caller (`[`EvalOp`]`/`[`EvalWire`]`) accepts the claims and wakes them
+/// from its post-commit reply.
 ///
 /// The `store`, `registry`, `current_db`, and `tx` parameters are used to create
 /// the `redis.call()` / `redis.pcall()` functions available to the script.
@@ -733,7 +815,7 @@ fn run_script(
     registry: &Arc<WatchRegistry>,
     current_db: i32,
     tx: &dyn Tx,
-) -> Result<EvalResult, DbError> {
+) -> Result<(EvalResult, Vec<Claim>), DbError> {
     let mut lua = Lua::core();
 
     // Compile the script, stashing the closure so it survives the arena exit.
@@ -754,6 +836,7 @@ fn run_script(
         store: store.clone(),
         registry: registry.clone(),
         current_db,
+        deferred_claims: Mutex::new(Vec::new()),
     });
 
     match lua.try_enter(|ctx| {
@@ -866,7 +949,7 @@ fn run_script(
                     b"bad argument #1 to 'tonumber' (value expected)",
                 ))));
             }
-            let val = stack.get(0);
+            let val: Value = stack.consume(ctx)?;
             match val {
                 Value::Integer(n) => {
                     stack.push_back(Value::Integer(n));
@@ -1233,11 +1316,25 @@ fn run_script(
 
         run_executor(ctx, closure)
     }) {
-        Ok(result) => Ok(result),
-        Err(err) => Err(DbError::Redis(format!(
-            "Error running script (new script): {}",
-            static_error_message(&err)
-        ))),
+        Ok(result) => {
+            // The script succeeded; hand its deferred claims to the caller so
+            // they can be woken once the containing transaction commits.
+            let claims = std::mem::take(&mut *script_ctx.deferred_claims.lock().unwrap());
+            Ok((result, claims))
+        }
+        Err(err) => {
+            // The script failed; any XADD/ZADD claims made before the failure
+            // must go back to the front of their queues — the reader gets nil
+            // and re-issues, avoiding a lost wake.
+            let claims = std::mem::take(&mut *script_ctx.deferred_claims.lock().unwrap());
+            for claim in &claims {
+                registry.release_front(claim);
+            }
+            Err(DbError::Redis(format!(
+                "Error running script (new script): {}",
+                static_error_message(&err)
+            )))
+        }
     }
 }
 
@@ -1470,7 +1567,11 @@ fn value_to_result<'gc>(
 ) -> Result<EvalResult, PicError<'gc>> {
     match value {
         Value::Nil => Ok(EvalResult::Nil),
-        Value::Boolean(b) => Ok(EvalResult::Integer(if b { 1 } else { 0 })),
+        Value::Boolean(b) => Ok(if b {
+            EvalResult::Integer(1)
+        } else {
+            EvalResult::Nil
+        }),
         Value::Integer(n) => Ok(EvalResult::Integer(n)),
         Value::Number(f) => Ok(EvalResult::Integer(f as i64)),
         Value::String(s) => Ok(EvalResult::Bulk(s.as_bytes().to_vec())),
@@ -1626,8 +1727,9 @@ mod tests {
         let reply = exec(eval_op("return true", &[], &[])).await;
         assert_eq!(expect_integer(&reply), 1);
 
+        // Redis ≥6 maps Lua `false` replies to the null bulk string.
         let reply = exec(eval_op("return false", &[], &[])).await;
-        assert_eq!(expect_integer(&reply), 0);
+        assert_eq!(expect_bulk(&reply), None);
     }
 
     #[tokio::test]
@@ -1776,7 +1878,8 @@ mod tests {
         ))
         .await;
         let items = expect_array(&reply);
-        assert_eq!(expect_integer(&items[0]), 0); // false = 0
+        // pcall failure yields Lua `false`, which Redis ≥6 replies as null bulk.
+        assert_eq!(expect_bulk(&items[0]), None);
         // Error message should be present
     }
 

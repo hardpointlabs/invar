@@ -149,6 +149,15 @@ impl Item {
         self.expire_ts.map(|ts| (ts / 1000) as u64).unwrap_or(0)
     }
 
+    /// Returns the absolute expiry time as Unix milliseconds, or 0 if the
+    /// entry never expires.
+    pub fn expires_at_millis(&self) -> u64 {
+        self.expire_ts
+            .filter(|&ts| ts > 0)
+            .map(|ts| ts as u64)
+            .unwrap_or(0)
+    }
+
     /// Returns the value of this entry.
     pub fn value(&self) -> &[u8] {
         &self.value
