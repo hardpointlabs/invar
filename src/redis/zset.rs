@@ -43,7 +43,7 @@ use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use crate::common::session::Session;
-use crate::common::{Claim, PopResult, RedisStore, ValueType, WatchRegistry};
+use crate::common::{BlockResult, Claim, PopResult, RedisStore, ValueType, WatchRegistry};
 use crate::resp::RespValue;
 
 /// Metadata type byte stamped on every zset sentinel, matching
@@ -1572,11 +1572,11 @@ impl DbOp for ZAddOp {
                             return Err(e);
                         }
                         Ok(Some(p)) => {
-                            claim_ref.set_result(PopResult {
+                            claim_ref.set_result(BlockResult::Pop(PopResult {
                                 key: raw_key,
                                 member: p.member,
                                 score: p.score,
-                            });
+                            }));
                         }
                         Ok(None) => {}
                     }

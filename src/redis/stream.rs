@@ -16,14 +16,15 @@
 //!   value is the serialized field-value pairs (see [`encode_entry_value`]).
 
 use std::ops::Bound;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use crate::common::session::Session;
-use crate::common::ValueType;
+use crate::common::{BlockResult, Claim, RedisStore, StreamResult, ValueType, WatchRegistry};
 use crate::resp::RespValue;
 
 /// Metadata type byte stamped on the sentinel entry.
@@ -373,6 +374,7 @@ pub fn xadd(
             min_id,
             explicit_id: id,
             field_values: field_values.iter().map(|b| b.to_vec()).collect(),
+            registry: session.registry(),
         }),
         wire_op: Box::new(XAddWire),
         is_mutating: true,
@@ -442,15 +444,25 @@ pub fn xrevrange(
     }
 }
 
-/// `XREAD [COUNT count] STREAMS key [key ...] id [id ...]`
+/// `XREAD [COUNT count] [BLOCK milliseconds] STREAMS key [key ...] id [id ...]`
+///
+/// `block_ms` is `None` for a non-blocking read, `Some(0)` to block until an
+/// entry arrives, or `Some(n)` to block for at most `n` milliseconds. Inside a
+/// `MULTI`/`EXEC` or Lua script a `BLOCK` request degrades to a non-blocking
+/// read.
 pub fn xread(
     session: &Session,
     keys: &[Bytes],
     ids: Vec<Option<StreamEntryId>>,
     count: usize,
+    block_ms: Option<i64>,
 ) -> QueuedOp {
+    let can_block = session.should_block() && block_ms.is_some();
+    let timeout = block_ms.unwrap_or(0) as f64 / 1000.0;
     QueuedOp {
         db_op: Box::new(XReadOp {
+            store: session.store(),
+            registry: session.registry(),
             streams: keys
                 .iter()
                 .map(|k| XReadStream {
@@ -461,6 +473,8 @@ pub fn xread(
                 .collect(),
             ids,
             count,
+            timeout,
+            can_block,
         }),
         wire_op: Box::new(XReadWire),
         is_mutating: false,
@@ -557,6 +571,14 @@ pub fn xinfo_stream(session: &Session, key: &[u8]) -> QueuedOp {
 
 // --- XADD ---
 
+/// The result of an `XADD` DbOp: the generated entry ID plus any blocked
+/// `XREAD` waiter claimed on this key, so the wire side can wake it after the
+/// transaction commits.
+struct XAddResult {
+    id: String,
+    claim: Option<Claim>,
+}
+
 struct XAddOp {
     public_key: Vec<u8>,
     node_prefix: Vec<u8>,
@@ -565,6 +587,17 @@ struct XAddOp {
     min_id: Option<StreamEntryId>,
     explicit_id: Option<StreamEntryId>,
     field_values: Vec<Vec<u8>>,
+    registry: Arc<WatchRegistry>,
+}
+
+impl XAddOp {
+    fn release_claims_impl(&self, result: &DbResult) {
+        if let Some(xadd) = result.downcast_ref::<XAddResult>() {
+            if let Some(claim) = &xadd.claim {
+                self.registry.release_front(claim);
+            }
+        }
+    }
 }
 
 impl DbOp for XAddOp {
@@ -576,6 +609,7 @@ impl DbOp for XAddOp {
         let min_id = self.min_id;
         let explicit_id = self.explicit_id;
         let field_values = self.field_values.clone();
+        let registry = self.registry.clone();
         Box::pin(async move {
             let mut meta = match read_sentinel(tx, &public_key).await {
                 Ok(m) => m,
@@ -649,9 +683,29 @@ impl DbOp for XAddOp {
                 write_sentinel(tx, &public_key, &meta)?;
             }
 
-            let result: DbResult = Box::new(id.display());
+            // A new entry may satisfy a blocked XREAD client parked on this
+            // key's queue. Claim the longest-waiting one; the returned claim is
+            // delivered (woken) by the wire side once this transaction commits.
+            let mut claim: Option<Claim> = None;
+            if let Some(mut claim_ref) = registry.try_claim(&public_key) {
+                if claim_ref.is_stream() {
+                    claim_ref.set_result(BlockResult::Stream(StreamResult {
+                        public_key: public_key.clone(),
+                    }));
+                    claim = Some(claim_ref);
+                }
+            }
+
+            let result: DbResult = Box::new(XAddResult {
+                id: id.display(),
+                claim,
+            });
             Ok(result)
         })
+    }
+
+    fn release_claims(&self, result: &DbResult) {
+        self.release_claims_impl(result);
     }
 }
 
@@ -736,9 +790,14 @@ struct XReadStream {
 }
 
 struct XReadOp {
+    store: Arc<dyn RedisStore>,
+    registry: Arc<WatchRegistry>,
     streams: Vec<XReadStream>,
     ids: Vec<Option<StreamEntryId>>,
     count: usize,
+    /// Block timeout in seconds; only consulted when `can_block`.
+    timeout: f64,
+    can_block: bool,
 }
 
 // TODO we should properly type this list of read results,
@@ -755,54 +814,139 @@ struct XReadOp {
 // }
 type StreamList = Vec<(Bytes, Vec<(StreamEntryId, Vec<(Vec<u8>, Vec<u8>)>)>)>;
 
+/// Resolves each `$` (represented as `None`) to the stream's current last
+/// entry ID, so the resolved IDs stay stable across re-reads after a block.
+/// Non-`$` IDs are returned unchanged.
+async fn resolve_read_ids(
+    tx: &dyn Tx,
+    streams: &[XReadStream],
+    ids: &[Option<StreamEntryId>],
+) -> Result<Vec<Option<StreamEntryId>>, DbError> {
+    let mut resolved = Vec::with_capacity(ids.len());
+    for (stream, id_arg) in streams.iter().zip(ids.iter()) {
+        match id_arg {
+            None => {
+                // `$`: pin to the current last_id (exclusive).
+                let last = match read_sentinel(tx, &stream.public_key).await {
+                    Ok(m) => Some(m.last_id),
+                    Err(DbError::Kv(KvError::KeyNotFound)) => None,
+                    Err(e) => return Err(e),
+                };
+                resolved.push(last);
+            }
+            Some(id) => resolved.push(Some(*id)),
+        }
+    }
+    Ok(resolved)
+}
+
+/// Bumps `id` by one sequence number, carrying into the millisecond part when
+/// the sequence overflows, so an exclusive scan land on the next possible ID.
+fn bump_seq(id: StreamEntryId) -> StreamEntryId {
+    if id.seq < u64::MAX {
+        StreamEntryId::new(id.ms, id.seq + 1)
+    } else {
+        StreamEntryId::new(id.ms + 1, 0)
+    }
+}
+
+/// Reads each stream strictly after its (already-resolved) ID, up to `count`
+/// entries per stream. A stream with no entries after its ID yields an empty
+/// list.
+async fn read_streams(
+    tx: &dyn Tx,
+    streams: &[XReadStream],
+    ids: &[Option<StreamEntryId>],
+    count: usize,
+) -> Result<StreamList, DbError> {
+    let mut results: StreamList = Vec::new();
+    for (stream, id_arg) in streams.iter().zip(ids.iter()) {
+        let meta = match read_sentinel(tx, &stream.public_key).await {
+            Ok(m) => m,
+            Err(DbError::Kv(KvError::KeyNotFound)) => {
+                results.push((stream.name.clone(), Vec::new()));
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        // scan_entries is inclusive on the start bound, so bump seq by 1 to
+        // start from the next possible entry after `id_arg`.
+        let scan_start = id_arg.map(bump_seq);
+        let entries = scan_entries(
+            tx,
+            &stream.node_prefix,
+            meta.version,
+            scan_start.as_ref(),
+            None,
+            count,
+        )
+        .await?;
+        results.push((stream.name.clone(), entries));
+    }
+    Ok(results)
+}
+
 impl DbOp for XReadOp {
     fn run<'a>(&'a self, tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
+        if !self.can_block {
+            // Non-blocking, and the MULTI/script degrade path: use the
+            // dispatcher's batch transaction.
+            let streams = self.streams.clone();
+            let ids = self.ids.clone();
+            let count = self.count;
+            return Box::pin(async move {
+                let resolved = resolve_read_ids(tx, &streams, &ids).await?;
+                let results = read_streams(tx, &streams, &resolved, count).await?;
+                let result: DbResult = Box::new(results);
+                Ok(result)
+            });
+        }
+
+        // Blocking mode: open our own transaction, resolve `$`, and try a read.
+        // If anything is available, return it. Otherwise register on the watch
+        // registry and wait; once woken, re-read in a fresh transaction (so we
+        // see the entry the writer committed) and return the new entries.
+        let store = self.store.clone();
+        let registry = self.registry.clone();
         let streams = self.streams.clone();
         let ids = self.ids.clone();
         let count = self.count;
+        let timeout = self.timeout;
         Box::pin(async move {
-            let mut results: StreamList = Vec::new();
-            for (stream, id_arg) in streams.iter().zip(ids.iter()) {
-                let meta = match read_sentinel(tx, &stream.public_key).await {
-                    Ok(m) => m,
-                    Err(DbError::Kv(KvError::KeyNotFound)) => {
-                        results.push((stream.name.clone(), Vec::new()));
-                        continue;
-                    }
-                    Err(e) => return Err(e),
-                };
-                // Resolve `$` → last_id (exclusive), so we read entries AFTER it.
-                let after_id = match id_arg {
-                    None => Some(meta.last_id), // $ → after last
-                    Some(id) => {
-                        // Read entries strictly after `id`.
-                        // Shift seq by 1 to make it exclusive.
-                        Some(StreamEntryId::new(id.ms, id.seq))
-                    }
-                };
-                // We want entries AFTER after_id. Since scan_entries is
-                // inclusive on the start bound, we bump seq by 1 to make the
-                // scan start from the next possible entry.
-                let scan_start = after_id.map(|a| {
-                    // If seq is u64::MAX, bump ms and reset seq. Otherwise
-                    // just bump seq.
-                    if a.seq < u64::MAX {
-                        StreamEntryId::new(a.ms, a.seq + 1)
-                    } else {
-                        StreamEntryId::new(a.ms + 1, 0)
-                    }
-                });
-                let entries = scan_entries(
-                    tx,
-                    &stream.node_prefix,
-                    meta.version,
-                    scan_start.as_ref(),
-                    None,
-                    count,
-                )
-                .await?;
-                results.push((stream.name.clone(), entries));
+            let own_tx = store.begin(false).await.map_err(DbError::Kv)?;
+            let resolved = match resolve_read_ids(&*own_tx, &streams, &ids).await {
+                Ok(r) => r,
+                Err(e) => {
+                    own_tx.discard();
+                    return Err(e);
+                }
+            };
+            let first = match read_streams(&*own_tx, &streams, &resolved, count).await {
+                Ok(r) => r,
+                Err(e) => {
+                    own_tx.discard();
+                    return Err(e);
+                }
+            };
+            if first.iter().any(|(_, e)| !e.is_empty()) {
+                let result: DbResult = Box::new(first);
+                return Ok(result);
             }
+            own_tx.discard();
+
+            let public_keys: Vec<Vec<u8>> =
+                streams.iter().map(|s| s.public_key.clone()).collect();
+            let duration = if timeout.is_finite() && timeout > 0.0 {
+                Some(Duration::from_secs_f64(timeout))
+            } else {
+                None
+            };
+            registry.block_stream(&public_keys, duration).await;
+
+            // Re-read with a fresh transaction: the wake is delivered only
+            // after the writer's XADD committed, so the entry is visible.
+            let fresh_tx = store.begin(false).await.map_err(DbError::Kv)?;
+            let results = read_streams(&*fresh_tx, &streams, &resolved, count).await?;
             let result: DbResult = Box::new(results);
             Ok(result)
         })
@@ -1067,13 +1211,20 @@ impl WireOp for OkWire {
     }
 }
 
+/// Replies `XADD`: the generated entry ID, then wakes any blocked XREAD waiter
+/// the DbOp claimed (only after the transaction has committed).
 struct XAddWire;
 
 impl WireOp for XAddWire {
     fn reply(&self, result: Result<DbResult, DbError>) -> RespValue {
         match result {
-            Ok(res) => match res.downcast::<String>() {
-                Ok(id) => RespValue::BulkString(Some(Bytes::from(id.as_str().to_string()))),
+            Ok(res) => match res.downcast::<XAddResult>() {
+                Ok(xadd) => {
+                    if let Some(claim) = &xadd.claim {
+                        claim.wake();
+                    }
+                    RespValue::BulkString(Some(Bytes::from(xadd.id.clone())))
+                }
                 Err(_) => internal_error(),
             },
             Err(e) => err_resp(&e),
@@ -1183,10 +1334,22 @@ impl WireOp for XInfoStreamWire {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::test_session;
+    use crate::testutil::{test_session, test_store};
+    use std::time::Duration;
 
     async fn exec(session: &Session, op: QueuedOp) -> RespValue {
         let store = session.store();
+        let tx = store.begin(op.is_mutating).await.expect("tx");
+        let outcome = op.db_op.run(&*tx).await;
+        if op.is_mutating {
+            tx.commit().await.expect("commit");
+        }
+        op.wire_op.reply(outcome)
+    }
+
+    /// Like [`exec`] but takes owned data so it can be spawned as a `'static`
+    /// task (needed for blocking-read tests).
+    async fn exec_owned(op: QueuedOp, store: Arc<dyn RedisStore>) -> RespValue {
         let tx = store.begin(op.is_mutating).await.expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
@@ -1785,6 +1948,7 @@ mod tests {
                 &[Bytes::from_static(b"s")],
                 vec![Some(StreamEntryId::new(0, 0))],
                 10,
+                None,
             ),
         )
         .await;
@@ -1805,6 +1969,7 @@ mod tests {
                 &[Bytes::from_static(b"s")],
                 vec![Some(StreamEntryId::new(1, 0))],
                 10,
+                None,
             ),
         )
         .await;
@@ -1836,9 +2001,152 @@ mod tests {
                 &[Bytes::from_static(b"s")],
                 vec![None], // None = $
                 10,
+                None,
             ),
         )
         .await;
+        assert_eq!(r, RespValue::Array(None));
+    }
+
+    // --- Blocking XREAD ---
+
+    /// Runs a `BLOCK` XREAD on one connection and an `XADD` on another, both
+    /// over the same store+registry, verifying the write claims and serves the
+    /// blocked reader through the real async path.
+    async fn serve_blocked_xread_with_xadd(block_ms: Option<i64>) {
+        let store = test_store();
+        let registry = Arc::new(WatchRegistry::new());
+        let waiter = Session::new(store.clone(), registry.clone());
+        let writer = Session::new(store, registry);
+
+        let op = xread(
+            &waiter,
+            &[Bytes::from_static(b"bk")],
+            vec![None], // $ = "from the last entry onwards"
+            10,
+            block_ms,
+        );
+        let store_clone = waiter.store();
+        let handle = tokio::spawn(exec_owned(op, store_clone));
+
+        // Give the reader time to park on the key before writing.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        // XADD on the same key claims the blocked reader inside its DbOp and
+        // wakes it once the write commits.
+        let add = xadd(
+            &writer,
+            b"bk",
+            false,
+            None,
+            None,
+            Some(StreamEntryId::new(1, 0)),
+            &[Bytes::from_static(b"f"), Bytes::from_static(b"v")],
+        );
+        let store2 = writer.store();
+        let tx = store2.begin(true).await.expect("tx");
+        let outcome = add.db_op.run(&*tx).await.expect("XADD ok");
+        tx.commit().await.expect("commit");
+        add.wire_op.reply(Ok(outcome));
+
+        let reply = handle.await.expect("task completed");
+        match &reply {
+            RespValue::Array(Some(streams)) => {
+                assert_eq!(streams.len(), 1);
+                match &streams[0] {
+                    RespValue::Array(Some(items)) => {
+                        assert_eq!(items.len(), 2);
+                        assert_eq!(
+                            items[0],
+                            RespValue::BulkString(Some(Bytes::from_static(b"bk")))
+                        );
+                        // One entry, id 1-0.
+                        match &items[1] {
+                            RespValue::Array(Some(entries)) => {
+                                assert_eq!(entries.len(), 1);
+                                assert_eq!(entry_id(&entries[0]), "1-0");
+                            }
+                            other => panic!("expected entries array, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected inner array, got {other:?}"),
+                }
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn xread_block_served_by_xadd() {
+        serve_blocked_xread_with_xadd(Some(2000)).await;
+    }
+
+    #[tokio::test]
+    async fn xread_block_zero_served_by_xadd() {
+        // BLOCK 0 = wait indefinitely; still served by a subsequent XADD.
+        serve_blocked_xread_with_xadd(Some(0)).await;
+    }
+
+    #[tokio::test]
+    async fn xread_block_timeout_returns_nil() {
+        let session = test_session();
+        let r = exec(
+            &session,
+            xread(
+                &session,
+                &[Bytes::from_static(b"nothing")],
+                vec![None],
+                10,
+                Some(50), // 50 ms, then give up
+            ),
+        )
+        .await;
+        assert_eq!(r, RespValue::Array(None));
+    }
+
+    #[tokio::test]
+    async fn xread_block_returns_existing_immediately() {
+        let session = test_session();
+        let fv = &[Bytes::from_static(b"f"), Bytes::from_static(b"v")];
+        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(5, 0)), fv)).await;
+        // Data already exists after 0-0, so BLOCK must not wait.
+        let r = exec(
+            &session,
+            xread(
+                &session,
+                &[Bytes::from_static(b"s")],
+                vec![Some(StreamEntryId::new(0, 0))],
+                10,
+                Some(2000),
+            ),
+        )
+        .await;
+        match &r {
+            RespValue::Array(Some(streams)) => {
+                assert_eq!(streams.len(), 1);
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn xread_block_in_multi_degrades_to_immediate() {
+        let mut session = test_session();
+        session.enter_multi();
+        // should_block() is false, so BLOCK must not block; with no data it
+        // returns nil immediately.
+        let r = exec(
+            &session,
+            xread(
+                &session,
+                &[Bytes::from_static(b"nothing")],
+                vec![None],
+                10,
+                Some(2000),
+            ),
+        )
+        .await;
+        session.exit_multi(true).unwrap();
         assert_eq!(r, RespValue::Array(None));
     }
 
