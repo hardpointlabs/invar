@@ -524,7 +524,7 @@ impl DbOp for PTtlOp {
     fn run<'a>(&'a self, tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
         let key = self.key.clone();
         Box::pin(async move {
-            let result = ttl_value(tx, &key).await?.map_or(-2, |ms| ms);
+            let result = ttl_value(tx, &key).await?.unwrap_or(-2);
             let result: DbResult = Box::new(result);
             Ok(result)
         })
