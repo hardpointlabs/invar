@@ -43,6 +43,11 @@ dockers_v2:
       - linux/arm64
     sbom: true
 
+announce:
+  discord:
+    enabled: '{{ isEnvSet "DISCORD_WEBHOOK_ID" }}'
+    message_template: "**invar {{ .Tag }}** is out!\n\n{{ .ReleaseURL }}"
+
 changelog:
   sort: asc
   filters:
