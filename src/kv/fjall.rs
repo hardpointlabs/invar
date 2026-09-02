@@ -649,8 +649,7 @@ mod tests {
             .read(|tx: &dyn Tx| {
                 Box::pin(async move {
                     let item = tx.get(b"notls").await?;
-                    assert_eq!(item.ttl(), Duration::ZERO);
-                    assert_eq!(item.expires_at(), 0);
+                    assert_eq!(item.ttl(), None);
                     Ok(())
                 })
             })
@@ -680,8 +679,8 @@ mod tests {
                 Box::pin(async move {
                     let item = tx.get(b"meta").await?;
                     assert_eq!(item.metadata(), 0x2A);
-                    assert_ne!(item.expires_at(), 0, "expiry set by TTL(10s)");
-                    assert!(item.ttl() > Duration::ZERO);
+                    assert_ne!(item.ttl(), None, "expiry set by TTL(10s)");
+                    assert!(item.ttl().unwrap() > Duration::ZERO);
                     Ok(())
                 })
             })

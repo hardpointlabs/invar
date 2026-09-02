@@ -57,9 +57,9 @@ impl SlateDb {
     }
 
     /// Open a store backed by an in-memory object store (for tests).
-    pub async fn in_memory(path: &str) -> Result<SlateDb, Error> {
+    pub async fn in_memory() -> Result<SlateDb, Error> {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        Self::build(path.to_string(), store, None).await
+        Self::build("test-db".to_string(), store, None).await
     }
 
     async fn build(
@@ -321,7 +321,7 @@ mod tests {
     use super::*;
 
     async fn in_memory() -> SlateDb {
-        SlateDb::in_memory("test-db")
+        SlateDb::in_memory()
             .await
             .expect("open in-memory store")
     }
@@ -606,8 +606,7 @@ mod tests {
             .read(|tx: &dyn Tx| {
                 Box::pin(async move {
                     let item = tx.get(b"notls").await?;
-                    assert_eq!(item.ttl(), Duration::ZERO);
-                    assert_eq!(item.expires_at(), 0);
+                    assert_eq!(item.ttl(), None);
                     Ok(())
                 })
             })
@@ -637,8 +636,8 @@ mod tests {
                 Box::pin(async move {
                     let item = tx.get(b"meta").await?;
                     assert_eq!(item.metadata(), 0x2A);
-                    assert_ne!(item.expires_at(), 0, "expiry set by TTL(10s)");
-                    assert!(item.ttl() > Duration::ZERO);
+                    assert_ne!(item.ttl(), None, "expiry set by TTL(10s)");
+                    assert!(item.ttl().unwrap() > Duration::ZERO);
                     Ok(())
                 })
             })

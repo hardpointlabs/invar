@@ -22,6 +22,8 @@ use crate::common::registry::Claim;
 
 /// Opaque result of a [`DbOp`], analogous to Go's `any`. The corresponding
 /// [`WireOp`] downcasts it to the concrete type the command produced.
+/// TODO- since we've covered the bulk of Redis' command groups, can we type this properly?
+/// see https://github.com/hardpointlabs/invar/issues/46
 pub type DbResult = Box<dyn Any + Send>;
 
 /// Error space of the database side of a command. Wraps the kv abstraction's

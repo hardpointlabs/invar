@@ -12,7 +12,6 @@
 //! (`-`-prefixed) keys.
 
 use std::ops::Bound;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
@@ -22,15 +21,6 @@ use crate::common::session::Session;
 use crate::common::ValueType;
 use crate::pubsub::redis_glob_match;
 use crate::resp::RespValue;
-
-/// The current UNIX time in milliseconds, matching Go's
-/// `time.Now().UnixMilli()`.
-fn now_millis() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
-}
 
 /// `EXISTS key [key ...]` — returns the number of given keys that exist.
 pub fn exists(session: &Session, keys: &[Bytes]) -> QueuedOp {
@@ -482,7 +472,7 @@ impl DbOp for PersistOp {
                 }
                 Err(e) => return Err(e.into()),
             };
-            if item.expires_at() == 0 {
+            if item.ttl().is_some_and(|ttl| ttl.is_zero()) {
                 let result: DbResult = Box::new(0i64);
                 return Ok(result);
             }
@@ -495,6 +485,11 @@ impl DbOp for PersistOp {
     }
 }
 
+enum TimeUnit {
+    Seconds,
+    Millis,
+}
+
 struct TtlOp {
     key: Vec<u8>,
 }
@@ -503,13 +498,7 @@ impl DbOp for TtlOp {
     fn run<'a>(&'a self, tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
         let key = self.key.clone();
         Box::pin(async move {
-            let result = ttl_value(tx, &key).await?.map_or(-2, |ms| {
-                if ms == -1 || ms == -2 {
-                    ms
-                } else {
-                    (ms + 500) / 1000
-                }
-            });
+            let result = ttl_value(tx, &key, TimeUnit::Seconds).await;
             let result: DbResult = Box::new(result);
             Ok(result)
         })
@@ -524,7 +513,7 @@ impl DbOp for PTtlOp {
     fn run<'a>(&'a self, tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
         let key = self.key.clone();
         Box::pin(async move {
-            let result = ttl_value(tx, &key).await?.unwrap_or(-2);
+            let result = ttl_value(tx, &key, TimeUnit::Millis).await;
             let result: DbResult = Box::new(result);
             Ok(result)
         })
@@ -535,22 +524,20 @@ impl DbOp for PTtlOp {
 /// A present key without an expiry yields the `-1` sentinel; a key past its
 /// expiry yields `-2` (mirroring Redis, where an expired key reports as
 /// missing).
-async fn ttl_value(tx: &dyn Tx, key: &[u8]) -> Result<Option<i64>, DbError> {
-    let item = match tx.get(key).await {
-        Ok(item) => item,
-        Err(KvError::KeyNotFound) => return Ok(None),
-        Err(e) => return Err(e.into()),
-    };
-    let expires_at = item.expires_at_millis();
-    if expires_at == 0 {
-        return Ok(Some(-1));
+async fn ttl_value(tx: &dyn Tx, key: &[u8], time_unit: TimeUnit) -> i64 {
+    match tx.get(key).await {
+        Ok(item) => {
+            if let Some(ttl) = item.ttl() {
+                match time_unit {
+                    TimeUnit::Seconds => ttl.as_secs() as i64,
+                    TimeUnit::Millis => ttl.as_millis() as i64,
+                }
+            } else {
+                -1
+            }
+        },
+        _ => -2,
     }
-    let now = now_millis();
-    let remaining = expires_at as i64 - now;
-    if remaining <= 0 {
-        return Ok(Some(-2));
-    }
-    Ok(Some(remaining))
 }
 
 struct TypeOp {

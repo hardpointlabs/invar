@@ -366,14 +366,13 @@ impl DbOp for SetOp {
                 let effective_ttl = if keepttl {
                     existing
                         .as_ref()
-                        .map(|i| i.ttl())
-                        .unwrap_or(Duration::ZERO)
+                        .map(|i| i.ttl()).unwrap()
                 } else {
-                    ttl.unwrap_or(Duration::ZERO)
+                    ttl
                 };
                 let mut entry = Entry::new(key, value).metadata(TYPE_STRING);
-                if effective_ttl != Duration::ZERO {
-                    entry = entry.ttl(effective_ttl);
+                if effective_ttl.is_some() {
+                    entry = entry.ttl(effective_ttl.unwrap());
                 }
                 tx.set(entry)?;
             }
@@ -1006,8 +1005,8 @@ mod tests {
         }
     }
 
-    /// Reads the stored TTL at key (Duration::ZERO == no expiry).
-    async fn stored_ttl(session: &Session, key: &[u8]) -> Duration {
+    /// Reads the stored TTL at key
+    async fn stored_ttl(session: &Session, key: &[u8]) -> Option<Duration> {
         let store = session.store();
         let tx = store.begin(false).await.expect("read tx");
         match tx.get(&session.public_key(key)).await {
@@ -1065,7 +1064,7 @@ mod tests {
     async fn set_ex_sets_ttl() {
         let session = test_session();
         exec(&session, set_ex(&session, b"k", b"v", 100)).await;
-        assert_ne!(stored_ttl(&session, b"k").await, Duration::ZERO);
+        assert_ne!(stored_ttl(&session, b"k").await, None);
     }
 
     #[tokio::test]
@@ -1075,7 +1074,7 @@ mod tests {
             exec(&session, pset_ex(&session, b"k", b"v", 5000)).await,
             RespValue::SimpleString(Bytes::from_static(b"OK"))
         );
-        assert_ne!(stored_ttl(&session, b"k").await, Duration::ZERO);
+        assert_ne!(stored_ttl(&session, b"k").await, None);
     }
 
     #[tokio::test]
@@ -1186,7 +1185,7 @@ mod tests {
         )
         .await;
         assert_eq!(expect_bulk(&reply), Some(Bytes::from_static(b"v")));
-        assert_ne!(stored_ttl(&session, b"k").await, Duration::ZERO);
+        assert_ne!(stored_ttl(&session, b"k").await, None);
 
         let err = exec_db_err(
             &session,
@@ -1327,7 +1326,7 @@ mod tests {
         let session = test_session();
         seed_string(&session, b"k", b"v").await;
         exec(&session, set_ex(&session, b"k", b"v", 100)).await;
-        assert_ne!(stored_ttl(&session, b"k").await, Duration::ZERO);
+        assert_ne!(stored_ttl(&session, b"k").await, None);
 
         let reply = exec(
             &session,
@@ -1338,6 +1337,6 @@ mod tests {
         )
         .await;
         assert_eq!(expect_bulk(&reply), Some(Bytes::from_static(b"v")));
-        assert_eq!(stored_ttl(&session, b"k").await, Duration::ZERO);
+        assert_eq!(stored_ttl(&session, b"k").await, None);
     }
 }
