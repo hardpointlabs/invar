@@ -371,8 +371,8 @@ impl DbOp for SetOp {
                     ttl
                 };
                 let mut entry = Entry::new(key, value).metadata(TYPE_STRING);
-                if effective_ttl.is_some() {
-                    entry = entry.ttl(effective_ttl.unwrap());
+                if let Some(ttl) = effective_ttl {
+                    entry = entry.ttl(ttl);
                 }
                 tx.set(entry)?;
             }
