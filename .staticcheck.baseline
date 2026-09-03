@@ -1,2 +1,0 @@
-redis/hll.go:283:6: func pfadd is unused (U1000)
-redis/list.go:796:6: func consList is unused (U1000)
