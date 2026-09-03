@@ -1,3 +1,10 @@
+## [1.0.17](https://github.com/hardpointlabs/invar/compare/v1.0.16...v1.0.17) (2026-09-03)
+
+
+### Bug Fixes
+
+* Merge pull request [#59](https://github.com/hardpointlabs/invar/issues/59) from hardpointlabs/update-app-token ([bc03098](https://github.com/hardpointlabs/invar/commit/bc03098c3b42959c142f6bdf186c99a61fd120ba))
+
 ## [1.0.16](https://github.com/hardpointlabs/invar/compare/v1.0.15...v1.0.16) (2026-09-03)
 
 
