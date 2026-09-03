@@ -23,7 +23,7 @@ jobs:
           fetch-depth: 0
       - name: Generate App token
         id: app-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -73,6 +73,21 @@ jobs:
       - name: Install cargo-zigbuild
         if: steps.semantic.outputs.new_release == 'true'
         run: cargo install --locked cargo-zigbuild
+      - name: Cache macOS SDK
+        if: steps.semantic.outputs.new_release == 'true'
+        id: sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/MacOSX11.3.sdk
+          key: macos-sdk-11.3
+
+      - name: Fetch macOS SDK
+        if: steps.semantic.outputs.new_release == 'true' && steps.sdk-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -L "https://github.com/phracker/MacOSX-SDKs/releases/download/11.3/MacOSX11.3.sdk.tar.xz" \
+            | tar -J -x -C "${{ runner.temp }}"
+      - name: Export SDKROOT
+        run: echo "SDKROOT=${{ runner.temp }}/MacOSX11.3.sdk" >> "$GITHUB_ENV"
       - name: Run GoReleaser
         if: steps.semantic.outputs.new_release == 'true'
         uses: goreleaser/goreleaser-action@v7
