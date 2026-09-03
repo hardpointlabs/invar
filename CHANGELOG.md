@@ -1,3 +1,11 @@
+## [1.0.15](https://github.com/hardpointlabs/invar/compare/v1.0.14...v1.0.15) (2026-09-03)
+
+
+### Bug Fixes
+
+* Merge pull request [#53](https://github.com/hardpointlabs/invar/issues/53) from hardpointlabs/dependabot/cargo/fjall-3.1.10 ([49ed7be](https://github.com/hardpointlabs/invar/commit/49ed7be76ea79423516b32940324d895dcab4cc6))
+* Merge pull request [#55](https://github.com/hardpointlabs/invar/issues/55) from hardpointlabs/app-auth ([c7c4fe0](https://github.com/hardpointlabs/invar/commit/c7c4fe0cb2dc031b196078a3d9c4d09e3d4d7ee6))
+
 ## [1.0.14](https://github.com/hardpointlabs/invar/compare/v1.0.13...v1.0.14) (2026-08-28)
 
 
