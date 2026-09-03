@@ -14,10 +14,11 @@
 //! isolation with write-write conflict detection surfaced as
 //! [`Error::Conflict`].
 
+use crate::time::now_millis;
 use std::collections::Bound;
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration};
 
 use async_trait::async_trait;
 use fjall::{
@@ -33,13 +34,6 @@ const META_LEN: usize = 1;
 const EXPIRY_LEN: usize = 8;
 /// Total header length of the value encoding.
 const HEADER_LEN: usize = META_LEN + EXPIRY_LEN;
-
-fn now_millis() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
-}
 
 /// Maps a Fjall error to the kv abstraction's error space. Fjall reports
 /// missing keys as `Ok(None)` rather than an error, so every propagated
