@@ -16,6 +16,9 @@ import { assertEquals } from "@std/assert";
 
 const REDIS_URL = "redis://localhost:6379";
 
+// TODO- port these to Rust and figure out a way of mocking SystemTime
+// They rely on known speeds of build environments and are therefore too flaky to run continuously
+
 function sleep(ms: number): Promise<void> {
   return new Promise<void>((resolve) => setTimeout(() => resolve(), ms));
 }
@@ -38,6 +41,7 @@ Deno.test("PTTL and TTL return -1 for a key with no expiry", async () => {
     await client.quit();
   }
 });
+
 
 Deno.test("PTTL/TTL still report a live key shortly after a sub-second PX expiry", async () => {
   const client = await connect();
