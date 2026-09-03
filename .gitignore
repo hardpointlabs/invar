@@ -7,3 +7,4 @@ dist
 .vscode
 target
 .zig-cache
+buildkitd.toml

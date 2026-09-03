@@ -63,13 +63,23 @@ jobs:
         if: steps.semantic.outputs.new_release == 'true'
       - name: Set up Rust toolchain
         if: steps.semantic.outputs.new_release == 'true'
-        uses: dtolnay/rust-toolchain@stable
-      - name: Cache Rust build state
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Cache Zig
         if: steps.semantic.outputs.new_release == 'true'
-        uses: Swatinem/rust-cache@v2
-      - name: Set up Zig
+        id: zig-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/zig
+          key: zig-0.17.0-dev.1970
+      - name: Install Zig
+        if: steps.semantic.outputs.new_release == 'true' && steps.zig-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -L "https://ziglang.org/builds/zig-aarch64-linux-0.17.0-dev.1970+67f39b551.tar.xz" \
+            | tar -J -x -C "${{ runner.temp }}"
+          mv "${{ runner.temp }}"/zig-aarch64-linux-0.17.0-dev.1970+67f39b551 "${{ runner.temp }}/zig"
+      - name: Add Zig to PATH
         if: steps.semantic.outputs.new_release == 'true'
-        uses: mlugg/setup-zig@v2
+        run: echo "${{ runner.temp }}/zig" >> "$GITHUB_PATH"
       - name: Install cargo-zigbuild
         if: steps.semantic.outputs.new_release == 'true'
         run: cargo install --locked cargo-zigbuild
