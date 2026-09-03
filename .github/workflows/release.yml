@@ -67,7 +67,7 @@ jobs:
       - name: Cache Zig
         if: steps.semantic.outputs.new_release == 'true'
         id: zig-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/zig
           key: zig-0.17.0-dev.1970
@@ -86,7 +86,7 @@ jobs:
       - name: Cache macOS SDK
         if: steps.semantic.outputs.new_release == 'true'
         id: sdk-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/MacOSX11.3.sdk
           key: macos-sdk-11.3
