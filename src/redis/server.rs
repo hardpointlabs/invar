@@ -7,7 +7,7 @@
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -54,6 +54,81 @@ pub fn conn_opened() {
 /// Must be called for every closed connection.
 pub fn conn_closed() {
     CONNECTED_CLIENTS.fetch_sub(1, Ordering::Relaxed);
+}
+
+/// A snapshot of a live client connection, kept in the process-wide registry
+/// so `CLIENT LIST` can enumerate every connected peer (BullMQ uses this to
+/// discover workers / queue-event clients by `CLIENT SETNAME` name).
+#[derive(Clone)]
+struct ClientEntry {
+    id: u64,
+    name: String,
+    lib_name: String,
+    lib_ver: String,
+    db: i32,
+    addr: String,
+}
+
+static CLIENT_REGISTRY: LazyLock<Mutex<Vec<ClientEntry>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+
+fn snapshot_entry(session: &Session) -> ClientEntry {
+    let addr = session
+        .peer_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|| "127.0.0.1:0".to_string());
+    ClientEntry {
+        id: session.id(),
+        name: session.client_name().to_string(),
+        lib_name: session.lib_name().to_string(),
+        lib_ver: session.lib_ver().to_string(),
+        db: session.current_db(),
+        addr,
+    }
+}
+
+/// RAII handle whose destructor removes the session from the registry when the
+/// connection closes.
+pub struct ClientGuard {
+    id: u64,
+}
+
+/// Registers a live connection in the process-wide client registry.
+pub fn register_session(session: &Session) -> ClientGuard {
+    let entry = snapshot_entry(session);
+    {
+        let mut reg = CLIENT_REGISTRY.lock().unwrap();
+        match reg.iter_mut().find(|e| e.id == entry.id) {
+            Some(slot) => *slot = entry,
+            None => reg.push(entry),
+        }
+    }
+    ClientGuard { id: session.id() }
+}
+
+fn unregister_session(id: u64) {
+    CLIENT_REGISTRY.lock().unwrap().retain(|e| e.id != id);
+}
+
+impl Drop for ClientGuard {
+    fn drop(&mut self) {
+        unregister_session(self.id);
+    }
+}
+
+/// Updates the registry entry when a client renames itself via `CLIENT SETNAME`.
+pub fn update_client_name(id: u64, name: String) {
+    if let Some(entry) = CLIENT_REGISTRY.lock().unwrap().iter_mut().find(|e| e.id == id) {
+        entry.name = name;
+    }
+}
+
+/// Updates the registry entry when a client sets metadata via `CLIENT SETINFO`.
+pub fn update_client_meta(id: u64, lib_name: String, lib_ver: String) {
+    if let Some(entry) = CLIENT_REGISTRY.lock().unwrap().iter_mut().find(|e| e.id == id) {
+        entry.lib_name = lib_name;
+        entry.lib_ver = lib_ver;
+    }
 }
 
 /// Answers the `INFO` command. Values that would require global
@@ -378,7 +453,7 @@ fn client_reply(session: &mut Session, args: &[Bytes]) -> RespValue {
     match sub.as_slice() {
         b"id" => RespValue::Integer(session.id() as i64),
         b"info" => RespValue::BulkString(Some(Bytes::from(client_info_string(session)))),
-        b"list" => RespValue::BulkString(Some(Bytes::from(client_info_string(session)))),
+        b"list" => RespValue::BulkString(Some(Bytes::from(client_list_string()))),
         b"setname" => {
             if args.len() != 3 {
                 return err("ERR wrong number of arguments for 'client|setname' command");
@@ -389,7 +464,8 @@ fn client_reply(session: &mut Session, args: &[Bytes]) -> RespValue {
                     b"ERR Client names cannot contain spaces, newlines or special characters.",
                 ));
             }
-            session.set_client_name(name);
+            session.set_client_name(name.clone());
+            update_client_name(session.id(), name);
             RespValue::SimpleString(Bytes::from_static(b"OK"))
         }
         b"getname" => {
@@ -408,10 +484,20 @@ fn client_reply(session: &mut Session, args: &[Bytes]) -> RespValue {
             match attr.as_slice() {
                 b"LIB-NAME" => {
                     session.set_lib_name(String::from_utf8_lossy(&args[3]).into_owned());
+                    update_client_meta(
+                        session.id(),
+                        session.lib_name().to_string(),
+                        session.lib_ver().to_string(),
+                    );
                     RespValue::SimpleString(Bytes::from_static(b"OK"))
                 }
                 b"LIB-VER" => {
                     session.set_lib_ver(String::from_utf8_lossy(&args[3]).into_owned());
+                    update_client_meta(
+                        session.id(),
+                        session.lib_name().to_string(),
+                        session.lib_ver().to_string(),
+                    );
                     RespValue::SimpleString(Bytes::from_static(b"OK"))
                 }
                 _ => RespValue::Error(Bytes::from(format!(
@@ -451,16 +537,48 @@ fn client_info_string(session: &Session) -> String {
         .peer_addr()
         .map(|a| a.to_string())
         .unwrap_or_else(|| "127.0.0.1:0".to_string());
-    format!(
-        "id={} addr={addr} laddr={addr} fd=-1 name={} \
-         age=0 idle=0 flags=N db={} sub=0 psub=0 ssub=0 multi=-1 watch=0 \
-         qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 tot-mem=0 redir=-1 resp=2 user=default \
-         lib-name={} lib-ver={} tot-net-in=0 tot-net-out=0 events=r cmd=client",
+    render_client_info(
         session.id(),
         session.client_name(),
-        session.current_db(),
         session.lib_name(),
         session.lib_ver(),
+        session.current_db(),
+        &addr,
+    )
+}
+
+/// Builds the `CLIENT LIST` payload: one newline-terminated info line per live
+/// connection (matching Redis, where `CLIENT LIST` enumerates every client).
+fn client_list_string() -> String {
+    let entries = CLIENT_REGISTRY.lock().unwrap().clone();
+    let mut out = String::new();
+    for entry in entries {
+        out.push_str(&render_client_info(
+            entry.id,
+            &entry.name,
+            &entry.lib_name,
+            &entry.lib_ver,
+            entry.db,
+            &entry.addr,
+        ));
+        out.push('\n');
+    }
+    out
+}
+
+fn render_client_info(
+    id: u64,
+    name: &str,
+    lib_name: &str,
+    lib_ver: &str,
+    db: i32,
+    addr: &str,
+) -> String {
+    format!(
+        "id={id} addr={addr} laddr={addr} fd=-1 name={name} \
+         age=0 idle=0 flags=N db={db} sub=0 psub=0 ssub=0 multi=-1 watch=0 \
+         qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 tot-mem=0 redir=-1 resp=2 user=default \
+         lib-name={lib_name} lib-ver={lib_ver} tot-net-in=0 tot-net-out=0 events=r cmd=client",
     )
 }
 

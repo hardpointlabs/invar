@@ -363,12 +363,19 @@ pub fn hstrlen(session: &Session, key: &[u8], field: &[u8]) -> QueuedOp {
 }
 
 /// `HSCAN key cursor [MATCH pattern] [COUNT count]` — iterates fields. The
-/// cursor is always returned as "0" (full scan every time), mirroring Go.
-pub fn hscan(session: &Session, key: &[u8], pattern: Vec<u8>, count: i64) -> QueuedOp {
+/// cursor is an index into the sorted field list; returns "0" when exhausted.
+pub fn hscan(
+    session: &Session,
+    key: &[u8],
+    cursor: Vec<u8>,
+    pattern: Vec<u8>,
+    count: i64,
+) -> QueuedOp {
     QueuedOp {
         db_op: Box::new(HScanOp {
             public_key: session.public_key(key),
             node_prefix: session.private_key(key),
+            cursor,
             pattern,
             count,
         }),
@@ -944,9 +951,15 @@ impl DbOp for HStrLenOp {
     }
 }
 
+struct HScanResult {
+    cursor: Vec<u8>,
+    pairs: Vec<Vec<u8>>,
+}
+
 struct HScanOp {
     public_key: Vec<u8>,
     node_prefix: Vec<u8>,
+    cursor: Vec<u8>,
     pattern: Vec<u8>,
     count: i64,
 }
@@ -956,15 +969,25 @@ impl DbOp for HScanOp {
         let public_key = self.public_key.clone();
         let node_prefix = self.node_prefix.clone();
         let pattern = self.pattern.clone();
-        let count = self.count;
+        let cursor = self.cursor.clone();
+        let count = self.count.max(0) as usize;
         Box::pin(async move {
             match tx.get(&public_key).await {
                 Ok(_) => {}
                 Err(KvError::KeyNotFound) => {
-                    return no_op_result()
+                    let result: DbResult = Box::new(HScanResult {
+                        cursor: Vec::new(),
+                        pairs: Vec::new(),
+                    });
+                    return Ok(result);
                 }
                 Err(e) => return Err(e.into()),
             }
+
+            let start_offset = std::str::from_utf8(&cursor)
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(0);
 
             let match_pattern = !pattern.is_empty();
             let mut it = tx.new_prefix_iterator(&fields_prefix(&node_prefix)).await?;
@@ -984,10 +1007,6 @@ impl DbOp for HScanOp {
 
                     pairs.push(field);
                     pairs.push(item.value().to_vec());
-
-                    if count > 0 && (pairs.len() / 2) as i64 >= count {
-                        break;
-                    }
                 }
             }
             let err = it.err().cloned();
@@ -997,7 +1016,26 @@ impl DbOp for HScanOp {
             }
             it.close().await?;
 
-            let result: DbResult = Box::new(pairs);
+            // Slice the sorted field list by the cursor index. A count <= 0
+            // means "return everything". The next cursor is the first index
+            // of remaining fields, or empty ("0") when exhausted.
+            let n_fields = pairs.len() / 2;
+            let end = if count > 0 {
+                (start_offset + count).min(n_fields)
+            } else {
+                n_fields
+            };
+            let page = pairs[start_offset * 2..end * 2].to_vec();
+            let next_cursor = if end < n_fields {
+                end.to_string().into_bytes()
+            } else {
+                Vec::new()
+            };
+
+            let result: DbResult = Box::new(HScanResult {
+                cursor: next_cursor,
+                pairs: page,
+            });
             Ok(result)
         })
     }
@@ -1159,16 +1197,24 @@ struct HScanWire;
 impl WireOp for HScanWire {
     fn reply(&self, result: Result<DbResult, DbError>) -> RespValue {
         match result {
-            Ok(res) => match res.downcast::<Vec<Vec<u8>>>() {
-                Ok(pairs) => RespValue::Array(Some(vec![
-                    RespValue::BulkString(Some(Bytes::from_static(b"0"))),
-                    RespValue::Array(Some(
-                        pairs
-                            .iter()
-                            .map(|v| RespValue::BulkString(Some(Bytes::copy_from_slice(v))))
-                            .collect(),
-                    )),
-                ])),
+            Ok(res) => match res.downcast::<HScanResult>() {
+                Ok(boxed) => {
+                    let cursor = if boxed.cursor.is_empty() {
+                        Bytes::from_static(b"0")
+                    } else {
+                        Bytes::copy_from_slice(&boxed.cursor)
+                    };
+                    RespValue::Array(Some(vec![
+                        RespValue::BulkString(Some(cursor)),
+                        RespValue::Array(Some(
+                            boxed
+                                .pairs
+                                .iter()
+                                .map(|v| RespValue::BulkString(Some(Bytes::copy_from_slice(v))))
+                                .collect(),
+                        )),
+                    ]))
+                }
                 Err(_) => internal_error(),
             },
             Err(e) => err_resp(&e),

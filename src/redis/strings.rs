@@ -56,13 +56,41 @@ async fn read_string(tx: &dyn Tx, key: &[u8]) -> Result<Option<Vec<u8>>, DbError
 /// `SET key value [EX seconds] [PX milliseconds]` — stores a string value,
 /// optionally with a TTL.
 pub fn set(session: &Session, key: &[u8], value: &[u8], ttl: Option<Duration>) -> QueuedOp {
+    set_full(session, key, value, ttl, SetMode::None, false, false)
+}
+
+/// The conditional component of `SET key value [NX|XX]`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SetMode {
+    /// Plain unconditional `SET`.
+    None,
+    /// `NX`: set only if the key does not exist.
+    Nx,
+    /// `XX`: set only if the key already exists.
+    Xx,
+}
+
+/// Fully-featured `SET` supporting `NX`/`XX` conditions, the `GET` option
+/// (returns the previous value), and `KEEPTTL` (retain the existing TTL).
+pub fn set_full(
+    session: &Session,
+    key: &[u8],
+    value: &[u8],
+    ttl: Option<Duration>,
+    mode: SetMode,
+    get: bool,
+    keepttl: bool,
+) -> QueuedOp {
     QueuedOp {
         db_op: Box::new(SetOp {
             key: session.public_key(key),
             value: value.to_vec(),
             ttl,
+            mode,
+            get,
+            keepttl,
         }),
-        wire_op: Box::new(OkWire),
+        wire_op: Box::new(SetWire { get }),
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
@@ -75,17 +103,7 @@ pub fn set_ex(session: &Session, key: &[u8], value: &[u8], seconds: i64) -> Queu
         .ok()
         .map(Duration::from_secs)
         .unwrap_or(Duration::ZERO);
-    QueuedOp {
-        db_op: Box::new(SetOp {
-            key: session.public_key(key),
-            value: value.to_vec(),
-            ttl: Some(ttl),
-        }),
-        wire_op: Box::new(OkWire),
-        is_mutating: true,
-        allowed_in_tx: true,
-        abort_in_tx: false,
-    }
+    set_full(session, key, value, Some(ttl), SetMode::None, false, false)
 }
 
 /// `PSETEX key milliseconds value` — stores a string value with a TTL in
@@ -95,17 +113,7 @@ pub fn pset_ex(session: &Session, key: &[u8], value: &[u8], ms: i64) -> QueuedOp
         .ok()
         .map(Duration::from_millis)
         .unwrap_or(Duration::ZERO);
-    QueuedOp {
-        db_op: Box::new(SetOp {
-            key: session.public_key(key),
-            value: value.to_vec(),
-            ttl: Some(ttl),
-        }),
-        wire_op: Box::new(OkWire),
-        is_mutating: true,
-        allowed_in_tx: true,
-        abort_in_tx: false,
-    }
+    set_full(session, key, value, Some(ttl), SetMode::None, false, false)
 }
 
 /// `GET key` — returns the string value stored at key, or nil if missing.
@@ -310,11 +318,21 @@ pub fn increment(session: &Session, key: &[u8], amount: i64) -> QueuedOp {
 
 // --- DbOp halves ---
 
-/// A plain string write, with an optional TTL (`SET`, `SETEX`, `PSETEX`).
+/// The owned result of a conditional `SET`, distinguishing "not modified"
+/// (e.g. `NX` when the key exists) from a successful write.
+struct SetResult {
+    modified: bool,
+    old: Option<Vec<u8>>,
+}
+
+/// A string write, with an optional TTL (`SET`, `SETEX`, `PSETEX`).
 struct SetOp {
     key: Vec<u8>,
     value: Vec<u8>,
     ttl: Option<Duration>,
+    mode: SetMode,
+    get: bool,
+    keepttl: bool,
 }
 
 impl DbOp for SetOp {
@@ -322,15 +340,78 @@ impl DbOp for SetOp {
         let key = self.key.clone();
         let value = self.value.clone();
         let ttl = self.ttl;
+        let mode = self.mode;
+        let get = self.get;
+        let keepttl = self.keepttl;
         Box::pin(async move {
-            let mut entry = Entry::new(key, value).metadata(TYPE_STRING);
-            if let Some(ttl) = ttl {
-                entry = entry.ttl(ttl);
+            let existing = match tx.get(&key).await {
+                Ok(item) => {
+                    if get && item.metadata() != TYPE_STRING {
+                        return Err(DbError::WrongType);
+                    }
+                    Some(item)
+                }
+                Err(KvError::KeyNotFound) => None,
+                Err(e) => return Err(e.into()),
+            };
+
+            let allowed = match mode {
+                SetMode::None => true,
+                SetMode::Nx => existing.is_none(),
+                SetMode::Xx => existing.is_some(),
+            };
+            let old = existing.as_ref().map(|i| i.value().to_vec());
+
+            if allowed {
+                let effective_ttl = if keepttl {
+                    existing
+                        .as_ref()
+                        .map(|i| i.ttl()).unwrap()
+                } else {
+                    ttl
+                };
+                let mut entry = Entry::new(key, value).metadata(TYPE_STRING);
+                if let Some(ttl) = effective_ttl {
+                    entry = entry.ttl(ttl);
+                }
+                tx.set(entry)?;
             }
-            tx.set(entry)?;
-            let result: DbResult = Box::new(());
+
+            let result: DbResult = Box::new(SetResult { modified: allowed, old });
             Ok(result)
         })
+    }
+}
+
+/// Wire half for [`SetOp`]: `+OK` when modified, a null bulk when the
+/// condition failed, or the previous value when the `GET` option was given.
+struct SetWire {
+    get: bool,
+}
+
+impl WireOp for SetWire {
+    fn reply(&self, result: Result<DbResult, DbError>) -> RespValue {
+        match result {
+            Ok(res) => match res.downcast::<SetResult>() {
+                Ok(set_result) => {
+                    if self.get {
+                        RespValue::BulkString(
+                            set_result
+                                .old
+                                .map(Bytes::from)
+                                .map(Some)
+                                .unwrap_or(None),
+                        )
+                    } else if set_result.modified {
+                        RespValue::SimpleString(Bytes::from_static(b"OK"))
+                    } else {
+                        RespValue::BulkString(None)
+                    }
+                }
+                Err(_) => RespValue::Error(Bytes::from_static(b"ERR internal error")),
+            },
+            Err(e) => err_resp(&e),
+        }
     }
 }
 
@@ -924,8 +1005,8 @@ mod tests {
         }
     }
 
-    /// Reads the stored TTL at key (Duration::ZERO == no expiry).
-    async fn stored_ttl(session: &Session, key: &[u8]) -> Duration {
+    /// Reads the stored TTL at key
+    async fn stored_ttl(session: &Session, key: &[u8]) -> Option<Duration> {
         let store = session.store();
         let tx = store.begin(false).await.expect("read tx");
         match tx.get(&session.public_key(key)).await {
@@ -983,7 +1064,7 @@ mod tests {
     async fn set_ex_sets_ttl() {
         let session = test_session();
         exec(&session, set_ex(&session, b"k", b"v", 100)).await;
-        assert_ne!(stored_ttl(&session, b"k").await, Duration::ZERO);
+        assert_ne!(stored_ttl(&session, b"k").await, None);
     }
 
     #[tokio::test]
@@ -993,7 +1074,7 @@ mod tests {
             exec(&session, pset_ex(&session, b"k", b"v", 5000)).await,
             RespValue::SimpleString(Bytes::from_static(b"OK"))
         );
-        assert_ne!(stored_ttl(&session, b"k").await, Duration::ZERO);
+        assert_ne!(stored_ttl(&session, b"k").await, None);
     }
 
     #[tokio::test]
@@ -1104,7 +1185,7 @@ mod tests {
         )
         .await;
         assert_eq!(expect_bulk(&reply), Some(Bytes::from_static(b"v")));
-        assert_ne!(stored_ttl(&session, b"k").await, Duration::ZERO);
+        assert_ne!(stored_ttl(&session, b"k").await, None);
 
         let err = exec_db_err(
             &session,
@@ -1245,7 +1326,7 @@ mod tests {
         let session = test_session();
         seed_string(&session, b"k", b"v").await;
         exec(&session, set_ex(&session, b"k", b"v", 100)).await;
-        assert_ne!(stored_ttl(&session, b"k").await, Duration::ZERO);
+        assert_ne!(stored_ttl(&session, b"k").await, None);
 
         let reply = exec(
             &session,
@@ -1256,6 +1337,6 @@ mod tests {
         )
         .await;
         assert_eq!(expect_bulk(&reply), Some(Bytes::from_static(b"v")));
-        assert_eq!(stored_ttl(&session, b"k").await, Duration::ZERO);
+        assert_eq!(stored_ttl(&session, b"k").await, None);
     }
 }

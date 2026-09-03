@@ -370,6 +370,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
             let key = args[1].as_ref();
             let value = args[2].as_ref();
             let mut ttl: Option<Duration> = None;
+            let mut mode = strings::SetMode::None;
+            let mut get = false;
+            let mut keepttl = false;
+            let mut expire_directive: Option<&'static str> = None;
             let mut i = 3;
             while i < args.len() {
                 match args[i].as_ref().to_ascii_uppercase().as_slice() {
@@ -385,6 +389,7 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                             return error_op(session, "ERR invalid expire time in 'set' command");
                         }
                         ttl = Some(Duration::from_secs(seconds as u64));
+                        expire_directive = Some("EX");
                     }
                     b"PX" => {
                         i += 1;
@@ -398,6 +403,7 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                             return error_op(session, "ERR invalid expire time in 'set' command");
                         }
                         ttl = Some(Duration::from_millis(ms as u64));
+                        expire_directive = Some("PX");
                     }
                     b"EXAT" => {
                         i += 1;
@@ -420,6 +426,7 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                         } else {
                             ttl = Some(Duration::from_millis(remaining as u64));
                         }
+                        expire_directive = Some("EXAT");
                     }
                     b"PXAT" => {
                         i += 1;
@@ -442,9 +449,31 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                         } else {
                             ttl = Some(Duration::from_millis(remaining as u64));
                         }
+                        expire_directive = Some("PXAT");
                     }
-                    b"NX" | b"XX" | b"KEEPTTL" | b"GET" => {
-                        // NX/XX/KEEPTTL/GET not yet supported — accepted but ignored
+                    b"NX" => {
+                        if mode == strings::SetMode::Xx {
+                            return error_op(session, "ERR syntax error");
+                        }
+                        mode = strings::SetMode::Nx;
+                    }
+                    b"XX" => {
+                        if mode == strings::SetMode::Nx {
+                            return error_op(session, "ERR syntax error");
+                        }
+                        mode = strings::SetMode::Xx;
+                    }
+                    b"KEEPTTL" => {
+                        if let Some(directive) = expire_directive {
+                            return error_op(
+                                session,
+                                format!("ERR KEEPTTL and {directive} are incompatible"),
+                            );
+                        }
+                        keepttl = true;
+                    }
+                    b"GET" => {
+                        get = true;
                     }
                     other => {
                         return error_op(
@@ -458,7 +487,7 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                 }
                 i += 1;
             }
-            strings::set(session, key, value, ttl)
+            strings::set_full(session, key, value, ttl, mode, get, keepttl)
         }
         b"get" => {
             if args.len() != 2 {
@@ -2005,7 +2034,7 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                 return error_op(session, "ERR wrong number of arguments for 'hscan' command");
             }
             // HSCAN key cursor [MATCH pattern] [COUNT count]
-            // Cursor argument is accepted but ignored (always full scan, cursor "0").
+            let cursor = args[2].to_vec();
             let mut pattern: Vec<u8> = Vec::new();
             let mut count = 0i64;
             let mut i = 3usize;
@@ -2026,7 +2055,7 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                 }
                 i += 1;
             }
-            hash::hscan(session, &args[1], pattern, count)
+            hash::hscan(session, &args[1], cursor, pattern, count)
         }
         // --- Pub/Sub commands ---
         //

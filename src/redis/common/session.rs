@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use kv::kv::Entry;
+use kv::kv::{Entry, Error as KvError};
 
 use crate::common::op::{DbError, DbResult, NoOp, QueuedOp, WireOp};
 use crate::common::registry::WatchRegistry;
@@ -356,49 +356,74 @@ impl Session {
         }
 
         let mutating = self.needs_writable_tx();
-        let tx = match self.store.begin(mutating).await {
-            Ok(tx) => tx,
-            Err(e) => {
-                self.queue.clear();
-                return vec![RespValue::Error(format!("ERR {e}").into())];
-            }
-        };
+        // Concurrent writer transactions (BullMQ workers claim jobs with
+        // overlapping write sets) make the optimistic store return
+        // `Error::Conflict` — addStandardJob and friends must not fail.
+        // Re-run the same batch in a fresh transaction until the commit lands.
+        const MAX_CONFLICT_RETRIES: usize = 16;
 
-        let mut outcomes: Vec<Result<DbResult, DbError>> = Vec::with_capacity(self.queue.len());
+        let mut outcomes: Vec<Result<DbResult, DbError>>;
 
-        for i in 0..self.queue.len() {
-            let outcome = self.queue[i].db_op.run(&*tx).await;
-            if outcome.is_err() && !batch {
-                // Any claims made by earlier ops in this batch must be
-                // returned to the front of their queues since the transaction
-                // will be discarded.
-                for (j, result) in outcomes.iter().enumerate() {
-                    if let Ok(r) = result {
-                        self.queue[j].db_op.release_claims(r);
+        let mut conflict_retries = 0usize;
+        'commit: loop {
+            let tx = match self.store.begin(mutating).await {
+                Ok(tx) => tx,
+                Err(e) => {
+                    self.queue.clear();
+                    return vec![RespValue::Error(format!("ERR {e}").into())];
+                }
+            };
+
+            outcomes = Vec::with_capacity(self.queue.len());
+
+            for i in 0..self.queue.len() {
+                let outcome = self.queue[i].db_op.run(&*tx).await;
+                if outcome.is_err() && !batch {
+                    // Any claims made by earlier ops in this batch must be
+                    // returned to the front of their queues since the
+                    // transaction will be discarded.
+                    for (j, result) in outcomes.iter().enumerate() {
+                        if let Ok(r) = result {
+                            self.queue[j].db_op.release_claims(r);
+                        }
                     }
+                    let reply = self.queue[i].wire_op.reply(outcome);
+                    self.queue.clear();
+                    return vec![reply];
                 }
-                let reply = self.queue[i].wire_op.reply(outcome);
-                self.queue.clear();
-                return vec![reply];
+                // Inside EXEC a runtime error is confined to its own array
+                // element: sibling commands still run and the transaction
+                // still commits.
+                outcomes.push(outcome);
             }
-            // Inside EXEC a runtime error is confined to its own array
-            // element: sibling commands still run and the transaction still
-            // commits.
-            outcomes.push(outcome);
-        }
 
-        if tx.commit().await.is_err() {
-            // The transaction failed to commit — release all claims back to
-            // the front of their queues so their waiters remain longest.
-            for (j, result) in outcomes.iter().enumerate() {
-                if let Ok(r) = result {
-                    self.queue[j].db_op.release_claims(r);
+            match tx.commit().await {
+                Ok(()) => {
+                    tracing::debug!(ops = outcomes.len(), "tx committed");
+                    break 'commit;
                 }
+                Err(e) => match e {
+                    KvError::Conflict if conflict_retries < MAX_CONFLICT_RETRIES => {
+                        conflict_retries += 1;
+                        tracing::warn!(ops = outcomes.len(), retries = conflict_retries, "write tx conflict; retrying batch");
+                    }
+                    KvError::Conflict => {
+                        release_claims(&self.queue, &outcomes);
+                        self.queue.clear();
+                        return vec![RespValue::Error(Bytes::from_static(
+                            b"ERR Couldn't commit transaction",
+                        ))];
+                    }
+                    e => {
+                        release_claims(&self.queue, &outcomes);
+                        self.queue.clear();
+                        return vec![RespValue::Error(format!("ERR {e}").into())];
+                    }
+                },
             }
-            self.queue.clear();
-            return vec![RespValue::Error(Bytes::from_static(
-                b"ERR Couldn't commit transaction",
-            ))];
+            // The commit conflicted with a concurrent writer: this attempt's
+            // claims must be returned before we re-run from a fresh snapshot.
+            release_claims(&self.queue, &outcomes);
         }
 
         let mut replies = Vec::with_capacity(self.queue.len());
@@ -418,6 +443,16 @@ impl Session {
     /// Whether any queued op requires a writable transaction.
     fn needs_writable_tx(&self) -> bool {
         self.queue.iter().any(|op| op.is_mutating)
+    }
+}
+
+/// Returns any claims made by successful ops back to the front of their
+/// queues, e.g. when a transaction is discarded or fails to commit.
+fn release_claims(queue: &[QueuedOp], outcomes: &[Result<DbResult, DbError>]) {
+    for (j, result) in outcomes.iter().enumerate() {
+        if let Ok(r) = result {
+            queue[j].db_op.release_claims(r);
+        }
     }
 }
 

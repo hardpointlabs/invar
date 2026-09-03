@@ -35,7 +35,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
@@ -1595,6 +1595,16 @@ impl DbOp for ZAddOp {
     fn release_claims(&self, result: &DbResult) {
         self.release_claims_impl(result);
     }
+
+    /// The script path may not wake a claim until its transaction commits, so
+    /// strip it out here and hand it to the script for deferred delivery.
+    fn defer_claims(&self, result: &mut DbResult, into: &Mutex<Vec<Claim>>) {
+        if let Some(zadd) = result.downcast_mut::<ZAddResult>() {
+            if let Some(claim) = zadd.claim.take() {
+                into.lock().expect("deferred claims mutex poisoned").push(claim);
+            }
+        }
+    }
 }
 
 /// `ZINCRBY`.
@@ -1702,6 +1712,12 @@ impl DbOp for RangeByScoreOp {
                 });
             }
 
+            if reverse {
+                // Reverse the *whole* filtered range first: Redis applies the
+                // `LIMIT offset count` offset to the descending result.
+                filtered.reverse();
+            }
+
             if has_limit {
                 let mut offset = limit_offset;
                 let mut count = limit_count;
@@ -1723,33 +1739,10 @@ impl DbOp for RangeByScoreOp {
             }
 
             let flat = flatten_members(&filtered, with_scores);
-            let result = if reverse {
-                reverse_bulk_array(flat, with_scores)
-            } else {
-                flat
-            };
-            let result: DbResult = Box::new(result);
+            let result: DbResult = Box::new(flat);
             Ok(result)
         })
     }
-}
-
-/// Reverses an already-flattened `[member, score, ...]` array (member/score
-/// pairs kept adjacent), mirroring Go's inline reversal in
-/// `ZRevRangeByScore`/`ZRevRangeByLex`.
-fn reverse_bulk_array(flat: Vec<Vec<u8>>, with_scores: bool) -> Vec<Vec<u8>> {
-    let mut flat = flat;
-    let step = if with_scores { 2usize } else { 1usize };
-    let mut i = 0;
-    let mut j = flat.len().saturating_sub(step);
-    while i < j {
-        for k in 0..step {
-            flat.swap(i + k, j + k);
-        }
-        i += step;
-        j = j.saturating_sub(step);
-    }
-    flat
 }
 
 /// `ZRANGEBYLEX`/`ZREVRANGEBYLEX`.
@@ -1778,6 +1771,12 @@ impl DbOp for RangeByLexOp {
             let members: Vec<Vec<u8>> = entries.iter().map(|e| e.member.clone()).collect();
             let mut result = filter_lex_range(&members, &min_str, &max_str)?;
 
+            // Reverse the whole filtered range before applying `LIMIT`: Redis
+            // takes the offset against the descending result.
+            if reverse {
+                result.reverse();
+            }
+
             if has_limit {
                 let mut offset = limit_offset;
                 let mut count = limit_count;
@@ -1798,9 +1797,6 @@ impl DbOp for RangeByLexOp {
                 }
             }
 
-            if reverse {
-                result.reverse();
-            }
             let result: DbResult = Box::new(result);
             Ok(result)
         })

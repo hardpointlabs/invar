@@ -1,16 +1,17 @@
 //! Redis keyspace commands: `EXISTS`, `MGET`, `MOVE`, `RENAME`, `RENAMENX`,
 //! `EXPIRE`, `TTL`, `PTTL`, `TYPE`, `DEL`/`UNLINK`, and `SCAN`.
 //!
-//! Port of the Go `redis/keys` package. These commands operate on the public
-//! key of whatever value type happens to be stored there: they deliberately
-//! do **not** inspect the metadata byte (so `MGET` on a list key returns its
-//! raw stored bytes, and `DEL` removes just the public key without cleaning
-//! up any internal node keys), mirroring Go. `SCAN` is the exception: it
-//! iterates the current DB's public keyspace via a range iterator, filtering
-//! out internal (`-`-prefixed) keys.
+//! Port of the Go `redis/keys` package. Most commands operate on the public
+//! key of whatever value type happens to be stored there and deliberately do
+//! **not** inspect the metadata byte (so `MGET` on a list key returns its raw
+//! stored bytes), mirroring Go. `DEL`/`UNLINK` are the exception: real Redis
+//! frees the internal node keys of compound values when a key is removed, so
+//! `DEL` also clears the field/member/score index entries owned by a set,
+//! hash, or sorted set (see [`clear_compound_entries`]). `SCAN` iterates the
+//! current DB's public keyspace via a range iterator, filtering out internal
+//! (`-`-prefixed) keys.
 
 use std::ops::Bound;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
@@ -20,14 +21,6 @@ use crate::common::session::Session;
 use crate::common::ValueType;
 use crate::pubsub::redis_glob_match;
 use crate::resp::RespValue;
-
-/// The current UNIX time in whole seconds, matching Go's `time.Now().Unix()`.
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
 
 /// `EXISTS key [key ...]` — returns the number of given keys that exist.
 pub fn exists(session: &Session, keys: &[Bytes]) -> QueuedOp {
@@ -189,12 +182,16 @@ pub fn key_type(session: &Session, key: &[u8]) -> QueuedOp {
 }
 
 /// `DEL key [key ...]` / `UNLINK key [key ...]` — removes the given keys,
-/// returning the number removed. Only the public key is deleted; internal
-/// node keys of compound values are not cleaned up (mirroring Go).
+/// returning the number removed. Compound values (sets, hashes, sorted sets)
+/// have their internal field/member/score index entries cleared too, so a
+/// later re-creation of the same key starts from a clean slate.
 pub fn del(session: &Session, keys: &[Bytes]) -> QueuedOp {
     QueuedOp {
         db_op: Box::new(DelOp {
-            keys: keys.iter().map(|k| session.public_key(k)).collect(),
+            keys: keys
+                .iter()
+                .map(|k| (session.public_key(k), session.private_key(k)))
+                .collect(),
         }),
         wire_op: Box::new(IntWire),
         is_mutating: true,
@@ -475,7 +472,7 @@ impl DbOp for PersistOp {
                 }
                 Err(e) => return Err(e.into()),
             };
-            if item.expires_at() == 0 {
+            if item.ttl().is_some_and(|ttl| ttl.is_zero()) {
                 let result: DbResult = Box::new(0i64);
                 return Ok(result);
             }
@@ -488,6 +485,11 @@ impl DbOp for PersistOp {
     }
 }
 
+enum TimeUnit {
+    Seconds,
+    Millis,
+}
+
 struct TtlOp {
     key: Vec<u8>,
 }
@@ -496,7 +498,7 @@ impl DbOp for TtlOp {
     fn run<'a>(&'a self, tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
         let key = self.key.clone();
         Box::pin(async move {
-            let result = ttl_value(tx, &key).await?.unwrap_or(-2);
+            let result = ttl_value(tx, &key, TimeUnit::Seconds).await;
             let result: DbResult = Box::new(result);
             Ok(result)
         })
@@ -511,27 +513,31 @@ impl DbOp for PTtlOp {
     fn run<'a>(&'a self, tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
         let key = self.key.clone();
         Box::pin(async move {
-            let result = ttl_value(tx, &key).await?.map_or(-2, |secs| secs * 1000);
+            let result = ttl_value(tx, &key, TimeUnit::Millis).await;
             let result: DbResult = Box::new(result);
             Ok(result)
         })
     }
 }
 
-/// Returns the remaining TTL of the key in whole seconds, `None` if missing.
-/// A present key without an expiry (or already past its expiry) yields `-1`.
-async fn ttl_value(tx: &dyn Tx, key: &[u8]) -> Result<Option<i64>, DbError> {
-    let item = match tx.get(key).await {
-        Ok(item) => item,
-        Err(KvError::KeyNotFound) => return Ok(None),
-        Err(e) => return Err(e.into()),
-    };
-    let expires_at = item.expires_at();
-    let now = now_secs();
-    if expires_at == 0 || expires_at <= now {
-        return Ok(Some(-1));
+/// Returns the remaining TTL of the key in milliseconds, `None` if missing.
+/// A present key without an expiry yields the `-1` sentinel; a key past its
+/// expiry yields `-2` (mirroring Redis, where an expired key reports as
+/// missing).
+async fn ttl_value(tx: &dyn Tx, key: &[u8], time_unit: TimeUnit) -> i64 {
+    match tx.get(key).await {
+        Ok(item) => {
+            if let Some(ttl) = item.ttl() {
+                match time_unit {
+                    TimeUnit::Seconds => ttl.as_secs() as i64,
+                    TimeUnit::Millis => ttl.as_millis() as i64,
+                }
+            } else {
+                -1
+            }
+        },
+        _ => -2,
     }
-    Ok(Some((expires_at - now) as i64))
 }
 
 struct TypeOp {
@@ -554,7 +560,7 @@ impl DbOp for TypeOp {
 }
 
 struct DelOp {
-    keys: Vec<Vec<u8>>,
+    keys: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 impl DbOp for DelOp {
@@ -562,19 +568,67 @@ impl DbOp for DelOp {
         let keys = self.keys.clone();
         Box::pin(async move {
             let mut count = 0i64;
-            for key in &keys {
-                match tx.get(key).await {
+            for (public_key, node_prefix) in &keys {
+                let item = match tx.get(public_key).await {
                     Err(KvError::KeyNotFound) => continue,
                     Err(e) => return Err(e.into()),
-                    Ok(_) => {}
-                }
-                tx.delete(key)?;
+                    Ok(item) => item,
+                };
+                clear_compound_entries(tx, node_prefix, item.metadata()).await?;
+                tx.delete(public_key)?;
                 count += 1;
             }
             let result: DbResult = Box::new(count);
             Ok(result)
         })
     }
+}
+
+/// Deletes the internal entry keys owned by a compound value so that
+/// recreating the public key later starts from an empty container:
+///
+/// * Set and hash field/member entries live under `-<db>:<key>\x00...`.
+/// * Sorted-set score index entries live under `-<db>:<key>:score:` and
+///   member index entries under `-<db>:<key>:member:`.
+///
+/// Returns without deleting anything for value types that keep no internal
+/// entries (strings, and until type-specific layouts are ported, lists and
+/// streams).
+async fn clear_compound_entries(
+    tx: &dyn Tx,
+    node_prefix: &[u8],
+    metadata: u8,
+) -> Result<(), DbError> {
+    let mut prefixes: Vec<Vec<u8>> = Vec::new();
+    if metadata == ValueType::Set as u8 || metadata == ValueType::Hash as u8 {
+        let mut prefix = node_prefix.to_vec();
+        prefix.push(0);
+        prefixes.push(prefix);
+    } else if metadata == ValueType::SortedSet as u8 {
+        prefixes.push([node_prefix, b":score:"].concat());
+        prefixes.push([node_prefix, b":member:"].concat());
+    } else {
+        return Ok(());
+    }
+    for prefix in prefixes {
+        let mut it = tx.new_prefix_iterator(&prefix).await?;
+        let mut keys = Vec::new();
+        while it.next().await {
+            if let Some(item) = it.item() {
+                keys.push(item.key().to_vec());
+            }
+        }
+        let err = it.err().cloned();
+        if let Some(e) = err {
+            it.close().await?;
+            return Err(DbError::Kv(e));
+        }
+        it.close().await?;
+        for key in keys {
+            tx.delete(&key)?;
+        }
+    }
+    Ok(())
 }
 
 /// The result of a `SCAN` page: the next cursor (`Vec::new()` means the

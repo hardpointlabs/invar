@@ -30,9 +30,10 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration};
 
 use async_trait::async_trait;
+use crate::time::{now_millis};
 
 /// A pinned, `Send` boxed future. The closure-based entry points on
 /// [`KeyValueStore`] use this type so callers can write `async` blocks
@@ -49,13 +50,6 @@ pub enum Error {
     Conflict,
     #[error("Undefined")]
     Undefined,
-}
-
-fn now_millis() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
 }
 
 /// Key-value pair, with optional TTL and metadata, to write to the store.
@@ -122,31 +116,17 @@ impl Item {
         &self.key
     }
 
-    /// Returns the remaining TTL, or `Duration::ZERO` if the entry has no
-    /// TTL or has already expired.
-    pub fn ttl(&self) -> Duration {
-        match self.expire_ts {
-            Some(ts) => {
-                let remaining = ts - now_millis();
-                if remaining < 0 {
-                    Duration::ZERO
-                } else {
-                    Duration::from_millis(remaining as u64)
-                }
-            }
-            None => Duration::ZERO,
-        }
+    /// Returns the remaining TTL, if present. An expired key will have a present, zero duration.
+    pub fn ttl(&self) -> Option<Duration> {
+        self.expire_ts.map(|ts| {
+            let remaining_ms = ts.saturating_sub(now_millis()).max(0);
+            Duration::from_millis(remaining_ms as u64)
+        })
     }
 
     /// Returns the metadata byte set when the entry was written.
     pub fn metadata(&self) -> u8 {
         self.meta
-    }
-
-    /// Returns the absolute expiry time as Unix seconds, or 0 if the entry
-    /// never expires.
-    pub fn expires_at(&self) -> u64 {
-        self.expire_ts.map(|ts| (ts / 1000) as u64).unwrap_or(0)
     }
 
     /// Returns the value of this entry.

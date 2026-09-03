@@ -28,7 +28,7 @@ use sha1::{Digest, Sha1};
 
 use crate::commands::dispatch_command;
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
-use crate::common::registry::WatchRegistry;
+use crate::common::registry::{Claim, WatchRegistry};
 use crate::common::session::Session;
 use crate::common::store::RedisStore;
 use crate::resp::RespValue;
@@ -81,6 +81,12 @@ struct ScriptContext {
     registry: Arc<WatchRegistry>,
     /// The current Redis DB number for key derivation.
     current_db: i32,
+    /// Claims (`XREAD`, `BZPOP*`...) made by `redis.call()` commands issued
+    /// inside the script. A script runs against a transaction that does not
+    /// commit until after the Lua code finishes, so a claim must not be woken
+    /// mid-script (the reader would wake up before the write is committed).
+    /// These are woken by the post-commit `EvalWire::reply` instead.
+    deferred_claims: Mutex<Vec<Claim>>,
 }
 
 // SAFETY: ScriptContext is used within a single-threaded Lua interpreter.
@@ -112,17 +118,28 @@ fn value_to_bytes<'gc>(ctx: Context<'gc>, value: Value<'gc>) -> Result<Bytes, Pi
 }
 
 /// Converts a `RespValue` back to a piccolo `Value`.
+/// Builds a Lua table with a single string field, i.e. `{ok = "..."}` or
+/// `{err = "..."}`. This mirrors how Redis represents status and error replies
+/// in the Lua sandbox so that `redis.call("TYPE", k)["ok"]` works.
+fn reply_table<'gc>(ctx: Context<'gc>, key: &[u8], msg: &[u8]) -> Value<'gc> {
+    let table = piccolo::Table::new(&ctx);
+    let k = Value::from(ctx.intern(key));
+    let v = Value::from(ctx.intern(msg));
+    table.set_value(&ctx, k, v).ok();
+    Value::Table(table)
+}
+
 fn resp_to_piccolo<'gc>(ctx: Context<'gc>, resp: RespValue) -> Value<'gc> {
     match resp {
-        RespValue::SimpleString(s) => Value::from(ctx.intern(s.as_ref())),
-        RespValue::Error(msg) => {
-            // Redis errors become Lua strings that will be raised as errors
-            Value::from(ctx.intern(msg.as_ref()))
-        }
+        RespValue::SimpleString(s) => reply_table(ctx, b"ok", s.as_ref()),
+        RespValue::Error(msg) => reply_table(ctx, b"err", msg.as_ref()),
         RespValue::Integer(n) => Value::Integer(n),
         RespValue::BulkString(opt) => match opt {
             Some(b) => Value::from(ctx.intern(b.as_ref())),
-            None => Value::Nil,
+            // Redis maps null bulk replies (`$-1`) to Lua `false`, not `nil`,
+            // so arrays with missing fields (`HMGET`) keep their positions for
+            // `ipairs`/`#` handling (e.g. BullMQ's getTimestamp).
+            None => Value::from(false),
         },
         RespValue::Array(opt) => match opt {
             Some(items) => {
@@ -134,9 +151,371 @@ fn resp_to_piccolo<'gc>(ctx: Context<'gc>, resp: RespValue) -> Value<'gc> {
                 }
                 Value::Table(table)
             }
-            None => Value::Nil,
+            None => Value::from(false),
         },
     }
+}
+
+// ---------------------------------------------------------------------------
+// Lua `string.match` pattern engine.
+//
+// piccolo's core stdlib only ships `string.len/lower/reverse/sub/upper`, but
+// Redis scripts (notably BullMQ's job key destructuring, `string.match(jobKey,
+// ".*:(.*)")`) depend on `string.match`. Redis's Lua is Lua 5.1, so we
+// implement a Lua-5.1-style pattern matcher over bytes rather than leaning on a
+// regex crate: patterns use `.` (any), `%a %d %p %s %w ...` classes (uppercase
+// = complement), `[...]` sets, `%x` literal escapes, `^`/`$` anchors, the
+// `* + - ?` quantifiers, and `( )` captures.
+// ---------------------------------------------------------------------------
+
+/// A single character class from a Lua pattern.
+#[derive(Clone, Debug)]
+enum PatClass {
+    /// A literal byte (including `%x` escapes).
+    Literal(u8),
+    /// `.` — matches any byte.
+    Any,
+    /// A `%a`, `%d`, ... class (or its uppercase complement).
+    Percent(u8),
+    /// `[...]` / `[^...]` character set.
+    Set { negated: bool, items: Vec<SetItem> },
+}
+
+/// A character-set member: a single byte or an inclusive range.
+#[derive(Clone, Debug)]
+enum SetItem {
+    Byte(u8),
+    Range(u8, u8),
+    Percent(u8),
+}
+
+impl PatClass {
+    fn matches(&self, c: u8) -> bool {
+        match self {
+            PatClass::Literal(l) => *l == c,
+            PatClass::Any => true,
+            PatClass::Percent(p) => percent_matches(*p, c),
+            PatClass::Set { negated, items } => {
+                let m = items.iter().any(|it| it.matches(c));
+                if *negated {
+                    !m
+                } else {
+                    m
+                }
+            }
+        }
+    }
+}
+
+impl SetItem {
+    fn matches(&self, c: u8) -> bool {
+        match self {
+            SetItem::Byte(b) => *b == c,
+            SetItem::Range(lo, hi) => c >= *lo && c <= *hi,
+            SetItem::Percent(p) => percent_matches(*p, c),
+        }
+    }
+}
+
+/// `%x` classifier. Alphabetic codes match the class, uppercase codes match the
+/// complement, and any other `%x` pair is handled as a literal escape before
+/// this is ever called.
+fn percent_matches(code: u8, c: u8) -> bool {
+    let base = match code.to_ascii_lowercase() {
+        b'a' => c.is_ascii_alphabetic(),
+        b'c' => c.is_ascii_control(),
+        b'd' => c.is_ascii_digit(),
+        b'l' => c.is_ascii_lowercase(),
+        b'p' => c.is_ascii_punctuation(),
+        b's' => c.is_ascii_whitespace(),
+        b'u' => c.is_ascii_uppercase(),
+        b'w' => c.is_ascii_alphanumeric(),
+        b'x' => c.is_ascii_hexdigit(),
+        b'z' => c == 0,
+        _ => {
+            // Unknown class char — should not happen (escapes handled earlier).
+            return false;
+        }
+    };
+    if code.is_ascii_uppercase() {
+        !base
+    } else {
+        base
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Quant {
+    // `*`
+    Star,
+    // `+`
+    Plus,
+    // `-` (non-greedy 0+)
+    Minus,
+    // `?`
+    Question,
+}
+
+#[derive(Clone, Debug)]
+enum PatNode {
+    Open(usize),
+    Close(usize),
+    Match(PatClass, Option<Quant>),
+}
+
+/// Parses a Lua pattern `pat` into a node list (with `^`/`$` anchors stripped
+/// into the returned flags). Returns `None` on malformed patterns.
+fn parse_pattern(mut pat: &[u8]) -> Option<(Vec<PatNode>, bool, bool, usize)> {
+    let mut nodes = Vec::new();
+    let mut captures: Vec<Option<(usize, usize)>> = Vec::new();
+    let mut capture_count = 0;
+
+    let mut i = 0;
+    let mut anchored_start = false;
+    let mut anchored_end = false;
+
+    if pat.first() == Some(&b'^') {
+        anchored_start = true;
+        i = 1;
+    }
+    if pat.last() == Some(&b'$') {
+        anchored_end = true;
+        // Strip the trailing `$`, but only if there's more than just `^`/`$`.
+    }
+
+    if anchored_end {
+        // Determine effective length excluding trailing `$`.
+        let mut end = pat.len();
+        if end > 0 && pat[end - 1] == b'$' {
+            end -= 1;
+        }
+        pat = &pat[..end];
+    }
+
+    while i < pat.len() {
+        let b = pat[i];
+        match b {
+            b'(' => {
+                capture_count += 1;
+                nodes.push(PatNode::Open(capture_count - 1));
+                captures.push(None);
+                i += 1;
+            }
+            b')' => {
+                if capture_count == 0 {
+                    return None;
+                }
+                nodes.push(PatNode::Close(capture_count - 1));
+                i += 1;
+            }
+            _ => {
+                let class = parse_class(pat, &mut i)?;
+                // Check for a trailing quantifier.
+                let quant = match pat.get(i) {
+                    Some(b'*') => {
+                        i += 1;
+                        Some(Quant::Star)
+                    }
+                    Some(b'+') => {
+                        i += 1;
+                        Some(Quant::Plus)
+                    }
+                    Some(b'-') => {
+                        i += 1;
+                        Some(Quant::Minus)
+                    }
+                    Some(b'?') => {
+                        i += 1;
+                        Some(Quant::Question)
+                    }
+                    _ => None,
+                };
+                nodes.push(PatNode::Match(class, quant));
+            }
+        }
+    }
+
+    Some((nodes, anchored_start, anchored_end, capture_count))
+}
+
+/// Parses a single character class starting at `i`, advancing `i` past it.
+fn parse_class(pat: &[u8], i: &mut usize) -> Option<PatClass> {
+    let b = *pat.get(*i)?;
+    match b {
+        b'.' => {
+            *i += 1;
+            Some(PatClass::Any)
+        }
+        b'%' => {
+            let esc = *pat.get(*i + 1)?;
+            *i += 2;
+            // `%` followed by an alphabetic char is a class; otherwise it
+            // escapes the literal char (`%.`, `%*`, `%/`, `%%`).
+            if esc.is_ascii_alphabetic() {
+                Some(PatClass::Percent(esc))
+            } else {
+                let lit = if esc == b'%' { b'%' } else { esc };
+                Some(PatClass::Literal(lit))
+            }
+        }
+        b'[' => parse_set(pat, i),
+        c => {
+            *i += 1;
+            Some(PatClass::Literal(c))
+        }
+    }
+}
+
+fn parse_set(pat: &[u8], i: &mut usize) -> Option<PatClass> {
+    // `[` at *i
+    let mut j = *i + 1;
+    let mut negated = false;
+    if pat.get(j) == Some(&b'^') {
+        negated = true;
+        j += 1;
+    }
+    let mut items = Vec::new();
+    let mut first = true;
+    loop {
+        let c = *pat.get(j)?;
+        if c == b']' && !first {
+            break;
+        }
+        first = false;
+        if c == b'%' {
+            let esc = *pat.get(j + 1)?;
+            if esc.is_ascii_alphabetic() {
+                items.push(SetItem::Percent(esc));
+            } else {
+                items.push(SetItem::Byte(if esc == b'%' { b'%' } else { esc }));
+            }
+            j += 2;
+            continue;
+        }
+        // A `c-d` range (not a trailing range open at `]`).
+        if pat.get(j + 1) == Some(&b'-')
+            && pat.get(j + 2).is_some()
+            && pat.get(j + 2) != Some(&b']')
+        {
+            let hi = *pat.get(j + 2)?;
+            items.push(SetItem::Range(c, hi));
+            j += 3;
+            continue;
+        }
+        items.push(SetItem::Byte(c));
+        j += 1;
+    }
+    *i = j + 1;
+    Some(PatClass::Set { negated, items })
+}
+
+/// Matches `nodes[pi..]` against `s[si..]`, filling in capture positions in
+/// `caps`. Returns the first `si` at which the remainder of the pattern is
+/// satisfied, or `None`.
+fn match_nodes(
+    s: &[u8],
+    nodes: &[PatNode],
+    pi: usize,
+    si: usize,
+    caps: &mut [Option<(usize, usize)>],
+) -> Option<usize> {
+    if pi == nodes.len() {
+        return Some(si);
+    }
+    match &nodes[pi] {
+        PatNode::Open(idx) => {
+            let saved = caps[*idx];
+            caps[*idx] = Some((si, 0));
+            let r = match_nodes(s, nodes, pi + 1, si, caps);
+            if r.is_none() {
+                caps[*idx] = saved;
+            }
+            r
+        }
+        PatNode::Close(idx) => {
+            let prev = caps[*idx];
+            if let Some((start, _)) = prev {
+                caps[*idx] = Some((start, si));
+            }
+            let r = match_nodes(s, nodes, pi + 1, si, caps);
+            if r.is_none() {
+                caps[*idx] = prev;
+            }
+            r
+        }
+        PatNode::Match(class, quant) => {
+            let next_pi = pi + 1;
+            match quant {
+                None => {
+                    if si < s.len() && class.matches(s[si]) {
+                        match_nodes(s, nodes, next_pi, si + 1, caps)
+                    } else {
+                        None
+                    }
+                }
+                Some(Quant::Question) => {
+                    if si < s.len() && class.matches(s[si]) {
+                        if let Some(r) = match_nodes(s, nodes, next_pi, si + 1, caps) {
+                            return Some(r);
+                        }
+                    }
+                    match_nodes(s, nodes, next_pi, si, caps)
+                }
+                Some(Quant::Star) | Some(Quant::Plus) | Some(Quant::Minus) => {
+                    // Compute the maximal run of matching chars.
+                    let mut run = 0;
+                    while si + run < s.len() && class.matches(s[si + run]) {
+                        run += 1;
+                    }
+                    let min = if matches!(quant, Some(Quant::Plus)) { 1 } else { 0 };
+                    if run < min {
+                        return None;
+                    }
+                    let order: Vec<usize> = match quant {
+                        Some(Quant::Minus) => (min..=run).collect(),
+                        _ => (min..=run).rev().collect(),
+                    };
+                    for k in order {
+                        if let Some(r) = match_nodes(s, nodes, next_pi, si + k, caps) {
+                            return Some(r);
+                        }
+                    }
+                    None
+                }
+            }
+        }
+    }
+}
+
+/// A successful `string.match` result: the whole-match span plus any captures.
+struct PatternMatch {
+    whole: (usize, usize),
+    captures: Vec<Option<(usize, usize)>>,
+}
+
+/// Runs `string.match` semantics: returns the whole match plus any captures.
+fn lua_pattern_match(s: &[u8], pat: &[u8]) -> Option<PatternMatch> {
+    let (nodes, anchored_start, anchored_end, capture_count) = parse_pattern(pat)?;
+    // A trailing `$` is an anchor; strip it from the node match by requiring
+    // the match to reach the end of the string.
+    let starts: Vec<usize> = if anchored_start {
+        vec![0]
+    } else {
+        (0..=s.len()).collect()
+    };
+    for start in starts {
+        let mut caps = vec![None; capture_count];
+        if let Some(end) = match_nodes(s, &nodes, 0, start, &mut caps) {
+            if anchored_end && end != s.len() {
+                continue;
+            }
+            return Some(PatternMatch {
+                whole: (start, end),
+                captures: caps,
+            });
+        }
+    }
+    None
 }
 
 /// Executes a Redis command from within a Lua script, sharing the script's transaction.
@@ -190,9 +569,16 @@ fn execute_redis_call<'gc>(
 
     // Run the database operation - this is effectively synchronous for Fjall
     let future = cmd.db_op.run(tx);
-    let outcome = futures::executor::block_on(future);
+    let mut outcome = futures::executor::block_on(future);
 
-    // Convert the result to a piccolo Value using the wire_op
+    // Push any claim the op made (XADD/ZADD waking a blocked reader) onto the
+    // script's deferred list. Requesting a `WireOp::reply` here would wake the
+    // reader before this EVAL's transaction commits, losing the entry. The
+    // claims are woken by `EvalWire::reply` after the script transaction
+    // commits.
+    if let Ok(result) = &mut outcome {
+        cmd.db_op.defer_claims(result, &script_ctx.deferred_claims);
+    }
     let resp = cmd.wire_op.reply(outcome);
 
     // Check if the response is an error - if so, raise it as a Lua error
@@ -212,7 +598,34 @@ enum EvalResult {
     Nil,
     Integer(i64),
     Bulk(Vec<u8>),
+    /// A status reply, produced by `redis.status_reply(...)` or a `{ok = ...}`
+    /// table.
+    Status(Vec<u8>),
+    /// An error reply, produced by `redis.error_reply(...)` or a `{err = ...}`
+    /// table.
+    Err(Vec<u8>),
     Array(Vec<EvalResult>),
+}
+
+fn debug_fmt(r: &EvalResult) -> String {
+    match r {
+        EvalResult::Nil => "nil".to_string(),
+        EvalResult::Integer(i) => format!("int({i})"),
+        EvalResult::Bulk(b) => format!("bulk({})", String::from_utf8_lossy(b)),
+        EvalResult::Status(s) => format!("status({})", String::from_utf8_lossy(s)),
+        EvalResult::Err(e) => format!("err({})", String::from_utf8_lossy(e)),
+        EvalResult::Array(v) => {
+            let mut out = String::from("[");
+            for (i, item) in v.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&debug_fmt(item));
+            }
+            out.push(']');
+            out
+        }
+    }
 }
 
 /// `EVAL script numkeys [key ...] [arg ...]`.
@@ -304,6 +717,14 @@ impl WireOp for NoscriptWire {
     }
 }
 
+/// The boxed outcome of an `EVAL`: the script's Lua reply plus any deferred
+/// waiter claims its `redis.call()` commands made. Delivered to [`EvalWire`]
+/// only after the transaction commits, at which point the claims are woken.
+struct EvalOutcome {
+    result: EvalResult,
+    claims: Vec<Claim>,
+}
+
 struct EvalOp {
     script: Bytes,
     keys: Vec<Bytes>,
@@ -321,12 +742,37 @@ impl DbOp for EvalOp {
         let store = self.store.clone();
         let registry = self.registry.clone();
         let current_db = self.current_db;
+        let sha1 = sha1_hex(&self.script);
+        let hint = String::from_utf8_lossy(&self.script[..self.script.len().min(48)])
+            .replace('\n', " ")
+            .to_string();
         Box::pin(async move {
+            tracing::debug!(
+                %sha1,
+                hints = %hint,
+                keys = keys.len(),
+                argv = argv.len(),
+                "eval script",
+            );
             let result = run_script(&script, &keys, &argv, &store, &registry, current_db, tx);
-            let result = result?;
-            let result: DbResult = Box::new(result);
+            match &result {
+                Ok((r, _)) => tracing::debug!(%sha1, reply = %debug_fmt(r), "eval ok"),
+                Err(e) => tracing::warn!(%sha1, error = %e, "eval failed"),
+            }
+            let (result, claims) = result?;
+            let result: DbResult = Box::new(EvalOutcome { result, claims });
             Ok(result)
         })
+    }
+
+    /// The script's transaction failed to commit: return each deferred claim
+    /// to the front of its queue so no blocked client is left waiting forever.
+    fn release_claims(&self, result: &DbResult) {
+        if let Some(outcome) = result.downcast_ref::<EvalOutcome>() {
+            for claim in &outcome.claims {
+                self.registry.release_front(claim);
+            }
+        }
     }
 }
 
@@ -335,8 +781,15 @@ struct EvalWire;
 impl WireOp for EvalWire {
     fn reply(&self, result: Result<DbResult, DbError>) -> RespValue {
         match result {
-            Ok(result) => match result.downcast::<EvalResult>() {
-                Ok(result) => result_reply(&result),
+            Ok(result) => match result.downcast::<EvalOutcome>() {
+                Ok(outcome) => {
+                    // Post-commit: the script's transaction has landed, so any
+                    // XADD/ZADD wake is now safe to deliver.
+                    for claim in &outcome.claims {
+                        claim.wake();
+                    }
+                    result_reply(&outcome.result)
+                }
                 Err(_) => RespValue::Error(Bytes::from_static(b"ERR internal error")),
             },
             Err(err) => err_resp(&err),
@@ -346,6 +799,11 @@ impl WireOp for EvalWire {
 
 /// Runs `script` once and converts its return value to [`EvalResult`], mapping
 /// compile and runtime failures to the messages Redis emits.
+///
+/// Returns the script's reply plus any `XADD`/`ZADD` claims it made. A claim
+/// must only be woken after the transaction that ran this script commits, so
+/// the caller (`[`EvalOp`]`/`[`EvalWire`]`) accepts the claims and wakes them
+/// from its post-commit reply.
 ///
 /// The `store`, `registry`, `current_db`, and `tx` parameters are used to create
 /// the `redis.call()` / `redis.pcall()` functions available to the script.
@@ -357,7 +815,7 @@ fn run_script(
     registry: &Arc<WatchRegistry>,
     current_db: i32,
     tx: &dyn Tx,
-) -> Result<EvalResult, DbError> {
+) -> Result<(EvalResult, Vec<Claim>), DbError> {
     let mut lua = Lua::core();
 
     // Compile the script, stashing the closure so it survives the arena exit.
@@ -378,6 +836,7 @@ fn run_script(
         store: store.clone(),
         registry: registry.clone(),
         current_db,
+        deferred_claims: Mutex::new(Vec::new()),
     });
 
     match lua.try_enter(|ctx| {
@@ -442,6 +901,44 @@ fn run_script(
             .set_value(&ctx, pcall_key, pcall_fn.into())
             .map_err(|e| PicError::from(Value::String(ctx.intern(e.to_string().as_bytes()))))?;
 
+        // redis.error_reply(msg) -> a Lua table {err = msg} that becomes an
+        // error reply when returned from a script.
+        let error_reply_fn = Callback::from_fn(&ctx, |ctx, _exec, mut stack| {
+            let msg = match stack.get(0) {
+                Value::String(s) => s.as_bytes().to_vec(),
+                Value::Integer(n) => n.to_string().into_bytes(),
+                Value::Number(f) => f.to_string().into_bytes(),
+                Value::Nil => Vec::new(),
+                other => other.to_string().into_bytes(),
+            };
+            stack.clear();
+            stack.push_back(reply_table(ctx, b"err", &msg));
+            Ok(CallbackReturn::Return)
+        });
+        let error_reply_key = Value::from(ctx.intern(b"error_reply"));
+        redis_table
+            .set_value(&ctx, error_reply_key, error_reply_fn.into())
+            .map_err(|e| PicError::from(Value::String(ctx.intern(e.to_string().as_bytes()))))?;
+
+        // redis.status_reply(msg) -> a Lua table {ok = msg} that becomes a
+        // status reply when returned from a script.
+        let status_reply_fn = Callback::from_fn(&ctx, |ctx, _exec, mut stack| {
+            let msg = match stack.get(0) {
+                Value::String(s) => s.as_bytes().to_vec(),
+                Value::Integer(n) => n.to_string().into_bytes(),
+                Value::Number(f) => f.to_string().into_bytes(),
+                Value::Nil => Vec::new(),
+                other => other.to_string().into_bytes(),
+            };
+            stack.clear();
+            stack.push_back(reply_table(ctx, b"ok", &msg));
+            Ok(CallbackReturn::Return)
+        });
+        let status_reply_key = Value::from(ctx.intern(b"status_reply"));
+        redis_table
+            .set_value(&ctx, status_reply_key, status_reply_fn.into())
+            .map_err(|e| PicError::from(Value::String(ctx.intern(e.to_string().as_bytes()))))?;
+
         ctx.set_global("redis", redis_table)?;
 
         // Add `tonumber` — piccolo's core stdlib omits it, but Redis/Lua scripts
@@ -452,7 +949,7 @@ fn run_script(
                     b"bad argument #1 to 'tonumber' (value expected)",
                 ))));
             }
-            let val = stack.get(0);
+            let val: Value = stack.consume(ctx)?;
             match val {
                 Value::Integer(n) => {
                     stack.push_back(Value::Integer(n));
@@ -689,6 +1186,49 @@ fn run_script(
             })?;
         }
 
+        // Add `string.match` — piccolo's core stdlib omits it, but Redis scripts
+        // rely on it (e.g. BullMQ's destructureJobKey: string.match(jobKey, ".*:(.*)")).
+        if let Value::Table(string_table) = ctx.get_global("string") {
+            let match_fn = Callback::from_fn(&ctx, |ctx, _exec, mut stack| {
+                let subj = match stack.get(0) {
+                    Value::String(s) => s.as_bytes().to_vec(),
+                    other => other.to_string().into_bytes(),
+                };
+                let pat = match stack.get(1) {
+                    Value::String(s) => s.as_bytes().to_vec(),
+                    other => other.to_string().into_bytes(),
+                };
+                stack.clear();
+                match lua_pattern_match(&subj, &pat) {
+                    None => {
+                        stack.push_back(Value::Nil);
+                    }
+                    Some(m) => {
+                        if m.captures.is_empty() {
+                            let slice = &subj[m.whole.0..m.whole.1];
+                            stack.push_back(Value::from(ctx.intern(slice)));
+                        } else {
+                            // Push each capture as a separate return value,
+                            // matching real Lua `string.match`.
+                            for cap in &m.captures {
+                                match cap {
+                                    Some((s, e)) => {
+                                        let slice = &subj[*s..*e];
+                                        stack.push_back(Value::from(ctx.intern(slice)));
+                                    }
+                                    None => stack.push_back(Value::Nil),
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(CallbackReturn::Return)
+            });
+            string_table.set(ctx, "match", match_fn).map_err(|e| {
+                PicError::from(Value::String(ctx.intern(e.to_string().as_bytes())))
+            })?;
+        }
+
         // Add `cmsgpack` table with `unpack` (MessagePack decoder).
         // BullMQ uses cmsgpack.unpack(ARGV[n]) to deserialize job options.
         let cmsgpack_table = piccolo::Table::new(&ctx);
@@ -742,15 +1282,59 @@ fn run_script(
                 cjson_encode_fn.into(),
             )
             .map_err(|e| PicError::from(Value::String(ctx.intern(e.to_string().as_bytes()))))?;
+
+        // `cjson.decode` — JSON decoder, a companion to `cjson.encode`.
+        // BullMQ's moveToFinished/finished paths call cjson.decode(parent) to
+        // recover the parent's id/queueKey when a job completes.
+        let cjson_decode_fn = Callback::from_fn(&ctx, |ctx, _exec, mut stack| {
+            let val: Value = stack.consume(ctx)?;
+            let json_str = match val {
+                Value::Nil => {
+                    stack.push_back(Value::Nil);
+                    return Ok(CallbackReturn::Return);
+                }
+                Value::String(s) => String::from_utf8_lossy(s.as_bytes()).to_string(),
+                other => other.to_string(),
+            };
+            let json: serde_json::Value = serde_json::from_str(&json_str).map_err(|e| {
+                PicError::from(Value::String(ctx.intern(
+                    format!("cjson.decode: {}", e).as_bytes(),
+                )))
+            })?;
+            let decoded = json_to_lua(ctx, json)?;
+            stack.push_back(decoded);
+            Ok(CallbackReturn::Return)
+        });
+        cjson_table
+            .set_value(
+                &ctx,
+                Value::from(ctx.intern(b"decode")),
+                cjson_decode_fn.into(),
+            )
+            .map_err(|e| PicError::from(Value::String(ctx.intern(e.to_string().as_bytes()))))?;
         ctx.set_global("cjson", cjson_table)?;
 
         run_executor(ctx, closure)
     }) {
-        Ok(result) => Ok(result),
-        Err(err) => Err(DbError::Redis(format!(
-            "Error running script (new script): {}",
-            static_error_message(&err)
-        ))),
+        Ok(result) => {
+            // The script succeeded; hand its deferred claims to the caller so
+            // they can be woken once the containing transaction commits.
+            let claims = std::mem::take(&mut *script_ctx.deferred_claims.lock().unwrap());
+            Ok((result, claims))
+        }
+        Err(err) => {
+            // The script failed; any XADD/ZADD claims made before the failure
+            // must go back to the front of their queues — the reader gets nil
+            // and re-issues, avoiding a lost wake.
+            let claims = std::mem::take(&mut *script_ctx.deferred_claims.lock().unwrap());
+            for claim in &claims {
+                registry.release_front(claim);
+            }
+            Err(DbError::Redis(format!(
+                "Error running script (new script): {}",
+                static_error_message(&err)
+            )))
+        }
     }
 }
 
@@ -929,6 +1513,51 @@ fn piccolo_to_json<'gc>(
     }
 }
 
+/// Converts a `serde_json::Value` to a piccolo Lua value for `cjson.decode`,
+/// mirroring `msgpack_to_lua`. JSON objects become Lua tables with string keys,
+/// arrays become Lua sequence tables.
+fn json_to_lua<'gc>(
+    ctx: Context<'gc>,
+    json: serde_json::Value,
+) -> Result<Value<'gc>, PicError<'gc>> {
+    match json {
+        serde_json::Value::Null => Ok(Value::Nil),
+        serde_json::Value::Bool(b) => Ok(Value::Boolean(b)),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(Value::Integer(i))
+            } else if let Some(f) = n.as_f64() {
+                Ok(Value::Number(f))
+            } else {
+                Ok(Value::Number(0.0))
+            }
+        }
+        serde_json::Value::String(s) => Ok(Value::from(ctx.intern(s.as_bytes()))),
+        serde_json::Value::Array(arr) => {
+            let table = piccolo::Table::new(&ctx);
+            for (i, item) in arr.into_iter().enumerate() {
+                let key = Value::Integer(i as i64 + 1);
+                let value = json_to_lua(ctx, item)?;
+                table.set_value(&ctx, key, value).map_err(|e| {
+                    PicError::from(Value::String(ctx.intern(e.to_string().as_bytes())))
+                })?;
+            }
+            Ok(Value::Table(table))
+        }
+        serde_json::Value::Object(map) => {
+            let table = piccolo::Table::new(&ctx);
+            for (k, v) in map {
+                let value = json_to_lua(ctx, v)?;
+                table
+                    .set_value(&ctx, Value::from(ctx.intern(k.as_bytes())), value)
+                    .map_err(|e| {
+                        PicError::from(Value::String(ctx.intern(e.to_string().as_bytes())))
+                    })?;
+            }
+            Ok(Value::Table(table))
+        }
+    }
+}
 /// Converts a Lua return value to [`EvalResult`] following Redis's reply rules:
 /// nil -> null, booleans -> 0/1 integers, numbers -> integers, strings -> bulk,
 /// sequential tables -> arrays (hash part -> array of interleaved value/key).
@@ -938,7 +1567,11 @@ fn value_to_result<'gc>(
 ) -> Result<EvalResult, PicError<'gc>> {
     match value {
         Value::Nil => Ok(EvalResult::Nil),
-        Value::Boolean(b) => Ok(EvalResult::Integer(if b { 1 } else { 0 })),
+        Value::Boolean(b) => Ok(if b {
+            EvalResult::Integer(1)
+        } else {
+            EvalResult::Nil
+        }),
         Value::Integer(n) => Ok(EvalResult::Integer(n)),
         Value::Number(f) => Ok(EvalResult::Integer(f as i64)),
         Value::String(s) => Ok(EvalResult::Bulk(s.as_bytes().to_vec())),
@@ -949,13 +1582,38 @@ fn value_to_result<'gc>(
     }
 }
 
-/// Converts a Lua table to [`EvalResult`]. A non-empty sequence is converted
-/// element-wise; a hash-only table is converted to an array of interleaved
-/// value, key pairs, mirroring Redis.
+/// Extracts a byte slice from a value used as an `ok`/`err` reply payload.
+fn reply_payload<'gc>(ctx: Context<'gc>, value: Value<'gc>) -> Result<Vec<u8>, PicError<'gc>> {
+    match value {
+        Value::String(s) => Ok(s.as_bytes().to_vec()),
+        Value::Integer(n) => Ok(n.to_string().into_bytes()),
+        Value::Number(f) => Ok(f.to_string().into_bytes()),
+        Value::Boolean(b) => Ok((if b { "true" } else { "false" }).to_string().into_bytes()),
+        _ => Err(PicError::from(Value::String(ctx.intern(
+            b"table has no integer keys".as_slice(),
+        )))),
+    }
+}
+
+/// Converts a Lua table to [`EvalResult`]. A table carrying an `ok` or `err`
+/// string field represents a status or error reply (produced by
+/// `redis.status_reply`/`redis.error_reply`). Otherwise a non-empty sequence is
+/// converted element-wise and a hash-only table is converted to an array of
+/// interleaved value, key pairs, mirroring Redis.
 fn table_to_result<'gc>(
     ctx: Context<'gc>,
     table: piccolo::Table<'gc>,
 ) -> Result<EvalResult, PicError<'gc>> {
+    // `{err = "..."}` / `{ok = "..."}` reply tables.
+    let err_val = table.get(ctx, "err");
+    if !matches!(err_val, Value::Nil) {
+        return Ok(EvalResult::Err(reply_payload(ctx, err_val)?));
+    }
+    let ok_val = table.get(ctx, "ok");
+    if !matches!(ok_val, Value::Nil) {
+        return Ok(EvalResult::Status(reply_payload(ctx, ok_val)?));
+    }
+
     let len = table.length();
     if len > 0 {
         let mut items = Vec::with_capacity(len as usize);
@@ -981,6 +1639,8 @@ fn result_reply(result: &EvalResult) -> RespValue {
         EvalResult::Nil => RespValue::BulkString(None),
         EvalResult::Integer(n) => RespValue::Integer(*n),
         EvalResult::Bulk(b) => RespValue::BulkString(Some(Bytes::copy_from_slice(b))),
+        EvalResult::Status(msg) => RespValue::SimpleString(Bytes::copy_from_slice(msg)),
+        EvalResult::Err(msg) => RespValue::Error(Bytes::copy_from_slice(msg)),
         EvalResult::Array(items) => {
             RespValue::Array(Some(items.iter().map(result_reply).collect()))
         }
@@ -1067,8 +1727,9 @@ mod tests {
         let reply = exec(eval_op("return true", &[], &[])).await;
         assert_eq!(expect_integer(&reply), 1);
 
+        // Redis ≥6 maps Lua `false` replies to the null bulk string.
         let reply = exec(eval_op("return false", &[], &[])).await;
-        assert_eq!(expect_integer(&reply), 0);
+        assert_eq!(expect_bulk(&reply), None);
     }
 
     #[tokio::test]
@@ -1217,7 +1878,8 @@ mod tests {
         ))
         .await;
         let items = expect_array(&reply);
-        assert_eq!(expect_integer(&items[0]), 0); // false = 0
+        // pcall failure yields Lua `false`, which Redis ≥6 replies as null bulk.
+        assert_eq!(expect_bulk(&items[0]), None);
         // Error message should be present
     }
 
@@ -1230,5 +1892,205 @@ mod tests {
         ))
         .await;
         assert_eq!(expect_bulk(&reply).as_deref(), Some(b"myvalue".as_slice()));
+    }
+
+    #[tokio::test]
+    async fn string_match_captures_group_after_last_colon() {
+        let reply = exec(eval_op(
+            "return string.match('bull:job:123', '.*:(.*)')",
+            &[],
+            &[],
+        ))
+        .await;
+        assert_eq!(expect_bulk(&reply).as_deref(), Some(b"123".as_slice()));
+    }
+
+    #[tokio::test]
+    async fn string_match_anchored_and_classes() {
+        let reply = exec(eval_op(
+            "return string.match('abc123def', '^%a+%d+')",
+            &[],
+            &[],
+        ))
+        .await;
+        assert_eq!(expect_bulk(&reply).as_deref(), Some(b"abc123".as_slice()));
+    }
+
+    #[tokio::test]
+    async fn string_match_single_value_when_no_captures() {
+        let reply = exec(eval_op("return string.match('hello world', 'o w')", &[], &[])).await;
+        assert_eq!(expect_bulk(&reply).as_deref(), Some(b"o w".as_slice()));
+    }
+
+    #[tokio::test]
+    async fn string_match_escaped_literal_dot() {
+        let reply = exec(eval_op("return string.match('a.b', 'a%.b')", &[], &[])).await;
+        assert_eq!(expect_bulk(&reply).as_deref(), Some(b"a.b".as_slice()));
+
+        // `.` unescaped matches any char, so it also matches a.b.
+        let reply = exec(eval_op("return string.match('axb', 'a.b')", &[], &[])).await;
+        assert_eq!(expect_bulk(&reply).as_deref(), Some(b"axb".as_slice()));
+    }
+
+    #[tokio::test]
+    async fn string_match_empty_quantifier_and_optional() {
+        // `?` makes the preceding class optional.
+        let reply = exec(eval_op("return string.match('color', 'colou?r')", &[], &[])).await;
+        assert_eq!(expect_bulk(&reply).as_deref(), Some(b"color".as_slice()));
+
+        let reply = exec(eval_op("return string.match('colour', 'colou?r')", &[], &[])).await;
+        assert_eq!(expect_bulk(&reply).as_deref(), Some(b"colour".as_slice()));
+
+        // A string without the optional-u of "color"/"colour" does not match.
+        let reply = exec(eval_op("return string.match('colr', 'colou?r')", &[], &[])).await;
+        assert_eq!(expect_bulk(&reply), None);
+    }
+
+    #[tokio::test]
+    async fn string_match_no_match_returns_nil() {
+        let reply = exec(eval_op("return string.match('foo', 'bar')", &[], &[])).await;
+        assert_eq!(expect_bulk(&reply), None);
+    }
+
+    #[tokio::test]
+    async fn string_match_multiple_captures() {
+        let reply = exec(eval_op(
+            "local a, b = string.match('12:34', '(%d+):(%d+)'); return {a, b}",
+            &[],
+            &[],
+        ))
+        .await;
+        let items = expect_array(&reply);
+        assert_eq!(items.len(), 2);
+        assert_eq!(expect_bulk(&items[0]).as_deref(), Some(b"12".as_slice()));
+        assert_eq!(expect_bulk(&items[1]).as_deref(), Some(b"34".as_slice()));
+    }
+
+    #[tokio::test]
+    async fn cjson_decode_object_returns_string_keyed_table() {
+        let reply = exec(eval_op(
+            "local o = cjson.decode('{\"id\":\"a1\",\"queueKey\":\"bull:q\"}'); return {o['id'], o['queueKey']}",
+            &[],
+            &[],
+        ))
+        .await;
+        let items = expect_array(&reply);
+        assert_eq!(items.len(), 2);
+        assert_eq!(expect_bulk(&items[0]).as_deref(), Some(b"a1".as_slice()));
+        assert_eq!(
+            expect_bulk(&items[1]).as_deref(),
+            Some(b"bull:q".as_slice())
+        );
+    }
+
+    #[tokio::test]
+    async fn cjson_decode_array() {
+        let reply = exec(eval_op(
+            "local a = cjson.decode('[1,2,3]'); return {a[1], a[2], a[3]}",
+            &[],
+            &[],
+        ))
+        .await;
+        let items = expect_array(&reply);
+        assert_eq!(items.len(), 3);
+        assert_eq!(expect_integer(&items[0]), 1);
+        assert_eq!(expect_integer(&items[1]), 2);
+        assert_eq!(expect_integer(&items[2]), 3);
+    }
+
+    #[tokio::test]
+    async fn redis_type_call_ok_index() {
+        let reply = exec(eval_op(
+            "redis.call('SET', KEYS[1], 'x'); local t = redis.call('TYPE', KEYS[1])['ok']; return t",
+            &["mykey"],
+            &[],
+        ))
+        .await;
+        assert_eq!(expect_bulk(&reply).as_deref(), Some(b"string".as_slice()));
+    }
+
+    #[tokio::test]
+    async fn redis_node_type_ok_index() {
+        let reply = exec(eval_op(
+            "local t = redis.call('TYPE', KEYS[1])['ok']; return t",
+            &["doesnotexist"],
+            &[],
+        ))
+        .await;
+        assert_eq!(expect_bulk(&reply).as_deref(), Some(b"none".as_slice()));
+    }
+
+    #[tokio::test]
+    async fn redis_status_reply_returns_status() {
+        let reply = exec(eval_op(
+            "return redis.status_reply('everything ok')",
+            &[],
+            &[],
+        ))
+        .await;
+        match reply {
+            RespValue::SimpleString(s) => {
+                assert_eq!(s.as_ref(), b"everything ok");
+            }
+            other => panic!("expected simple string, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn redis_error_reply_returns_error() {
+        let reply = exec(eval_op(
+            "return redis.error_reply('something bad')",
+            &[],
+            &[],
+        ))
+        .await;
+        match reply {
+            RespValue::Error(s) => {
+                assert_eq!(s.as_ref(), b"something bad");
+            }
+            other => panic!("expected error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn redis_error_reply_used_inside_script_propagates() {
+        let reply = exec(eval_op(
+            "local ok, e = pcall(function() return redis.error_reply('nope') end); return e and e['err'] or 'no-err'",
+            &[],
+            &[],
+        ))
+        .await;
+        // error_reply just builds a table; it does not raise. The table's err
+        // field should be accessible.
+        assert_eq!(expect_bulk(&reply).as_deref(), Some(b"nope".as_slice()));
+    }
+
+    #[tokio::test]
+    async fn redis_call_lrange_from_script() {
+        let op = eval_op(
+            "redis.call('RPUSH', KEYS[1], 'a', 'b', 'c'); return redis.call('LRANGE', KEYS[1], 0, 2)",
+            &["mylist"],
+            &[],
+        );
+        let reply = exec(op).await;
+        let items = expect_array(&reply);
+        assert_eq!(items.len(), 3);
+        assert_eq!(expect_bulk(&items[0]).as_deref(), Some(b"a".as_slice()));
+        assert_eq!(expect_bulk(&items[1]).as_deref(), Some(b"b".as_slice()));
+        assert_eq!(expect_bulk(&items[2]).as_deref(), Some(b"c".as_slice()));
+    }
+
+    #[tokio::test]
+    async fn redis_call_lrange_string_args_from_script() {
+        let op = eval_op(
+            "redis.call('RPUSH', KEYS[1], 'a', 'b', 'c'); local k = KEYS[1]; local start = ARGV[1]; local stop = ARGV[2]; return redis.call('LRANGE', k, start, stop)",
+            &["mylist"],
+            &["0", "1"],
+        );
+        let reply = exec(op).await;
+        let items = expect_array(&reply);
+        assert_eq!(items.len(), 2);
+        assert_eq!(expect_bulk(&items[0]).as_deref(), Some(b"a".as_slice()));
+        assert_eq!(expect_bulk(&items[1]).as_deref(), Some(b"b".as_slice()));
     }
 }

@@ -12,14 +12,18 @@
 //! together at `EXEC`.
 
 use std::any::Any;
+use std::sync::Mutex;
 
 use bytes::Bytes;
 use kv::kv::{BoxFuture, Error as KvError, Tx};
 use crate::resp;
 use crate::resp::RespValue;
+use crate::common::registry::Claim;
 
 /// Opaque result of a [`DbOp`], analogous to Go's `any`. The corresponding
 /// [`WireOp`] downcasts it to the concrete type the command produced.
+/// TODO- since we've covered the bulk of Redis' command groups, can we type this properly?
+/// see https://github.com/hardpointlabs/invar/issues/46
 pub type DbResult = Box<dyn Any + Send>;
 
 /// Error space of the database side of a command. Wraps the kv abstraction's
@@ -74,6 +78,12 @@ pub trait DbOp: Send + 'static {
     /// commit, so any waiter claims embedded in `result` can be returned to
     /// the watch registry. A no-op for commands that carry no claims.
     fn release_claims(&self, _result: &DbResult) {}
+
+    /// Extracts any waiter claims from `result` and stores them in `into` so
+    /// the caller can wake them after its own transaction commits. Used by the
+    /// scripting path, which runs atomic commands (XADD/ZADD) against the
+    /// script transaction and must defer their wake until the script commits.
+    fn defer_claims(&self, _result: &mut DbResult, _into: &Mutex<Vec<Claim>>) {}
 }
 
 /// The wire side of a command: renders the outcome of a [`DbOp`] into the
