@@ -16,6 +16,9 @@ import { assertEquals } from "@std/assert";
 
 const REDIS_URL = "redis://localhost:6379";
 
+// TODO- port these to Rust and figure out a way of mocking SystemTime
+// They rely on known speeds of build environments and are therefore too flaky to run continuously
+
 function sleep(ms: number): Promise<void> {
   return new Promise<void>((resolve) => setTimeout(() => resolve(), ms));
 }
@@ -39,28 +42,28 @@ Deno.test("PTTL and TTL return -1 for a key with no expiry", async () => {
   }
 });
 
-// TODO- port this to Rust and figure out a way of mocking SystemTime
-// Deno.test("PTTL/TTL still report a live key shortly after a sub-second PX expiry", async () => {
-//   const client = await connect();
-//   try {
-//     // PX 500 gives a TTL that is a fraction of a second, which is exactly where
-//     // the whole-second-truncation bug prematurely reported the key as expired.
-//     await client.set("ttl_ms_precision", "v", { PX: 500 });
-//     await sleep(250);
-//
-//     // After only ~250ms of a 500ms expiry the key must still be alive: PTTL is
-//     // positive (not -2 / -1) and TTL is real (not -2).
-//     const pttl = await client.sendCommand(["PTTL", "ttl_ms_precision"]);
-//     const ttl = await client.sendCommand(["TTL", "ttl_ms_precision"]);
-//     assertEquals(typeof pttl, "number");
-//     assertEquals(typeof ttl, "number");
-//     assertEquals((pttl as number) > 0, true, `PTTL should be positive, got ${pttl}`);
-//     assertEquals((ttl as number) >= 0, true, `TTL should be >= 0, got ${ttl}`);
-//     assertEquals(await client.get("ttl_ms_precision"), "v");
-//   } finally {
-//     await client.quit();
-//   }
-// });
+
+Deno.test("PTTL/TTL still report a live key shortly after a sub-second PX expiry", async () => {
+  const client = await connect();
+  try {
+    // PX 500 gives a TTL that is a fraction of a second, which is exactly where
+    // the whole-second-truncation bug prematurely reported the key as expired.
+    await client.set("ttl_ms_precision", "v", { PX: 500 });
+    await sleep(250);
+
+    // After only ~250ms of a 500ms expiry the key must still be alive: PTTL is
+    // positive (not -2 / -1) and TTL is real (not -2).
+    const pttl = await client.sendCommand(["PTTL", "ttl_ms_precision"]);
+    const ttl = await client.sendCommand(["TTL", "ttl_ms_precision"]);
+    assertEquals(typeof pttl, "number");
+    assertEquals(typeof ttl, "number");
+    assertEquals((pttl as number) > 0, true, `PTTL should be positive, got ${pttl}`);
+    assertEquals((ttl as number) >= 0, true, `TTL should be >= 0, got ${ttl}`);
+    assertEquals(await client.get("ttl_ms_precision"), "v");
+  } finally {
+    await client.quit();
+  }
+});
 
 Deno.test("key is reported as expired once its PX TTL has truly elapsed", async () => {
   const client = await connect();
