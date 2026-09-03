@@ -1,3 +1,10 @@
+## [1.0.16](https://github.com/hardpointlabs/invar/compare/v1.0.15...v1.0.16) (2026-09-03)
+
+
+### Bug Fixes
+
+* Merge pull request [#57](https://github.com/hardpointlabs/invar/issues/57) from hardpointlabs/vendor-crc-and-macos-sdk ([8391ee4](https://github.com/hardpointlabs/invar/commit/8391ee4ba1651be9f2021ecd475b96f62c90c6b2))
+
 ## [1.0.15](https://github.com/hardpointlabs/invar/compare/v1.0.14...v1.0.15) (2026-09-03)
 
 
