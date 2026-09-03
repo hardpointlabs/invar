@@ -12,7 +12,7 @@ on:
 
 jobs:
   main:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     outputs:
       should_publish: ${{ steps.semantic.outputs.new_release }}
     steps:
@@ -58,9 +58,9 @@ jobs:
         with:
           username: ${{ secrets.DOCKER_HUB_USER }}
           password: ${{ secrets.DOCKER_HUB_PAT }}
-      - name: Set up Docker Buildx
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
         if: steps.semantic.outputs.new_release == 'true'
-        uses: docker/setup-buildx-action@v3
       - name: Set up Rust toolchain
         if: steps.semantic.outputs.new_release == 'true'
         uses: dtolnay/rust-toolchain@stable
