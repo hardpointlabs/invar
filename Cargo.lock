@@ -948,9 +948,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3cd70cf88a32937834aae9614ff2569b5d9467fa0c42c5d7762fd94a8de88266"
 dependencies = [
  "allocator-api2",
- "gc-arena-derive",
+ "gc-arena-derive 0.5.3",
  "hashbrown 0.14.5",
  "sptr",
+]
+
+[[package]]
+name = "gc-arena"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "160a11f93020eea95cb4c59e2eda2e4c6353f75aa4fbb01f2bf8729b2e4d6dd2"
+dependencies = [
+ "gc-arena-derive 0.7.0",
 ]
 
 [[package]]
@@ -958,6 +967,18 @@ name = "gc-arena-derive"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c612a69f5557a11046b77a7408d2836fe77077f842171cd211c5ef504bd3cddd"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+ "synstructure",
+]
+
+[[package]]
+name = "gc-arena-derive"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd3d24b051bd5a5f44e66bac510393d3d484ef776bb560f6504668239f35959a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1907,7 +1928,7 @@ dependencies = [
  "ahash",
  "allocator-api2",
  "anyhow",
- "gc-arena",
+ "gc-arena 0.5.3",
  "hashbrown 0.14.5",
  "rand 0.8.7",
  "thiserror 1.0.69",
@@ -2191,7 +2212,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "futures",
- "gc-arena",
+ "gc-arena 0.7.0",
  "kv",
  "piccolo",
  "rand 0.10.2",
