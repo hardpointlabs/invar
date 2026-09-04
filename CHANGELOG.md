@@ -1,3 +1,12 @@
+## [1.0.20](https://github.com/hardpointlabs/invar/compare/v1.0.19...v1.0.20) (2026-09-04)
+
+
+### Bug Fixes
+
+* Merge pull request [#65](https://github.com/hardpointlabs/invar/issues/65) from hardpointlabs/publish-homebrew ([c66a8c9](https://github.com/hardpointlabs/invar/commit/c66a8c990c72e76d0ac37b226270a2982572c295))
+* Merge pull request [#66](https://github.com/hardpointlabs/invar/issues/66) from hardpointlabs/bump-slate ([7bc3b54](https://github.com/hardpointlabs/invar/commit/7bc3b54a661eccf38f5bf485ac6474e489a5dc85))
+* Merge pull request [#67](https://github.com/hardpointlabs/invar/issues/67) from hardpointlabs/simplify-prerelease ([2868036](https://github.com/hardpointlabs/invar/commit/28680360f03465b950facb5d86f22b75ea9a036b))
+
 ## [1.0.19](https://github.com/hardpointlabs/invar/compare/v1.0.18...v1.0.19) (2026-09-04)
 
 
