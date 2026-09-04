@@ -20,13 +20,21 @@ jobs:
         with:
           cache: false # use Blacksmith's caching instead
       - uses: taiki-e/install-action@cargo-audit
-      - uses: useblacksmith/stickydisk@v1
+      - name: Sticky disk - cargo registry
+        uses: useblacksmith/stickydisk@v1
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ github.repository }}-cargo
+          key: ${{ github.repository }}-cargo-registry
+          path: ~/.cargo/registry
+      - name: Sticky disk - cargo git
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-cargo-git
+          path: ~/.cargo/git
+      - name: Sticky disk - target
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-cargo-target
+          path: target
       - uses: denoland/setup-deno@v2
         with:
           deno-version: lts
