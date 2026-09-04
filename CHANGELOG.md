@@ -1,3 +1,10 @@
+## [1.0.18](https://github.com/hardpointlabs/invar/compare/v1.0.17...v1.0.18) (2026-09-04)
+
+
+### Bug Fixes
+
+* Merge pull request [#61](https://github.com/hardpointlabs/invar/issues/61) from hardpointlabs/whitespace ([b727f94](https://github.com/hardpointlabs/invar/commit/b727f94d1c2cd324f4b960c2b11daeda7e3a0ac0))
+
 ## [1.0.17](https://github.com/hardpointlabs/invar/compare/v1.0.16...v1.0.17) (2026-09-03)
 
 
