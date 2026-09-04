@@ -74,9 +74,9 @@ jobs:
       - name: Install Zig
         if: steps.semantic.outputs.new_release == 'true' && steps.zig-cache.outputs.cache-hit != 'true'
         run: |
+          mkdir -p "${{ runner.temp }}/zig"
           curl -L "https://ziglang.org/builds/zig-aarch64-linux-0.17.0-dev.1970+67f39b551.tar.xz" \
-            | tar -J -x -C "${{ runner.temp }}"
-          mv "${{ runner.temp }}"/zig-aarch64-linux-0.17.0-dev.1970+67f39b551 "${{ runner.temp }}/zig"
+            | tar -J -x --strip-components=1 -C "${{ runner.temp }}/zig"
       - name: Add Zig to PATH
         if: steps.semantic.outputs.new_release == 'true'
         run: echo "${{ runner.temp }}/zig" >> "$GITHUB_PATH"

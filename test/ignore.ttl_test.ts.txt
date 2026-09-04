@@ -79,3 +79,43 @@ Deno.test("key is reported as expired once its PX TTL has truly elapsed", async 
     await client.quit();
   }
 });
+
+
+// JSON test cases we can't practically run in regular CI as they currently stand:
+
+  {
+    "name": "GETEX PERSIST removes TTL",
+    "command": ["TTL", "st_getex_persist"],
+    "expected": -1,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "GETEX PERSIST removes the TTL from a key with expiry",
+    "setup": [["DEL", "st_getex_persist"], ["SETEX", "st_getex_persist", 100, "hello"], ["GETEX", "st_getex_persist", "PERSIST"]]
+  },
+  {
+    "name": "GETEX EX sets expiry in seconds",
+    "command": ["TTL", "st_getex_ex"],
+    "expected": 50,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "GETEX EX sets expiry in seconds and returns the value",
+    "setup": [["DEL", "st_getex_ex"], ["SET", "st_getex_ex", "hello"], ["GETEX", "st_getex_ex", "EX", "50"]]
+  },
+    {
+      "name": "PSETEX sets key with millisecond TTL",
+      "command": ["PSETEX", "st_psetex_key", "5000", "hello"],
+      "expected": "OK",
+      "type": "simple_string",
+      "version": "1.0.0",
+      "description": "PSETEX sets a key with expiry in milliseconds",
+      "setup": [["DEL", "st_psetex_key"]]
+    },
+      {
+        "name": "PTTL after PSETEX returns remaining ms",
+        "command": ["PTTL", "st_psetex_key"],
+        "expected": "> -1",
+        "type": "integer_gt",
+        "version": "1.0.0",
+        "description": "PTTL returns positive remaining milliseconds after PSETEX",
+        "setup": [["DEL", "st_psetex_key"], ["PSETEX", "st_psetex_key", "5000", "hello"]]
+      },
