@@ -6,7 +6,7 @@ on:
 
 jobs:
   validate_goreleaser:
-    runs-on: blacksmith-1vcpu-ubuntu-2404-arm
+    runs-on: blacksmith-2vcpu-ubuntu-2404-arm
     steps:
       - name: validate
         uses: goreleaser/goreleaser-action@v7
