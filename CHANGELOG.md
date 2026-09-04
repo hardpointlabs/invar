@@ -1,3 +1,10 @@
+## [1.0.22](https://github.com/hardpointlabs/invar/compare/v1.0.21...v1.0.22) (2026-09-04)
+
+
+### Bug Fixes
+
+* Merge pull request [#70](https://github.com/hardpointlabs/invar/issues/70) from hardpointlabs/repo-perms ([40d604d](https://github.com/hardpointlabs/invar/commit/40d604d849f1de0bdca7bc2203fdc66290ed6627))
+
 ## [1.0.21](https://github.com/hardpointlabs/invar/compare/v1.0.20...v1.0.21) (2026-09-04)
 
 
