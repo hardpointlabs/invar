@@ -17,7 +17,7 @@ jobs:
       should_publish: ${{ steps.semantic.outputs.new_release }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: useblacksmith/checkout@v1
         with:
           persist-credentials: false
           fetch-depth: 0
@@ -67,7 +67,7 @@ jobs:
       - name: Cache Zig
         if: steps.semantic.outputs.new_release == 'true'
         id: zig-cache
-        uses: actions/cache@v6
+        uses: useblacksmith/stickydisk@v1
         with:
           path: ${{ runner.temp }}/zig
           key: zig-0.17.0-dev.1970
@@ -86,7 +86,7 @@ jobs:
       - name: Cache macOS SDK
         if: steps.semantic.outputs.new_release == 'true'
         id: sdk-cache
-        uses: actions/cache@v6
+        uses: useblacksmith/stickydisk@v1
         with:
           path: ${{ runner.temp }}/MacOSX11.3.sdk
           key: macos-sdk-11.3
