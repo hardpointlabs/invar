@@ -54,14 +54,21 @@ jobs:
           fi
       - name: Export SDKROOT
         run: echo "SDKROOT=${{ runner.temp }}/MacOSX11.3.sdk" >> "$GITHUB_ENV"
-      - name: Cache cargo
+      - name: Sticky disk - cargo registry
         uses: useblacksmith/stickydisk@v1
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: invar-cargo
+          key: ${{ github.repository }}-cargo-registry
+          path: ~/.cargo/registry
+      - name: Sticky disk - cargo git
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-cargo-git
+          path: ~/.cargo/git
+      - name: Sticky disk - target
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-cargo-target
+          path: target
       - name: GoReleaser build (validation only)
         uses: goreleaser/goreleaser-action@v7
         with:
@@ -159,13 +166,28 @@ jobs:
           fi
       - name: Export SDKROOT
         run: echo "SDKROOT=${{ runner.temp }}/MacOSX11.3.sdk" >> "$GITHUB_ENV"
+      - name: Sticky disk - cargo registry
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-cargo-registry
+          path: ~/.cargo/registry
+      - name: Sticky disk - cargo git
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-cargo-git
+          path: ~/.cargo/git
+      - name: Sticky disk - target
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-cargo-target
+          path: target
       - name: Run GoReleaser
         if: steps.semantic.outputs.new_release == 'true'
         uses: goreleaser/goreleaser-action@v7
         with:
           args: release --clean
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           DISCORD_WEBHOOK_ID: ${{ secrets.DISCORD_WEBHOOK_ID }}
           DISCORD_WEBHOOK_TOKEN: ${{ secrets.DISCORD_WEBHOOK_TOKEN }}
           MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
