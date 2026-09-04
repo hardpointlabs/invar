@@ -1,3 +1,10 @@
+## [1.0.19](https://github.com/hardpointlabs/invar/compare/v1.0.18...v1.0.19) (2026-09-04)
+
+
+### Bug Fixes
+
+* Merge pull request [#62](https://github.com/hardpointlabs/invar/issues/62) from hardpointlabs/fix-zig ([ed6dc01](https://github.com/hardpointlabs/invar/commit/ed6dc012088cd5406c78dd4a9aa5cdf859e97bc7))
+
 ## [1.0.18](https://github.com/hardpointlabs/invar/compare/v1.0.17...v1.0.18) (2026-09-04)
 
 
