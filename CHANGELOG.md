@@ -1,3 +1,10 @@
+## [1.0.21](https://github.com/hardpointlabs/invar/compare/v1.0.20...v1.0.21) (2026-09-04)
+
+
+### Bug Fixes
+
+* Merge pull request [#68](https://github.com/hardpointlabs/invar/issues/68) from hardpointlabs/fix-auth-and-cache ([84c9a99](https://github.com/hardpointlabs/invar/commit/84c9a9923d7f8038cc90171e1dab58853c136702))
+
 ## [1.0.20](https://github.com/hardpointlabs/invar/compare/v1.0.19...v1.0.20) (2026-09-04)
 
 
