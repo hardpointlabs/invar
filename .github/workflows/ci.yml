@@ -5,6 +5,13 @@ on:
     branches: [master]
 
 jobs:
+  validate_goreleaser:
+    runs-on: blacksmith-1vcpu-ubuntu-2404-arm
+    steps:
+      - name: validate
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          args: check
   test:
     runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     steps:

@@ -68,3 +68,16 @@ changelog:
     exclude:
       - "^docs:"
       - "^test:"
+
+homebrew_casks:
+  - name: invar
+    commit_author:
+      name: Chris Mowforth
+      email: chris.mowforth@hardpoint.dev
+    commit_msg_template: "Brew formula update for {{ .ProjectName }} version {{ .Tag }}"
+    description: "Hardpoint agent"
+    repository:
+      owner: hardpointlabs
+      name: homebrew-tap
+      branch: master
+      token: "{{ .Env.GITHUB_TOKEN }}"
