@@ -202,7 +202,7 @@ impl Tx for SlateTx {
                     entry.key(),
                     stored,
                     &PutOptions {
-                        ttl: Ttl::ExpireAfter(ms),
+                        ttl: Ttl::ExpireAfterMillis(ms),
                     },
                 )
                 .map_err(map_slate_error)
