@@ -95,10 +95,8 @@ jobs:
             invar
             homebrew-tap
       - name: Set up Rust toolchain
-        if: steps.semantic.outputs.new_release == 'true'
         uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Install cargo-edit
-        if: steps.semantic.outputs.new_release == 'true'
         run: cargo install --locked cargo-edit
       - name: Setup git auth
         run: |
