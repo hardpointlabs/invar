@@ -94,6 +94,12 @@ jobs:
           repositories: |
             invar
             homebrew-tap
+      - name: Set up Rust toolchain
+        if: steps.semantic.outputs.new_release == 'true'
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install cargo-edit
+        if: steps.semantic.outputs.new_release == 'true'
+        run: cargo install --locked cargo-edit
       - name: Setup git auth
         run: |
           git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
@@ -128,9 +134,6 @@ jobs:
       - name: Setup Blacksmith Builder
         uses: useblacksmith/setup-docker-builder@v1
         if: steps.semantic.outputs.new_release == 'true'
-      - name: Set up Rust toolchain
-        if: steps.semantic.outputs.new_release == 'true'
-        uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Cache Zig
         if: steps.semantic.outputs.new_release == 'true'
         id: zig-cache
