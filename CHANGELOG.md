@@ -1,3 +1,10 @@
+## [1.0.24](https://github.com/hardpointlabs/invar/compare/v1.0.23...v1.0.24) (2026-09-05)
+
+
+### Bug Fixes
+
+* Merge pull request [#73](https://github.com/hardpointlabs/invar/issues/73) from hardpointlabs/cargo-set-invar ([faca3ee](https://github.com/hardpointlabs/invar/commit/faca3ee0461764573278e682197a0dde1ffbc897))
+
 ## [1.0.23](https://github.com/hardpointlabs/invar/compare/v1.0.22...v1.0.23) (2026-09-05)
 
 
