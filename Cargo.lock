@@ -1368,7 +1368,7 @@ dependencies = [
 
 [[package]]
 name = "invar"
-version = "1.0.6"
+version = "1.0.23"
 dependencies = [
  "clap",
  "kv",
@@ -1497,7 +1497,7 @@ dependencies = [
 
 [[package]]
 name = "kv"
-version = "0.1.0"
+version = "1.0.23"
 dependencies = [
  "async-trait",
  "fjall",
@@ -2185,7 +2185,7 @@ dependencies = [
 
 [[package]]
 name = "redis"
-version = "0.1.0"
+version = "1.0.23"
 dependencies = [
  "async-trait",
  "bytes",

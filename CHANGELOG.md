@@ -1,3 +1,11 @@
+## [1.0.23](https://github.com/hardpointlabs/invar/compare/v1.0.22...v1.0.23) (2026-09-05)
+
+
+### Bug Fixes
+
+* bump invar crate version via semantic-release ([80e2761](https://github.com/hardpointlabs/invar/commit/80e27616d5b43363924e91514d1f1602fc3ae063))
+* Merge pull request [#72](https://github.com/hardpointlabs/invar/issues/72) from hardpointlabs/cargo-version ([b83fd3a](https://github.com/hardpointlabs/invar/commit/b83fd3aa97ac13ff501b088064c1bdbf52dcad31))
+
 ## [1.0.22](https://github.com/hardpointlabs/invar/compare/v1.0.21...v1.0.22) (2026-09-04)
 
 
