@@ -6,16 +6,17 @@
     "@semantic-release/changelog",
     "@semantic-release/github",
     [
-      "@semantic-release/git",
+      "@semantic-release/exec",
       {
-        "assets": ["CHANGELOG.md"],
-        "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
+        "prepareCmd": "cargo set-version ${nextRelease.version}",
+        "successCmd": "echo 'new_release=true' >> $GITHUB_OUTPUT"
       }
     ],
     [
-      "@semantic-release/exec",
+      "@semantic-release/git",
       {
-        "successCmd": "echo 'new_release=true' >> $GITHUB_OUTPUT"
+        "assets": ["CHANGELOG.md", "Cargo.toml", "Cargo.lock"],
+        "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
       }
     ]
   ]
