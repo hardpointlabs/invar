@@ -1497,7 +1497,7 @@ dependencies = [
 
 [[package]]
 name = "kv"
-version = "1.0.23"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "fjall",
@@ -2185,7 +2185,7 @@ dependencies = [
 
 [[package]]
 name = "redis"
-version = "1.0.23"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
