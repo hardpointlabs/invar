@@ -20,8 +20,10 @@ use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 use slatedb::object_store::aws;
 use slatedb::{Db, DbIterator, DbTransaction, Error as SlateError, ErrorKind, IsolationLevel};
+use slatedb_common::metrics::MetricsRecorder;
 
 use crate::kv::{BoxFuture, Entry, Error, Item, KeyValueIterator, KeyValueStore, Tx, WriteHandle};
+use crate::metrics::MetricsRsRecorder;
 
 /// Maps a SlateDB error to the kv abstraction's error space, mirroring the
 /// Go backend: transaction conflicts surface as [`Error::Conflict`],
@@ -71,6 +73,7 @@ impl SlateDb {
         if let Some(settings) = settings {
             builder = builder.with_settings(settings);
         }
+        builder = builder.with_metrics_recorder(Arc::new(MetricsRsRecorder) as Arc<dyn MetricsRecorder>);
         let db = builder.build().await.map_err(map_slate_error)?;
         Ok(SlateDb { db })
     }
