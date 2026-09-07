@@ -34,7 +34,7 @@ echo "Running unit & linearizability tests..."
 cargo test --workspace
 
 echo "Starting invar daemon on port $PORT..."
-./target/debug/invar --backend fjall --path /tmp/invar-test-data --redis > "$LOG_FILE" 2>&1 &
+./target/debug/invar --backend fjall --path /tmp/invar-test-data --metrics-addr localhost:9101 > "$LOG_FILE" 2>&1 &
 echo $! > "$PID_FILE"
 
 echo "Waiting for daemon to be ready..."

@@ -72,7 +72,7 @@ impl RedisListener {
         let listener = TcpListener::bind(self.addr).await?;
         let actual = listener.local_addr()?;
         crate::server::set_addr(actual);
-        println!("invar: redis listener on {actual}");
+        tracing::info!("Redis RESP listener on {actual}");
         loop {
             let (socket, _peer) = listener.accept().await?;
             crate::server::conn_opened();
@@ -83,7 +83,7 @@ impl RedisListener {
                 let result = handle_connection(socket, store, registry, pubsub).await;
                 crate::server::conn_closed();
                 if let Err(e) = result {
-                    eprintln!("invar: connection error: {e}");
+                    tracing::error!("invar: connection error: {e}");
                 }
             });
         }

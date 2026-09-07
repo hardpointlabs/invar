@@ -1,6 +1,14 @@
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::Arc;
+
+async fn start_metrics_server(addr: SocketAddr) {
+    metrics_exporter_prometheus::PrometheusBuilder::new()
+        .with_http_listener(addr)
+        .install()
+        .expect("failed to install Prometheus metrics exporter");
+    tracing::info!(%addr, "Prometheus metrics server started");
+}
 
 use clap::{Parser, ValueEnum};
 use kv::{
@@ -23,10 +31,6 @@ enum Backend {
     about = "Invar: the diskless document store"
 )]
 struct Cli {
-    /// Serve the Redis wire protocol (RESP) on :6379.
-    #[arg(long)]
-    redis: bool,
-
     /// Specify which storage backend to use
     #[arg(long, env = "INVAR_BACKEND", value_enum)]
     backend: Backend,
@@ -38,6 +42,10 @@ struct Cli {
     /// Where to persist data when using the fjall backend
     #[arg(long, env = "INVAR_DATA_PATH", default_value = "/tmp/invar")]
     path: Option<PathBuf>,
+
+    /// Optional listen address for the Prometheus metrics exporter
+    #[arg(long, env = "INVAR_METRICS_ADDR")]
+    metrics_addr: Option<String>,
 
     /// Bucket prefix to use with the slate backend
     #[arg(long, env = "INVAR_BUCKET_PREFIX", default_value = "/invar")]
@@ -54,6 +62,16 @@ async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .init();
+
+    if let Some(addr) = &cli.metrics_addr {
+        match addr.to_socket_addrs() {
+            Ok(mut addrs) => match addrs.next() {
+                Some(resolved) => { start_metrics_server(resolved).await; }
+                None => tracing::warn!("metrics disabled: '{addr}' resolved to no addresses"),
+            },
+            Err(e) => tracing::warn!("metrics disabled: couldn't resolve '{addr}': {e}"),
+        }
+    }
 
     let store: Arc<dyn RedisStore> = match cli.backend {
         Backend::Slate => {
@@ -78,11 +96,10 @@ async fn main() {
         }
     };
 
-    if cli.redis {
-        let addr: SocketAddr = "0.0.0.0:6379".parse().expect("valid listen address");
-        let listener = RedisListener::new(addr, store.clone());
+    let addr: SocketAddr = "0.0.0.0:6379".parse().expect("valid listen address");
+    let listener = RedisListener::new(addr, store.clone());
 
-        tokio::select! {
+    tokio::select! {
             result = listener.serve() => {
                 if let Err(e) = result {
                     tracing::error!(error = %e, "redis listener failed");
@@ -92,7 +109,6 @@ async fn main() {
                 tracing::info!("shutdown signal received, closing store");
             }
         }
-    }
 
     match timeout(Duration::from_secs(10), store.close()).await {
         Ok(Ok(())) => tracing::info!("store closed cleanly"),

@@ -9,7 +9,9 @@ path = "lib.rs"
 [dependencies]
 async-trait = "0.1"
 fjall = "3.1"
+metrics = "0.24"
 slatedb = { version = "0.16", features = ["aws", "foyer", "compression"] }
+slatedb-common = "0.16"
 thiserror = "2.0.20"
 
 [dev-dependencies]
