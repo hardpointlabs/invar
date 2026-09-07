@@ -20,23 +20,26 @@ enum Backend {
 #[command(
     name = "invar",
     version,
-    about = "Invar - a lightweight, durable document store"
+    about = "Invar: the diskless document store"
 )]
 struct Cli {
     /// Serve the Redis wire protocol (RESP) on :6379.
     #[arg(long)]
     redis: bool,
 
+    /// Specify which storage backend to use
     #[arg(long, env = "INVAR_BACKEND", value_enum)]
     backend: Backend,
 
-    // only required when --backend=slate
+    /// Bucket name to use with the slate backend
     #[arg(long, env = "INVAR_S3_BUCKET", required_if_eq("backend", "slate"))]
     bucket: Option<String>,
 
+    /// Where to persist data when using the fjall backend
     #[arg(long, env = "INVAR_DATA_PATH", default_value = "/tmp/invar")]
     path: Option<PathBuf>,
 
+    /// Bucket prefix to use with the slate backend
     #[arg(long, env = "INVAR_BUCKET_PREFIX", default_value = "/invar")]
     prefix: String,
 }
