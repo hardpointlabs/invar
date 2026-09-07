@@ -63,6 +63,16 @@ async fn main() {
         .with_env_filter(filter)
         .init();
 
+    if let Some(addr) = &cli.metrics_addr {
+        match addr.to_socket_addrs() {
+            Ok(mut addrs) => match addrs.next() {
+                Some(resolved) => { start_metrics_server(resolved).await; }
+                None => tracing::warn!("metrics disabled: '{addr}' resolved to no addresses"),
+            },
+            Err(e) => tracing::warn!("metrics disabled: couldn't resolve '{addr}': {e}"),
+        }
+    }
+
     let store: Arc<dyn RedisStore> = match cli.backend {
         Backend::Slate => {
             let bucket = cli
@@ -85,16 +95,6 @@ async fn main() {
                 .expect("failed to open Fjall store"))
         }
     };
-
-    if let Some(addr) = &cli.metrics_addr {
-        match addr.to_socket_addrs() {
-            Ok(mut addrs) => match addrs.next() {
-                Some(resolved) => { start_metrics_server(resolved).await; }
-                None => tracing::warn!("metrics disabled: '{addr}' resolved to no addresses"),
-            },
-            Err(e) => tracing::warn!("metrics disabled: couldn't resolve '{addr}': {e}"),
-        }
-    }
 
     let addr: SocketAddr = "0.0.0.0:6379".parse().expect("valid listen address");
     let listener = RedisListener::new(addr, store.clone());

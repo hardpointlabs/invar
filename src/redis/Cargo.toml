@@ -23,6 +23,7 @@ tokio = { version = "1", features = ["net", "io-util", "rt", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 tracing = "0.1"
+metrics = "0.24.6"
 
 [dev-dependencies]
 tempfile = "3"
