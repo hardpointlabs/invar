@@ -567,9 +567,9 @@ fn execute_redis_call<'gc>(
         }
     };
 
-    // Run the database operation - this is effectively synchronous for Fjall
-    let future = cmd.db_op.run(tx);
-    let mut outcome = futures::executor::block_on(future);
+    let mut outcome = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(cmd.db_op.run(tx))
+    });
 
     // Push any claim the op made (XADD/ZADD waking a blocked reader) onto the
     // script's deferred list. Requesting a `WireOp::reply` here would wake the
@@ -1821,7 +1821,7 @@ mod tests {
         expect_error_contains(&reply, "unsupported value type");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn redis_call_set_and_get() {
         let reply = exec(eval_op(
             "redis.call('SET', 'testkey', 'testval'); return redis.call('GET', 'testkey')",
@@ -1832,7 +1832,7 @@ mod tests {
         assert_eq!(expect_bulk(&reply).as_deref(), Some(b"testval".as_slice()));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn redis_call_returns_integer() {
         let reply = exec(eval_op(
             "redis.call('SET', 'counter', '10'); return redis.call('INCR', 'counter')",
@@ -1843,13 +1843,13 @@ mod tests {
         assert_eq!(expect_integer(&reply), 11);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn redis_call_returns_nil_for_missing_key() {
         let reply = exec(eval_op("return redis.call('GET', 'nonexistent')", &[], &[])).await;
         assert_eq!(expect_bulk(&reply), None);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn redis_call_with_multiple_args() {
         let reply = exec(eval_op(
             "redis.call('SET', 'key1', 'val1'); redis.call('SET', 'key2', 'val2'); return {redis.call('GET', 'key1'), redis.call('GET', 'key2')}",
@@ -1863,13 +1863,13 @@ mod tests {
         assert_eq!(expect_bulk(&items[1]).as_deref(), Some(b"val2".as_slice()));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn redis_call_error_propagates() {
         let reply = exec(eval_op("redis.call('ECHO')", &[], &[])).await;
         expect_error_contains(&reply, "ERR wrong number of arguments");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn redis_pcall_catches_error() {
         let reply = exec(eval_op(
             "local ok, err = pcall(redis.call, 'ECHO'); return {ok, err}",
@@ -1883,7 +1883,7 @@ mod tests {
         // Error message should be present
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn redis_call_with_lua_arguments() {
         let reply = exec(eval_op(
             "redis.call('SET', KEYS[1], ARGV[1]); return redis.call('GET', KEYS[1])",
@@ -1998,7 +1998,7 @@ mod tests {
         assert_eq!(expect_integer(&items[2]), 3);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn redis_type_call_ok_index() {
         let reply = exec(eval_op(
             "redis.call('SET', KEYS[1], 'x'); local t = redis.call('TYPE', KEYS[1])['ok']; return t",
@@ -2009,7 +2009,7 @@ mod tests {
         assert_eq!(expect_bulk(&reply).as_deref(), Some(b"string".as_slice()));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn redis_node_type_ok_index() {
         let reply = exec(eval_op(
             "local t = redis.call('TYPE', KEYS[1])['ok']; return t",
@@ -2065,7 +2065,11 @@ mod tests {
         assert_eq!(expect_bulk(&reply).as_deref(), Some(b"nope".as_slice()));
     }
 
-    #[tokio::test]
+    // We need to run these tests using a multi-threaded Tokio runtime,
+    // since the default single-main-threaded version will panic when is
+    // tries to run a `tokio::task::block_in_place(...)` statement
+    // Tracking this with https://github.com/hardpointlabs/invar/issues/76
+    #[tokio::test(flavor = "multi_thread")]
     async fn redis_call_lrange_from_script() {
         let op = eval_op(
             "redis.call('RPUSH', KEYS[1], 'a', 'b', 'c'); return redis.call('LRANGE', KEYS[1], 0, 2)",
@@ -2080,7 +2084,7 @@ mod tests {
         assert_eq!(expect_bulk(&items[2]).as_deref(), Some(b"c".as_slice()));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn redis_call_lrange_string_args_from_script() {
         let op = eval_op(
             "redis.call('RPUSH', KEYS[1], 'a', 'b', 'c'); local k = KEYS[1]; local start = ARGV[1]; local stop = ARGV[2]; return redis.call('LRANGE', k, start, stop)",
