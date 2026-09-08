@@ -41,7 +41,7 @@ Check out the [docs](https://docs.hardpoint.dev/guides/invar) for more details.
 This boots up an instance persisting data to `/tmp/invar`:
 
 ```bash
-docker run -v /tmp/invar:/tmp/invar -p 6379:6379 -it ghcr.io/hardpointlabs/invar:latest --backend fjall --path /tmp/invar --redis
+docker run -v /tmp/invar:/tmp/invar -p 6379:6379 -it ghcr.io/hardpointlabs/invar:latest --backend fjall --path /tmp/invar
 ```
 
 #### S3
@@ -51,7 +51,7 @@ Pass the usual `AWS_...` variables to configure Invar to run backed by object st
 ```bash
 docker run -v /tmp/invar:/tmp/invar -e AWS_REGION=... -e AWS_ACCESS_KEY_ID=...\
   -e AWS_SECRET_ACCESS_KEY=... -p 6379:6379 -it ghcr.io/hardpointlabs/invar:latest \
-  --backend slate --bucket <my-bucket-name> --redis
+  --backend slate --bucket <my-bucket-name>
 ```
 
 ## Compatibility
