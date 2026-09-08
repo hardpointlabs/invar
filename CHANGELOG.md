@@ -1,3 +1,10 @@
+## [1.0.25](https://github.com/hardpointlabs/invar/compare/v1.0.24...v1.0.25) (2026-09-08)
+
+
+### Bug Fixes
+
+* Merge pull request [#81](https://github.com/hardpointlabs/invar/issues/81) from hardpointlabs/readme ([8bdca5a](https://github.com/hardpointlabs/invar/commit/8bdca5a3d16531d0a73de6305ae35d5d7f53e260))
+
 ## [1.0.24](https://github.com/hardpointlabs/invar/compare/v1.0.23...v1.0.24) (2026-09-05)
 
 
