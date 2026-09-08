@@ -8,7 +8,7 @@
 
 # Invar
 
-[![Apache 2.0 License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE) ![GitHub Release](https://img.shields.io/github/v/release/hardpointlabs/invar) ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/hardpointlabs/invar/release.yml) ![Discord](https://img.shields.io/discord/1481682538291400758)
+[![Apache 2.0 License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE) ![GitHub Release](https://img.shields.io/github/v/release/hardpointlabs/invar) ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/hardpointlabs/invar/release.yml) <a href="https://discord.gg/WWE4PWVnb2"><img src="https://img.shields.io/discord/1481682538291400758"/></a>
 
 Invar is a diskless, Redis™-compatible document store.
 
