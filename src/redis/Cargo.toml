@@ -11,7 +11,7 @@ async-trait = "0.1"
 bytes = "1"
 dashmap = "6"
 futures = "0.3"
-gc-arena = "0.5.3"
+gc-arena = "0.7.0"
 kv = { path = "../kv" }
 piccolo = "0.3.3"
 rand = "0.10.2"
