@@ -15,6 +15,8 @@ Invar is a diskless, Redis-compatible document store.
 Invar gives you Redis persistence without having to manage disks. Instead it uses object storage, meaning your cloud bill scales with what you store, not what you provision.
 It's explicitly designed for single-writer operation and to run at fleet-scale for instance-per-tenant scenarios. Have a read of [this post](https://blog.hardpoint.dev/announcing-invar-a-diskless-transactional-document-db?utm_source=github) for more context about Invar's evolution.
 
+Check out the [docs](https://docs.hardpoint.dev/guides/invar) for more details.
+
 ---
 
 ## Why Invar
@@ -25,6 +27,12 @@ It's explicitly designed for single-writer operation and to run at fleet-scale f
 - **Single binary:** One process, no cluster coordination
 - **Real local dev experience:** Can persist to disk for simplified local dev & CI, without an S3 service dependency
 - **Apache 2.0:** Committed to open source
+
+### Architecture
+
+<div align="center">
+  <img src="Invar-Arch-HighLevelBox.svg" width="500" alt="Invar, a diskless, Redis-compatible document store"></img>
+</div>
 
 ## Quickstart
 
