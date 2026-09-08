@@ -9,7 +9,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-
+use std::time::Duration;
 use bytes::Bytes;
 use kv::kv::{Entry, Error as KvError};
 
@@ -62,6 +62,10 @@ pub struct Session {
     store: Arc<dyn RedisStore>,
     registry: Arc<WatchRegistry>,
     pubsub: Arc<PubSubRegistry>,
+}
+
+fn is_retryable_conflict(outcome: &Result<DbResult, DbError>) -> bool {
+    matches!(outcome, Err(DbError::Kv(KvError::Conflict)))
 }
 
 impl Session {
@@ -366,6 +370,7 @@ impl Session {
 
         let mut conflict_retries = 0usize;
         'commit: loop {
+            // Try to acquire a tx
             let tx = match self.store.begin(mutating).await {
                 Ok(tx) => tx,
                 Err(e) => {
@@ -376,8 +381,29 @@ impl Session {
 
             outcomes = Vec::with_capacity(self.queue.len());
 
+            // Apply all our commands to the acquired tx
             for i in 0..self.queue.len() {
                 let outcome = self.queue[i].db_op.run(&*tx).await;
+
+                if is_retryable_conflict(&outcome) {
+                    // Not a command-level error -- the whole snapshot this attempt was
+                    // built on is stale. Abandon this attempt (batch or not) and retry
+                    // the entire queue from a fresh transaction, same as a commit-time
+                    // conflict.
+                    release_claims(&self.queue, &outcomes);
+                    conflict_retries += 1;
+                    if conflict_retries >= MAX_CONFLICT_RETRIES {
+                        metrics::counter!("invar_conflict_failures").increment(1);
+                        self.queue.clear();
+                        return vec![RespValue::Error(Bytes::from_static(
+                            b"ERR Couldn't commit transaction",
+                        ))];
+                    }
+                    metrics::counter!("invar_conflict_retries").increment(1);
+                    tokio::time::sleep(Duration::from_millis(conflict_retries as u64)).await;
+                    continue 'commit;
+                }
+
                 if outcome.is_err() && !batch {
                     // Any claims made by earlier ops in this batch must be
                     // returned to the front of their queues since the
@@ -397,6 +423,7 @@ impl Session {
                 outcomes.push(outcome);
             }
 
+            // Commit the tx
             match tx.commit().await {
                 Ok(()) => {
                     tracing::debug!(ops = outcomes.len(), "tx committed");
@@ -405,11 +432,16 @@ impl Session {
                 Err(e) => match e {
                     KvError::Conflict if conflict_retries < MAX_CONFLICT_RETRIES => {
                         conflict_retries += 1;
-                        tracing::warn!(ops = outcomes.len(), retries = conflict_retries, "write tx conflict; retrying batch");
+                        let backoff = Duration::from_millis(5) * 2u32.pow(conflict_retries.min(6) as u32)
+                            + Duration::from_millis(rand::random::<u64>() % 10);
+                        tracing::debug!(ops = outcomes.len(), retries = conflict_retries, "write tx conflict; retrying batch");
+                        metrics::counter!("invar_conflict_retries").increment(1);
+                        tokio::time::sleep(backoff).await;
                     }
                     KvError::Conflict => {
                         release_claims(&self.queue, &outcomes);
                         self.queue.clear();
+                        metrics::counter!("invar_conflict_failures").increment(1);
                         return vec![RespValue::Error(Bytes::from_static(
                             b"ERR Couldn't commit transaction",
                         ))];

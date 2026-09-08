@@ -567,9 +567,9 @@ fn execute_redis_call<'gc>(
         }
     };
 
-    // Run the database operation - this is effectively synchronous for Fjall
-    let future = cmd.db_op.run(tx);
-    let mut outcome = futures::executor::block_on(future);
+    let mut outcome = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(cmd.db_op.run(tx))
+    });
 
     // Push any claim the op made (XADD/ZADD waking a blocked reader) onto the
     // script's deferred list. Requesting a `WireOp::reply` here would wake the
