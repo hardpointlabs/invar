@@ -12,16 +12,6 @@ body:
         case for why it should be reconsidered) or for anything marked ✅ that isn't
         actually behaving correctly.
 
-  - type: dropdown
-    id: protocol
-    attributes:
-      label: Protocol
-      options:
-        - Redis
-        - MongoDB
-    validations:
-      required: true
-
   - type: input
     id: command
     attributes:
@@ -36,6 +26,7 @@ body:
       label: Current status in COMPATIBILITY.md
       options:
         - "🚫 marked no plan to implement — I want to make the case for it"
+        - "🚧 marked as unimplemented - I want to implement it / I have questions"
         - "✅ marked implemented, but it's behaving incorrectly"
         - "✅ marked implemented, but a specific option/flag doesn't work"
         - Not sure / not listed
