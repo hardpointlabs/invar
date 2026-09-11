@@ -17,6 +17,9 @@ with many instances + key-value stores running in parallel as discrete datasets.
 * Minimise code churn: avoid refactorings unrelated to the task at hand, and if significant amount of adjacent code is being churned, ask the user what to do
 * Do not speculate on public API behavior: if some functionality is not clear, ask the user rather than guessing.
 
+Be sure to understand the thoughts and motivations in any approved RFCs, which live in the `./rfcs` folder, and 
+be careful not to violate any prior functional decisions that were made there.
+
 ## Tech stack
 
 The project is a Cargo-based Rust project.
