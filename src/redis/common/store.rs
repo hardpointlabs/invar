@@ -6,8 +6,9 @@
 //! and the whole-store teardown operations — which is extracted here into
 //! [`RedisStore`] and blanket-implemented for every concrete backend.
 
+use std::time::Duration;
 use async_trait::async_trait;
-use kv::kv::{Error as KvError, KeyValueStore, Tx};
+use kv::kv::{Error as KvError, Error, KeyValueStore, Tx, WriteHandle};
 
 /// The subset of [`KeyValueStore`] the Redis server needs, usable through a
 /// trait object so sessions, commands and the listener stay backend-agnostic.
@@ -28,6 +29,8 @@ pub trait RedisStore: Send + Sync + 'static {
 
     /// Deletes every key starting with `prefix`.
     async fn drop_prefix(&self, prefix: &[u8]) -> Result<(), KvError>;
+
+    async fn await_until(&self, handle: WriteHandle, duration: Duration) -> Result<bool, Error>;
 }
 
 #[async_trait]
@@ -50,5 +53,9 @@ impl<S: KeyValueStore> RedisStore for S {
 
     async fn drop_prefix(&self, prefix: &[u8]) -> Result<(), KvError> {
         KeyValueStore::drop_prefix(self, prefix).await
+    }
+
+    async fn await_until(&self, handle: WriteHandle, duration: Duration) -> Result<bool, Error> {
+        KeyValueStore::await_until(self, handle, duration).await
     }
 }

@@ -3,19 +3,21 @@
 //! Port of the Go `redis/conn` package. These are mostly stubbed out for
 //! client compatibility (per `COMPATIBILITY.md`) plus a few real operations:
 //! `SELECT` for switching the connection's DB, `DBSIZE` for counting keys in
-//! the current namespace, and `SAVE`/`BGSAVE` for flushing the store. `PING`
+//! the current namespace, `SAVE`/`BGSAVE` for flushing the store, and `WAIT`
+//! for awaiting durability of the connection's last write. `PING`
 //! and `ECHO` are implemented directly in the dispatcher (as in the Go
 //! listener), not here.
 //!
-//! `SAVE` cannot be expressed as a wire-only op (its reply must await the
-//! store flush), so the dispatcher handles it specially; the remaining
-//! commands are queued [`QueuedOp`]s whose database half is a no-op.
+//! `SAVE` and `WAIT` cannot be expressed as wire-only ops (their replies must
+//! await the store's flush/durability), so — like `SAVE` — `WAIT`'s database
+//! half performs the async wait and the wire half renders the outcome; the
+//! remaining commands are queued [`QueuedOp`]s whose database half is a no-op.
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use kv::kv::{BoxFuture, Tx};
+use kv::kv::{BoxFuture, Tx, WriteHandle};
 
 use crate::common::op::{DbError, DbOp, DbResult, NoOp, QueuedOp, WireOp};
 use crate::common::session::Session;
@@ -47,11 +49,59 @@ pub fn sync() -> QueuedOp {
     }
 }
 
-/// `WAIT` — stubbed. Replies `+OK`.
-pub fn wait() -> QueuedOp {
+/// Database half of `WAIT`: awaits the durability of the session's most
+/// recent write (if any) for up to `duration`, replying the number of
+/// replicas that acknowledged it. Invar runs against a single logical replica
+/// (the underlying store), so the result is `true` ("acked") unless the wait
+/// timed out or failed. `await_until` is async, so — as with `SaveOp` in
+/// `server.rs` — the wait itself runs in the DbOp half and the wire half
+/// renders the outcome as the integer `1`/`0`.
+struct WaitOp {
+    store: Arc<dyn RedisStore>,
+    latest: Option<WriteHandle>,
+    duration: Duration,
+}
+
+impl DbOp for WaitOp {
+    fn run<'a>(&'a self, _tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
+        let store = self.store.clone();
+        let latest = self.latest.clone();
+        let duration = self.duration;
+        Box::pin(async move {
+            // No write to wait for on this connection: trivially acked.
+            let Some(handle) = latest else {
+                return Ok(Box::new(true) as DbResult);
+            };
+            let acked = store.await_until(handle, duration).await.unwrap_or(false);
+            Ok(Box::new(acked) as DbResult)
+        })
+    }
+}
+
+/// `WAIT` wire half — replies `1` when the write was acknowledged by our
+/// single replica (or there was nothing to wait for), `0` otherwise.
+struct WaitWireOp;
+
+impl WireOp for WaitWireOp {
+    fn reply(&self, result: Result<DbResult, DbError>) -> RespValue {
+        let acked = match result {
+            Ok(res) => res.downcast::<bool>().map(|b| *b).unwrap_or(false),
+            Err(_) => false,
+        };
+        RespValue::Integer(if acked { 1 } else { 0 })
+    }
+}
+
+/// `WAIT numreplicas timeout` — waits for the session's most recent write to
+/// be durable for up to `timeout` (a zero timeout means wait indefinitely).
+pub fn wait(timeout: Duration, session: &Session) -> QueuedOp {
     QueuedOp {
-        db_op: Box::new(NoOp),
-        wire_op: Box::new(OkWire),
+        db_op: Box::new(WaitOp {
+            store: session.store(),
+            latest: session.latest_write(),
+            duration: timeout,
+        }),
+        wire_op: Box::new(WaitWireOp),
         is_mutating: false,
         allowed_in_tx: false,
         abort_in_tx: false,
@@ -353,11 +403,40 @@ mod tests {
         }
     }
 
+    // #[tokio::test]
+    // async fn sync_wait_reply_ok() {
+    //     let session = test_session();
+    //     expect_ok(&exec(&session, sync()).await);
+    // }
+
     #[tokio::test]
-    async fn sync_wait_reply_ok() {
+    async fn wait_with_no_write_replies_one() {
         let session = test_session();
-        expect_ok(&exec(&session, sync()).await);
-        expect_ok(&exec(&session, wait()).await);
+        // No write has been dispatched on this session, so there is nothing
+        // to wait for and the single replica trivially acked.
+        let reply = exec(&session, wait(Duration::from_millis(0), &session)).await;
+        assert_eq!(reply, RespValue::Integer(1));
+    }
+
+    #[tokio::test]
+    async fn wait_awaits_given_handle() {
+        let session = test_session();
+        // Fabricate the shape a real session's `latest_write` takes after a
+        // WAL-backed commit (the SlateDB backend). The Fjall test backend's
+        // await_until never acks, so WAIT reports its failure as 0.
+        let op = QueuedOp {
+            db_op: Box::new(WaitOp {
+                store: session.store(),
+                latest: Some(kv::kv::write_handle(1)),
+                duration: Duration::from_millis(100),
+            }),
+            wire_op: Box::new(WaitWireOp),
+            is_mutating: false,
+            allowed_in_tx: false,
+            abort_in_tx: false,
+        };
+        let reply = exec(&session, op).await;
+        assert_eq!(reply, RespValue::Integer(0));
     }
 
     #[tokio::test]

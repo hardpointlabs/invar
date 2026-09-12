@@ -147,7 +147,7 @@ impl KeyValueStore for FjallDb {
         }))
     }
 
-    async fn update<F>(&self, f: F) -> Result<(), Error>
+    async fn update<F>(&self, f: F) -> Result<Option<WriteHandle>, Error>
     where
         F: for<'a> FnOnce(&'a dyn Tx) -> BoxFuture<'a, Result<(), Error>> + Send + 'static,
     {
@@ -195,6 +195,10 @@ impl KeyValueStore for FjallDb {
         self.db
             .persist(PersistMode::SyncAll)
             .map_err(map_fjall_error)
+    }
+
+    async fn await_until(&self, _: WriteHandle, _: Duration) -> Result<bool, Error> {
+        Ok(false)
     }
 
     async fn destroy(&self) -> Result<(), Error> {
@@ -274,10 +278,10 @@ impl Tx for FjallTx {
         }))
     }
 
-    async fn commit(self: Box<Self>) -> Result<(), Error> {
+    async fn commit(self: Box<Self>) -> Result<Option<WriteHandle>, Error> {
         let tx = self.tx.into_inner().expect("fjall tx mutex poisoned");
         match tx.commit().map_err(map_fjall_error)? {
-            Ok(()) => Ok(()),
+            Ok(()) => Ok(None),
             Err(Conflict) => Err(Error::Conflict),
         }
     }

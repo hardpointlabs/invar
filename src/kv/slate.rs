@@ -13,16 +13,16 @@
 
 use std::collections::Bound;
 use std::sync::Arc;
-
+use std::time::Duration;
 use async_trait::async_trait;
 use slatedb::config::{PutOptions, Settings, Ttl};
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 use slatedb::object_store::aws;
-use slatedb::{Db, DbIterator, DbTransaction, Error as SlateError, ErrorKind, IsolationLevel};
+use slatedb::{Db, DbIterator, DbStatus, DbTransaction, Error as SlateError, ErrorKind, IsolationLevel};
 use slatedb_common::metrics::MetricsRecorder;
 
-use crate::kv::{BoxFuture, Entry, Error, Item, KeyValueIterator, KeyValueStore, Tx, WriteHandle};
+use crate::kv::{write_handle, BoxFuture, Entry, Error, Item, KeyValueIterator, KeyValueStore, Tx, WriteHandle};
 use crate::metrics::MetricsRsRecorder;
 
 /// Maps a SlateDB error to the kv abstraction's error space, mirroring the
@@ -106,6 +106,14 @@ impl SlateDb {
     }
 }
 
+async fn wait_for_seq(
+    rx: &mut tokio::sync::watch::Receiver<DbStatus>,
+    sn: u64,
+) -> Result<(), tokio::sync::watch::error::RecvError> {
+    rx.wait_for(|s| s.durable_seq >= sn).await.map(|_| ())
+}
+
+
 #[async_trait]
 impl KeyValueStore for SlateDb {
     fn new_entry(&self, key: Vec<u8>, value: Vec<u8>) -> Entry {
@@ -121,7 +129,7 @@ impl KeyValueStore for SlateDb {
         Ok(Box::new(SlateTx { tx }))
     }
 
-    async fn update<F>(&self, f: F) -> Result<(), Error>
+    async fn update<F>(&self, f: F) -> Result<Option<WriteHandle>, Error>
     where
         F: for<'a> FnOnce(&'a dyn Tx) -> BoxFuture<'a, Result<(), Error>> + Send + 'static,
     {
@@ -171,6 +179,32 @@ impl KeyValueStore for SlateDb {
 
     async fn drop_prefix(&self, prefix: &[u8]) -> Result<(), Error> {
         self.delete_scanned(Some(prefix)).await
+    }
+
+    async fn await_until(&self, handle: WriteHandle, duration: Duration) -> Result<bool, Error> {
+        let sn = handle.sequence_number();
+        let mut rx = self.db.subscribe();
+
+        // Fast path: have we already caught up to the WriteHandle in question?
+        if rx.borrow().durable_seq >= sn {
+            return Ok(true);
+        }
+
+        // Real WAIT/WAITAOF semantics: timeout == 0 means block forever,
+        // not "return immediately" -- skip the timeout wrapper entirely.
+        if duration.is_zero() {
+            return rx
+                .wait_for(|s| s.durable_seq >= sn)
+                .await
+                .map(|_| true)
+                .map_err(|_| Error::DbClosed);
+        }
+
+        match tokio::time::timeout(duration, wait_for_seq(&mut rx, sn)).await {
+            Ok(Ok(())) => Ok(true),
+            Ok(Err(_)) => Err(Error::DbClosed),
+            Err(_elapsed) => Ok(false),
+        }
     }
 }
 
@@ -245,9 +279,11 @@ impl Tx for SlateTx {
         }))
     }
 
-    async fn commit(self: Box<Self>) -> Result<(), Error> {
-        let _ = self.tx.commit().await.map_err(map_slate_error)?;
-        Ok(())
+    async fn commit(self: Box<Self>) -> Result<Option<WriteHandle>, Error> {
+        match self.tx.commit().await {
+            Ok(handle) => Ok(handle.map(|h| write_handle(h.seqnum()))),
+            Err(e) => Err(map_slate_error(e)),
+        }
     }
 
     fn discard(self: Box<Self>) {

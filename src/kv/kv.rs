@@ -48,6 +48,8 @@ pub enum Error {
     KeyNotFound,
     #[error("Conflict")]
     Conflict,
+    #[error("Closed")]
+    DbClosed,
     #[error("Undefined")]
     Undefined,
 }
@@ -147,21 +149,20 @@ impl Item {
     }
 }
 
-/// Handle returned by a completed write. Currently informational only: the
-/// store's merge support is not yet implemented.
+/// A reference to a (possibly completed) write operation.
 #[derive(Debug, Clone)]
 pub struct WriteHandle {
-    inner: slatedb::WriteHandle,
+    sequence_number: u64,
 }
 
 impl WriteHandle {
-    pub fn seqnum(&self) -> u64 {
-        self.inner.seqnum()
+    pub fn sequence_number(&self) -> u64 {
+        self.sequence_number
     }
+}
 
-    pub fn create_ts(&self) -> i64 {
-        self.inner.create_ts()
-    }
+pub fn write_handle(sequence_number: u64) -> WriteHandle {
+    WriteHandle { sequence_number }
 }
 
 /// Generic ordered iterator of keys in the store (not complete).
@@ -202,7 +203,7 @@ pub trait Tx: Send + Sync + 'static {
     /// Create a KeyValueIterator with an arbitrary start key prefix
     async fn new_prefix_iterator(&self, prefix: &[u8]) -> Result<Box<dyn KeyValueIterator>, Error>;
 
-    async fn commit(self: Box<Self>) -> Result<(), Error>;
+    async fn commit(self: Box<Self>) -> Result<Option<WriteHandle>, Error>;
 
     fn discard(self: Box<Self>);
 }
@@ -216,7 +217,7 @@ pub trait KeyValueStore: Send + Sync + 'static {
     /// [`Tx::discard`] after use to ensure any resources are cleaned up.
     async fn begin(&self, mutating: bool) -> Result<Box<dyn Tx>, Error>;
 
-    async fn update<F>(&self, f: F) -> Result<(), Error>
+    async fn update<F>(&self, f: F) -> Result<Option<WriteHandle>, Error>
     where
         F: for<'a> FnOnce(&'a dyn Tx) -> BoxFuture<'a, Result<(), Error>> + Send + 'static;
 
@@ -234,6 +235,9 @@ pub trait KeyValueStore: Send + Sync + 'static {
     async fn merge(&self, key: &[u8], operand: &[u8]) -> Result<Option<WriteHandle>, Error>;
 
     /// Forcibly write data to underlying storage.
+    /// Don't confuse this with Redis' SYNC command;
+    /// Invar will likely never implement that since
+    /// clustering is not a project goal
     async fn sync(&self) -> Result<(), Error>;
 
     /// Drop all keys in the entire key value store.
@@ -242,4 +246,6 @@ pub trait KeyValueStore: Send + Sync + 'static {
     /// Drop all keys in the key value store starting with the specified
     /// prefix.
     async fn drop_prefix(&self, prefix: &[u8]) -> Result<(), Error>;
+
+    async fn await_until(&self, handle: WriteHandle, duration: Duration) -> Result<bool, Error>;
 }
