@@ -187,7 +187,22 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
             conn::sync()
         }
         b"wait" => {
-            conn::wait()
+            if args.len() != 3 {
+                return error_op(session, "ERR wrong number of arguments for 'wait' command");
+            }
+            let Some(numreplicas) = parse_i64(&args[1]) else {
+                return error_op(session, "ERR value is not an integer or out of range");
+            };
+            if numreplicas < 0 {
+                return error_op(session, "ERR numreplicas should be greater or equal to 0");
+            }
+            let Some(timeout) = parse_i64(&args[2]) else {
+                return error_op(session, "ERR value is not an integer or out of range");
+            };
+            if timeout < 0 {
+                return error_op(session, "ERR timeout is negative");
+            }
+            conn::wait(Duration::from_millis(timeout as u64), session)
         }
         b"lolwut" => {
             conn::lolwut(conn::VERSION, conn::COMMIT)
@@ -3550,10 +3565,28 @@ mod tests {
                 b"ERR wrong number of arguments for 'client|setname' command"
             ))]
         );
-        // SYNC / PSYNC / WAIT reply +OK.
+        // SYNC / PSYNC reply +OK; WAIT replies the replica count.
         assert_eq!(dispatch(&mut session, &["sync"]).await, vec![ok_resp()]);
         assert_eq!(dispatch(&mut session, &["psync"]).await, vec![ok_resp()]);
-        assert_eq!(dispatch(&mut session, &["wait"]).await, vec![ok_resp()]);
+        // No write to wait for in this session yet, so the single replica
+        // trivially acked.
+        assert_eq!(
+            dispatch(&mut session, &["wait", "1", "0"]).await,
+            vec![int(1)]
+        );
+        // Bad WAIT arguments are rejected up front.
+        assert_eq!(
+            dispatch(&mut session, &["wait"]).await,
+            vec![RespValue::Error(Bytes::from_static(
+                b"ERR wrong number of arguments for 'wait' command"
+            ))]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["wait", "x", "0"]).await,
+            vec![RespValue::Error(Bytes::from_static(
+                b"ERR value is not an integer or out of range"
+            ))]
+        );
         // LOLWUT is the Invar banner.
         assert!(matches!(
             &dispatch(&mut session, &["lolwut"]).await[0],

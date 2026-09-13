@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use bytes::Bytes;
-use kv::kv::{Entry, Error as KvError};
+use kv::kv::{Entry, Error as KvError, WriteHandle};
 
 use crate::common::op::{DbError, DbResult, NoOp, QueuedOp, WireOp};
 use crate::common::registry::WatchRegistry;
@@ -37,7 +37,10 @@ pub enum SessionError {
 /// layout.
 pub struct Session {
     id: u64,
+    /// Current Redis 'db' (keyspace)
     current_db: i32,
+    /// Most recent write operation performed in this session
+    latest_write: Option<WriteHandle>,
     /// Queued ops; empty when not inside a `MULTI` block.
     queue: Vec<QueuedOp>,
     /// True while inside a `MULTI` block.
@@ -69,26 +72,12 @@ fn is_retryable_conflict(outcome: &Result<DbResult, DbError>) -> bool {
 }
 
 impl Session {
+    /// Creates a session with a new pub/sub registry. Only useful for testing.
     pub fn new(store: Arc<dyn RedisStore>, registry: Arc<WatchRegistry>) -> Self {
-        Self {
-            id: NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed),
-            current_db: 0,
-            queue: Vec::new(),
-            in_multi: false,
-            dirty_exec: false,
-            in_script: false,
-            should_close: false,
-            client_name: String::new(),
-            lib_name: String::new(),
-            lib_ver: String::new(),
-            peer_addr: None,
-            store,
-            registry,
-            pubsub: Arc::new(PubSubRegistry::new()),
-        }
+        Self::new_with_pubsub(store, registry, Arc::new(PubSubRegistry::new()))
     }
 
-    /// Creates a session with an explicit, shared pub/sub registry.  Used by
+    /// Creates a session with an explicit, shared pub/sub registry. Used by
     /// the listener so all connections on the same server share one registry.
     pub fn new_with_pubsub(
         store: Arc<dyn RedisStore>,
@@ -98,6 +87,7 @@ impl Session {
         Self {
             id: NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed),
             current_db: 0,
+            latest_write: None,
             queue: Vec::new(),
             in_multi: false,
             dirty_exec: false,
@@ -121,6 +111,11 @@ impl Session {
     /// The current Redis DB (namespace) number for this connection.
     pub fn current_db(&self) -> i32 {
         self.current_db
+    }
+
+    /// Most recent write operation performed in this session, if it exists.
+    pub fn latest_write(&self) -> Option<WriteHandle> {
+        self.latest_write.clone()
     }
 
     /// Switches this connection to another Redis DB.
@@ -425,8 +420,9 @@ impl Session {
 
             // Commit the tx
             match tx.commit().await {
-                Ok(()) => {
+                Ok(handle) => {
                     tracing::debug!(ops = outcomes.len(), "tx committed");
+                    self.latest_write = handle;
                     break 'commit;
                 }
                 Err(e) => match e {

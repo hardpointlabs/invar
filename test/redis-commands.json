@@ -2888,5 +2888,13 @@
     "type": "error",
     "version": "5.0.0",
     "description": "XINFO STREAM on missing key returns error"
+  },
+  {
+    "name": "WAIT replicas > 1",
+    "command": ["WAIT", "2", "250"],
+    "expected": 1,
+    "type": "integer",
+    "version": "5.0.0",
+    "description": "WAIT ignores replica arg"
   }
 ]

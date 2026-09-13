@@ -13,6 +13,7 @@ metrics = "0.24"
 slatedb = { version = "0.16", features = ["aws", "foyer", "compression"] }
 slatedb-common = "0.16"
 thiserror = "2.0.20"
+tokio = { version = "1", features = ["time"] }
 
 [dev-dependencies]
 tempfile = "3"
