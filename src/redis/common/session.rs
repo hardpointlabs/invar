@@ -324,6 +324,13 @@ impl Session {
         prefix
     }
 
+    /// The raw prefix for internal (private) keys in the current Redis DB.
+    pub fn private_prefix(&self) -> Vec<u8> {
+        let mut prefix = INTERNAL_PREFIX.to_vec();
+        prefix.extend_from_slice(&self.prefix());
+        prefix
+    }
+
     /// Derives the full storage key for a public key in the current DB.
     pub fn public_key(&self, key: &[u8]) -> Vec<u8> {
         let mut derived = self.prefix();
