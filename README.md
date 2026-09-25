@@ -23,10 +23,10 @@ Check out the [docs](https://docs.hardpoint.dev/guides/invar) for more details.
 
 - **Redis wire protocol compatibility:** Works with your existing code. Compatibility is verified continuously against a suite of integration tests for the command spec. See the [compatibility guide](https://docs.hardpoint.dev/guides/invar/appendix/redis-tm-command-support) for more details
 - **Diskless by design:** Invar uses [SlateDB](https://slatedb.io) under the hood. Data lives in S3. No replication issues, capacity planning, e.t.c
-- **Defined transactional guarantees:** Invar targets snapshot isolation, with merge support incubating
-- **Single binary:** One process, no cluster coordination
+- **Defined transactional guarantees:** Snapshot isolation (SI) by default, with opt-in SSI
+- **Single binary:** Simple ops with enterprise options for HA & sharding
 - **Real local dev experience:** Can persist to disk for simplified local dev & CI, without an S3 service dependency
-- **Apache 2.0:** Committed to open source
+- **Apache 2.0:**  Open source, free to use commercially
 
 ### Architecture
 
