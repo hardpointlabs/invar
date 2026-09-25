@@ -199,12 +199,14 @@ pub fn flushall(session: &Session) -> QueuedOp {
 struct FlushDbOp {
     store: Arc<dyn RedisStore>,
     prefix: Bytes,
+    private_prefix: Bytes,
 }
 
 impl DbOp for FlushDbOp {
     fn run<'a>(&'a self, _tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
         Box::pin(async move {
             self.store.drop_prefix(self.prefix.as_ref()).await?;
+            self.store.drop_prefix(self.private_prefix.as_ref()).await?;
             Ok(Box::new(()) as DbResult)
         })
     }
@@ -212,7 +214,11 @@ impl DbOp for FlushDbOp {
 
 pub fn flushdb(session: &Session) -> QueuedOp {
     QueuedOp {
-        db_op: Box::new(FlushDbOp { store: session.store(), prefix: Bytes::from(session.prefix()) }),
+        db_op: Box::new(FlushDbOp {
+            store: session.store(),
+            prefix: Bytes::from(session.prefix()),
+            private_prefix: Bytes::from(session.private_prefix()),
+        }),
         wire_op: Box::new(DefaultWire),
         is_mutating: false,
         allowed_in_tx: false,
