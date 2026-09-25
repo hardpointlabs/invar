@@ -2245,6 +2245,47 @@
     "setup": [["DEL", "bzpopmax_immediate"], ["ZADD", "bzpopmax_immediate", "1", "member1"]]
   },
   {
+    "name": "WATCH returns OK",
+    "command": ["WATCH", "watch_key1"],
+    "expected": "OK",
+    "type": "simple_string",
+    "version": "1.3.0",
+    "description": "WATCH on a key returns +OK"
+  },
+  {
+    "name": "WATCH multiple keys returns OK",
+    "command": ["WATCH", "watch_key1", "watch_key2"],
+    "expected": "OK",
+    "type": "simple_string",
+    "version": "1.3.0",
+    "description": "WATCH accepts multiple keys in a single call"
+  },
+  {
+    "name": "UNWATCH returns OK",
+    "command": ["UNWATCH"],
+    "expected": "OK",
+    "type": "simple_string",
+    "version": "1.3.0",
+    "description": "UNWATCH clears all watched keys and returns +OK"
+  },
+  {
+    "name": "WATCH inside MULTI is not allowed",
+    "command": ["WATCH", "some_key"],
+    "expected": {"error": true},
+    "type": "error",
+    "version": "1.3.0",
+    "description": "WATCH cannot be called from inside a MULTI block",
+    "setup": [["MULTI"]]
+  },
+  {
+    "name": "DISCARD after WATCH-inside-MULTI test",
+    "command": ["DISCARD"],
+    "expected": "OK",
+    "type": "simple_string",
+    "version": "1.3.0",
+    "description": "Clean up the MULTI block left by the previous test"
+  },
+  {
     "name": "MULTI with empty command set returns empty array",
     "command": ["EXEC"],
     "expected": [],

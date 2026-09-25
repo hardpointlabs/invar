@@ -511,6 +511,7 @@ pub fn reserve(
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -526,6 +527,7 @@ pub fn add(session: &Session, key: &[u8], item: &[u8]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -541,6 +543,7 @@ pub fn exists(session: &Session, key: &[u8], item: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -556,6 +559,7 @@ pub fn madd(session: &Session, key: &[u8], items: &[Bytes]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -571,6 +575,7 @@ pub fn mexists(session: &Session, key: &[u8], items: &[Bytes]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -598,6 +603,7 @@ pub fn insert(session: &Session, key: &[u8], info: InsertInfo) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -611,6 +617,7 @@ pub fn info(session: &Session, key: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -928,13 +935,14 @@ impl WireOp for InfoWire {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kv::kv::TxIsolation;
     use crate::testutil::test_session;
 
     /// Runs a batch of ops through a single writable transaction and renders
     /// each reply (the unit-test equivalent of `kvs.Update` in the Go tests).
     async fn run_ops(session: &Session, ops: Vec<QueuedOp>) -> Vec<RespValue> {
         let store = session.store();
-        let tx = store.begin(true).await.expect("write tx");
+        let tx = store.begin(true, TxIsolation::Snapshot).await.expect("write tx");
         let mut replies = Vec::with_capacity(ops.len());
         for op in ops {
             let outcome = op.db_op.run(&*tx).await;
@@ -951,7 +959,7 @@ mod tests {
         R: Send + 'static,
     {
         let store = session.store();
-        let tx = store.begin(false).await.expect("read tx");
+        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
         let value = f(&*tx).await;
         drop(tx);
         value
@@ -1227,7 +1235,7 @@ mod tests {
 
         // Add 20 items — enough to overflow the tiny initial filter.
         let store = session.store();
-        let tx = store.begin(true).await.expect("write tx");
+        let tx = store.begin(true, TxIsolation::Snapshot).await.expect("write tx");
         let meta_key = session.public_key(b"bf");
         let page_prefix = session.private_key(b"bf");
         for i in 0u8..20 {
@@ -1266,7 +1274,7 @@ mod tests {
         run_ops(&session, vec![reserve(&session, b"bf", 0.01, 5, 2, true)]).await;
 
         let store = session.store();
-        let tx = store.begin(true).await.expect("write tx");
+        let tx = store.begin(true, TxIsolation::Snapshot).await.expect("write tx");
         let meta_key = session.public_key(b"bf");
         let page_prefix = session.private_key(b"bf");
         for i in 0u8..100 {
@@ -1436,7 +1444,7 @@ mod tests {
         let items = pseudo_random_items(40);
 
         let store = session.store();
-        let tx = store.begin(true).await.expect("write tx");
+        let tx = store.begin(true, TxIsolation::Snapshot).await.expect("write tx");
         let meta_key = session.public_key(b"bf");
         let page_prefix = session.private_key(b"bf");
         // First add per item is new (1); a repeat in the same session must be a
@@ -1455,7 +1463,7 @@ mod tests {
         }
         tx.commit().await.expect("commit");
 
-        let read_tx = store.begin(false).await.expect("read tx");
+        let read_tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
         for item in &items {
             let present = exists_one(&*read_tx, &meta_key, &page_prefix, item)
                 .await
@@ -1480,7 +1488,7 @@ mod tests {
         let page_prefix = session.private_key(b"bf");
         let item = |i: usize| vec![(i >> 8) as u8, i as u8, (i & 0xff) as u8];
         {
-            let tx = store.begin(true).await.expect("write tx");
+            let tx = store.begin(true, TxIsolation::Snapshot).await.expect("write tx");
             for i in 0..n {
                 add_one(&*tx, &meta_key, &page_prefix, &item(i))
                     .await
@@ -1489,7 +1497,7 @@ mod tests {
             tx.commit().await.expect("commit");
         }
 
-        let tx = store.begin(false).await.expect("read tx");
+        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
         let mut false_positives = 0usize;
         for i in n..n * 2 {
             if exists_one(&*tx, &meta_key, &page_prefix, &item(i))

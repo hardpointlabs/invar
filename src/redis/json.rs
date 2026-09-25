@@ -21,6 +21,7 @@ use bytes::Bytes;
 use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
+use smallvec::{smallvec, SmallVec};
 use crate::common::session::Session;
 use crate::common::ValueType;
 use crate::resp::RespValue;
@@ -1025,12 +1026,14 @@ pub(crate) fn set(
 ) -> QueuedOp {
     let key = session.public_key(key);
     let path = String::from_utf8_lossy(path).into_owned();
+    let key_str = String::from_utf8_lossy(&key).into_owned();
     QueuedOp {
         db_op: Box::new(SetOp { key, path, value, nx, xx }),
         wire_op: Box::new(JsonWire),
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(smallvec![key_str]),
     }
 }
 
@@ -1094,6 +1097,7 @@ pub fn get(session: &Session, key: &[u8], paths: Vec<String>) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -1146,6 +1150,7 @@ pub fn del(session: &Session, key: &[u8], paths: Vec<String>) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -1208,6 +1213,7 @@ pub fn json_type(session: &Session, key: &[u8], path: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -1246,6 +1252,7 @@ pub(crate) fn arr_append(session: &Session, key: &[u8], path: &[u8], values: Vec
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -1286,6 +1293,7 @@ pub(crate) fn arr_index(session: &Session, key: &[u8], path: &[u8], value: JValu
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -1323,6 +1331,7 @@ pub fn arr_len(session: &Session, key: &[u8], path: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -1362,6 +1371,7 @@ pub fn num_incr_by(session: &Session, key: &[u8], path: &[u8], delta: f64) -> Qu
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -1402,6 +1412,7 @@ pub fn num_mult_by(session: &Session, key: &[u8], path: &[u8], factor: f64) -> Q
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -1441,6 +1452,7 @@ pub fn obj_keys(session: &Session, key: &[u8], path: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -1478,6 +1490,7 @@ pub fn obj_len(session: &Session, key: &[u8], path: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -1517,6 +1530,7 @@ pub fn str_append(session: &Session, key: &[u8], path: &[u8], suffix: String) ->
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -1556,6 +1570,7 @@ pub fn str_len(session: &Session, key: &[u8], path: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -1586,12 +1601,14 @@ impl DbOp for StrLenOp {
 /// `JSON.MGET key [key ...] path`.
 pub fn mget(session: &Session, keys: Vec<Vec<u8>>, path: String) -> QueuedOp {
     let keys: Vec<Vec<u8>> = keys.into_iter().map(|k| session.public_key(&k)).collect();
+    let sv_keys: SmallVec<[String; 2]> = keys.iter().map(|k| String::from_utf8_lossy(k).into_owned()).collect();
     QueuedOp {
         db_op: Box::new(MGetOp { keys, path }),
         wire_op: Box::new(JsonWire),
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(sv_keys),
     }
 }
 
@@ -1634,6 +1651,7 @@ pub fn resp(session: &Session, key: &[u8], path: String) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -1676,6 +1694,7 @@ pub fn clear(session: &Session, key: &[u8], path: &[u8]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -1739,6 +1758,7 @@ pub fn arr_pop(session: &Session, key: &[u8], path: &[u8], idx: i64) -> QueuedOp
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -1798,6 +1818,7 @@ pub fn arr_trim(session: &Session, key: &[u8], path: &[u8], start: i64, stop: i6
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -1863,6 +1884,7 @@ pub(crate) fn arr_insert(session: &Session, key: &[u8], path: &[u8], index: i64,
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 

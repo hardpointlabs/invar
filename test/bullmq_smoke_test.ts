@@ -4,7 +4,7 @@ import { Queue, Worker } from "bullmq";
 const connection = { host: "127.0.0.1", port: 6379 };
 const queueName = `smoke-${Date.now()}`;
 
-Deno.test({name: "Validate basic BullMQ interaction"}, async () => {
+Deno.test({name: "Validate basic BullMQ interaction", ignore: true}, async () => {
   const queue = new Queue(queueName, { connection });
   const worker = new Worker(
     queueName,

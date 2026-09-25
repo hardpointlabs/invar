@@ -165,6 +165,19 @@ pub fn write_handle(sequence_number: u64) -> WriteHandle {
     WriteHandle { sequence_number }
 }
 
+/// Transaction isolation level requested by the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TxIsolation {
+    /// Snapshot isolation with write-write conflict detection. The default for
+    /// most Redis operations.
+    #[default]
+    Snapshot,
+    /// Serializable snapshot isolation (SSI). Used when a `WATCH`-guarded
+    /// `MULTI`/`EXEC` block touches a watched key, so that a concurrent write
+    /// to a watched key is detected and causes `EXEC` to return nil.
+    SerializableSnapshot,
+}
+
 /// Generic ordered iterator of keys in the store (not complete).
 #[async_trait]
 pub trait KeyValueIterator: Send + Sync + 'static {
@@ -215,7 +228,7 @@ pub trait KeyValueStore: Send + Sync + 'static {
 
     /// Create a new manually managed transaction. It's critical to call
     /// [`Tx::discard`] after use to ensure any resources are cleaned up.
-    async fn begin(&self, mutating: bool) -> Result<Box<dyn Tx>, Error>;
+    async fn begin(&self, mutating: bool, isolation: TxIsolation) -> Result<Box<dyn Tx>, Error>;
 
     async fn update<F>(&self, f: F) -> Result<Option<WriteHandle>, Error>
     where

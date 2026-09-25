@@ -144,6 +144,7 @@ pub fn info() -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: None,
     }
 }
 
@@ -167,6 +168,7 @@ pub fn save(session: &Session) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: false,
         abort_in_tx: false,
+        keys: None,
     }
 }
 
@@ -190,6 +192,7 @@ pub fn flushall(session: &Session) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: false,
         abort_in_tx: false,
+        keys: None,
     }
 }
 
@@ -214,6 +217,7 @@ pub fn flushdb(session: &Session) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: false,
         abort_in_tx: false,
+        keys: None,
     }
 }
 
@@ -376,6 +380,7 @@ pub fn hello(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: None,
     }
 }
 
@@ -442,6 +447,7 @@ pub fn client(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: None,
     }
 }
 

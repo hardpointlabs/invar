@@ -18,6 +18,7 @@ use bytes::Bytes;
 use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
+use smallvec::SmallVec;
 use crate::common::session::Session;
 use crate::common::ValueType;
 use crate::resp::RespValue;
@@ -322,6 +323,7 @@ pub fn pfadd(session: &Session, key: &[u8], elements: &[Bytes]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -337,6 +339,7 @@ pub fn pfcount(session: &Session, keys: &[Bytes]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.keys_sv(keys)),
     }
 }
 
@@ -353,6 +356,12 @@ pub fn pfmerge(session: &Session, dest: &[u8], sources: &[Bytes]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some({
+            let mut ks = SmallVec::<[String; 2]>::new();
+            ks.push(String::from_utf8_lossy(&session.public_key(dest)).into_owned());
+            ks.extend(sources.iter().map(|k| String::from_utf8_lossy(&session.public_key(k)).into_owned()));
+            ks
+        }),
     }
 }
 
@@ -540,6 +549,7 @@ impl WireOp for CountWire {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kv::kv::TxIsolation;
     use crate::testutil::test_session;
 
     fn expect_int(reply: &RespValue) -> i64 {
@@ -557,7 +567,7 @@ mod tests {
     /// renders the reply.
     async fn exec(session: &Session, op: QueuedOp) -> RespValue {
         let store = session.store();
-        let tx = store.begin(op.is_mutating).await.expect("tx");
+        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -568,7 +578,7 @@ mod tests {
     /// Reads the raw stored value at key (any metadata), or None if missing.
     async fn stored(session: &Session, key: &[u8]) -> Option<Vec<u8>> {
         let store = session.store();
-        let tx = store.begin(false).await.expect("read tx");
+        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
         match tx.get(&session.public_key(key)).await {
             Ok(item) => Some(item.value().to_vec()),
             Err(KvError::KeyNotFound) => None,

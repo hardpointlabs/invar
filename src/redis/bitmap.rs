@@ -14,6 +14,7 @@ use bytes::Bytes;
 use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
+use smallvec::SmallVec;
 use crate::common::session::Session;
 use crate::common::ValueType;
 use crate::resp::RespValue;
@@ -94,6 +95,7 @@ pub fn set_bit(session: &Session, key: &[u8], offset: i64, value: i64) -> Queued
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -151,6 +153,7 @@ pub fn get_bit(session: &Session, key: &[u8], offset: i64) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -209,6 +212,7 @@ pub fn bit_count(
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -324,6 +328,7 @@ pub fn bit_pos(
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -433,6 +438,12 @@ pub fn bit_op(session: &Session, dest_key: &[u8], op: BitOpType, src_keys: &[&[u
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some({
+            let mut ks = SmallVec::<[String; 2]>::new();
+            ks.push(String::from_utf8_lossy(&session.public_key(dest_key)).into_owned());
+            ks.extend(src_keys.iter().map(|k| String::from_utf8_lossy(&session.public_key(k)).into_owned()));
+            ks
+        }),
     }
 }
 
@@ -608,12 +619,13 @@ impl WireOp for IntWire {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kv::kv::TxIsolation;
     use crate::testutil::test_session;
 
     /// Runs a queued op through its own transaction and renders the reply.
     async fn exec(session: &Session, op: QueuedOp) -> RespValue {
         let store = session.store();
-        let tx = store.begin(op.is_mutating).await.expect("tx");
+        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -660,7 +672,7 @@ mod tests {
         );
         // Final bytes: 0x00 (bit 0 cleared), 0x01 (bit 15 = last bit of byte 1).
         let store = session.store();
-        let tx = store.begin(false).await.unwrap();
+        let tx = store.begin(false, TxIsolation::Snapshot).await.unwrap();
         let item = tx.get(&session.public_key(b"k")).await.unwrap();
         assert_eq!(item.value(), &[0x00, 0x01]);
         drop(tx);
@@ -849,7 +861,7 @@ mod tests {
 
     async fn set_value(session: &Session, key: &[u8], value: &[u8]) {
         let store = session.store();
-        let tx = store.begin(true).await.expect("tx");
+        let tx = store.begin(true, TxIsolation::Snapshot).await.expect("tx");
         tx.set(Entry::new(session.public_key(key), value.to_vec()).metadata(TYPE_STRING))
             .expect("set");
         tx.commit().await.expect("commit");
@@ -857,7 +869,7 @@ mod tests {
 
     async fn read_value(session: &Session, key: &[u8]) -> Vec<u8> {
         let store = session.store();
-        let tx = store.begin(false).await.unwrap();
+        let tx = store.begin(false, TxIsolation::Snapshot).await.unwrap();
         let item = tx.get(&session.public_key(key)).await.unwrap();
         let v = item.value().to_vec();
         drop(tx);

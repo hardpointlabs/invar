@@ -19,6 +19,7 @@ use kv::kv::{BoxFuture, Error as KvError, Tx};
 use crate::resp;
 use crate::resp::RespValue;
 use crate::common::registry::Claim;
+use smallvec::SmallVec;
 
 /// Opaque result of a [`DbOp`], analogous to Go's `any`. The corresponding
 /// [`WireOp`] downcasts it to the concrete type the command produced.
@@ -117,6 +118,8 @@ pub struct QueuedOp {
     /// unknown-command failures produce the correct error reply and trigger
     /// `EXECABORT`, matching Redis semantics.
     pub abort_in_tx: bool,
+    /// Keys this op reads or writes, for WATCH intersection at EXEC time.
+    pub keys: Option<SmallVec<[String; 2]>>,
 }
 
 /// A [`DbOp`] with no database effect, used for wire-only commands such as
@@ -132,5 +135,6 @@ pub fn wire_only_op(wire_op: Box<dyn WireOp>, allowed_in_tx: bool) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx,
         abort_in_tx: false,
+        keys: None,
     }
 }

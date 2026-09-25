@@ -33,6 +33,7 @@ use bytes::Bytes;
 use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
+use smallvec::{smallvec, SmallVec};
 use crate::common::session::Session;
 use crate::common::ValueType;
 use crate::resp::RespValue;
@@ -234,6 +235,7 @@ pub fn sadd(session: &Session, key: &[u8], members: &[Bytes]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -250,6 +252,7 @@ pub fn srem(session: &Session, key: &[u8], members: &[Bytes]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -263,6 +266,7 @@ pub fn scard(session: &Session, key: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -277,6 +281,7 @@ pub fn smembers(session: &Session, key: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -292,6 +297,7 @@ pub fn sismember(session: &Session, key: &[u8], member: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -306,6 +312,7 @@ pub fn spop(session: &Session, key: &[u8]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -323,6 +330,7 @@ pub fn srandmember(session: &Session, key: &[u8], count: i64) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -341,6 +349,7 @@ pub fn smove(session: &Session, src: &[u8], dst: &[u8], member: &[u8]) -> Queued
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(smallvec![String::from_utf8_lossy(&session.public_key(src)).into_owned(), String::from_utf8_lossy(&session.public_key(dst)).into_owned()]),
     }
 }
 
@@ -353,6 +362,7 @@ pub fn sdiff(session: &Session, keys: &[Bytes]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.keys_sv(keys)),
     }
 }
 
@@ -364,6 +374,7 @@ pub fn sinter(session: &Session, keys: &[Bytes]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.keys_sv(keys)),
     }
 }
 
@@ -375,6 +386,7 @@ pub fn sunion(session: &Session, keys: &[Bytes]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.keys_sv(keys)),
     }
 }
 
@@ -387,6 +399,12 @@ pub fn sdiffstore(session: &Session, dest: &[u8], keys: &[Bytes]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some({
+            let mut ks = SmallVec::<[String; 2]>::new();
+            ks.push(String::from_utf8_lossy(&session.public_key(dest)).into_owned());
+            ks.extend(keys.iter().map(|k| String::from_utf8_lossy(&session.public_key(k)).into_owned()));
+            ks
+        }),
     }
 }
 
@@ -399,6 +417,12 @@ pub fn sinterstore(session: &Session, dest: &[u8], keys: &[Bytes]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some({
+            let mut ks = SmallVec::<[String; 2]>::new();
+            ks.push(String::from_utf8_lossy(&session.public_key(dest)).into_owned());
+            ks.extend(keys.iter().map(|k| String::from_utf8_lossy(&session.public_key(k)).into_owned()));
+            ks
+        }),
     }
 }
 
@@ -411,6 +435,12 @@ pub fn sunionstore(session: &Session, dest: &[u8], keys: &[Bytes]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some({
+            let mut ks = SmallVec::<[String; 2]>::new();
+            ks.push(String::from_utf8_lossy(&session.public_key(dest)).into_owned());
+            ks.extend(keys.iter().map(|k| String::from_utf8_lossy(&session.public_key(k)).into_owned()));
+            ks
+        }),
     }
 }
 
@@ -441,6 +471,7 @@ pub fn sscan(
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -1174,6 +1205,7 @@ impl WireOp for SScanWire {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kv::kv::TxIsolation;
     use crate::testutil::test_session;
 
     /// Runs one op through its own transaction and commits if it mutates,
@@ -1181,7 +1213,7 @@ mod tests {
     /// `kvs.Update`/`kvs.Read` calls).
     async fn exec(session: &Session, op: QueuedOp) -> RespValue {
         let store = session.store();
-        let tx = store.begin(op.is_mutating).await.expect("tx");
+        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -1192,7 +1224,7 @@ mod tests {
     /// Loads the members stored under `key` for direct inspection.
     async fn load(session: &Session, key: &[u8]) -> HashSet<Vec<u8>> {
         let store = session.store();
-        let tx = store.begin(false).await.expect("read tx");
+        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
         let public_key = session.public_key(key);
         let node_prefix = session.private_key(key);
         let members = load_set_members(&*tx, &public_key, &node_prefix)
