@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
+use kv::kv::{TxIsolation, BoxFuture, Entry, Error as KvError, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use crate::common::session::Session;
@@ -380,6 +380,7 @@ pub fn xadd(
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -393,6 +394,7 @@ pub fn xlen(session: &Session, key: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -417,6 +419,7 @@ pub fn xrange(
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -441,6 +444,7 @@ pub fn xrevrange(
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -480,6 +484,7 @@ pub fn xread(
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.keys_sv(keys)),
     }
 }
 
@@ -495,6 +500,7 @@ pub fn xdel(session: &Session, key: &[u8], ids: &[StreamEntryId]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -511,6 +517,7 @@ pub fn xtrim_maxlen(session: &Session, key: &[u8], max_len: u64) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -531,6 +538,7 @@ pub fn xtrim_minid(
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -549,6 +557,7 @@ pub fn xsetid(
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -562,6 +571,7 @@ pub fn xinfo_stream(session: &Session, key: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -943,7 +953,7 @@ impl DbOp for XReadOp {
         let count = self.count;
         let timeout = self.timeout;
         Box::pin(async move {
-            let own_tx = store.begin(false).await.map_err(DbError::Kv)?;
+            let own_tx = store.begin(false, TxIsolation::Snapshot).await.map_err(DbError::Kv)?;
             let resolved = match resolve_read_ids(&*own_tx, &streams, &ids).await {
                 Ok(r) => r,
                 Err(e) => {
@@ -980,7 +990,7 @@ impl DbOp for XReadOp {
 
             // Re-read with a fresh transaction: the wake is delivered only
             // after the writer's XADD committed, so the entry is visible.
-            let fresh_tx = store.begin(false).await.map_err(DbError::Kv)?;
+            let fresh_tx = store.begin(false, TxIsolation::Snapshot).await.map_err(DbError::Kv)?;
             let results = read_streams(&*fresh_tx, &streams, &resolved, count).await?;
             tracing::debug!(
                 resolved = ?resolved.iter().map(|o| o.map(|i| i.display())).collect::<Vec<_>>(),
@@ -1380,7 +1390,7 @@ mod tests {
 
     async fn exec(session: &Session, op: QueuedOp) -> RespValue {
         let store = session.store();
-        let tx = store.begin(op.is_mutating).await.expect("tx");
+        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -1391,7 +1401,7 @@ mod tests {
     /// Like [`exec`] but takes owned data so it can be spawned as a `'static`
     /// task (needed for blocking-read tests).
     async fn exec_owned(op: QueuedOp, store: Arc<dyn RedisStore>) -> RespValue {
-        let tx = store.begin(op.is_mutating).await.expect("tx");
+        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -2085,7 +2095,7 @@ mod tests {
             &[Bytes::from_static(b"f"), Bytes::from_static(b"v")],
         );
         let store2 = writer.store();
-        let tx = store2.begin(true).await.expect("tx");
+        let tx = store2.begin(true, TxIsolation::Snapshot).await.expect("tx");
         let outcome = add.db_op.run(&*tx).await.expect("XADD ok");
         tx.commit().await.expect("commit");
         add.wire_op.reply(Ok(outcome));

@@ -7,11 +7,13 @@
 //! fields. The only process-shared state is the [`WatchRegistry`], which
 //! guards itself.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use bytes::Bytes;
-use kv::kv::{Entry, Error as KvError, WriteHandle};
+use kv::kv::{Entry, Error as KvError, TxIsolation, WriteHandle};
+use smallvec::{smallvec, SmallVec};
 
 use crate::common::op::{DbError, DbResult, NoOp, QueuedOp, WireOp};
 use crate::common::registry::WatchRegistry;
@@ -52,6 +54,12 @@ pub struct Session {
     /// Set by `QUIT`: the listener should close the connection after the
     /// replies are flushed.
     should_close: bool,
+    /// Keys registered via `WATCH` for this session, along with the value each
+    /// key held at the time `WATCH` was called. At `EXEC` time the current
+    /// value is compared against this snapshot; a mismatch means the key was
+    /// modified between `WATCH` and `EXEC` and the transaction is aborted with
+    /// a nil reply.
+    watched_keys: HashMap<String, Option<Vec<u8>>>,
     /// The client-reported connection name, set via `CLIENT SETNAME` or
     /// `HELLO SETNAME`.
     client_name: String,
@@ -93,6 +101,7 @@ impl Session {
             dirty_exec: false,
             in_script: false,
             should_close: false,
+            watched_keys: HashMap::new(),
             client_name: String::new(),
             lib_name: String::new(),
             lib_ver: String::new(),
@@ -184,6 +193,7 @@ impl Session {
         if discard {
             self.queue.clear();
             self.dirty_exec = false;
+            self.watched_keys.clear();
         }
         Ok(())
     }
@@ -233,6 +243,63 @@ impl Session {
     /// `QUIT`).
     pub fn should_close(&self) -> bool {
         self.should_close
+    }
+
+    /// Snapshots the current value of each raw user key and records them in
+    /// the session-local WATCH set. Called by the `WATCH` command handler.
+    pub async fn snapshot_and_watch(&mut self, raw_keys: &[Bytes]) {
+        let Ok(tx) = self.store.begin(false, TxIsolation::Snapshot).await else {
+            // On store failure, record keys with None (unknown snapshot). The
+            // pre-check at EXEC time will then see the real value and may abort.
+            for k in raw_keys {
+                let sk = String::from_utf8_lossy(&self.public_key(k)).into_owned();
+                self.watched_keys.entry(sk).or_insert(None);
+            }
+            return;
+        };
+        for k in raw_keys {
+            let sk = String::from_utf8_lossy(&self.public_key(k)).into_owned();
+            let value = match tx.get(sk.as_bytes()).await {
+                Ok(entry) => Some(entry.value().to_vec()),
+                Err(KvError::KeyNotFound) => None,
+                Err(_) => None,
+            };
+            self.watched_keys.insert(sk, value);
+        }
+        // Read-only — drop the transaction without committing.
+    }
+
+    /// Clears the session-local WATCH set.
+    pub fn unwatch(&mut self) {
+        self.watched_keys.clear();
+    }
+
+    /// Reports whether any of the queued ops' keys intersect with the current
+    /// WATCH set. When true, the enclosing transaction must use
+    /// `SerializableSnapshot` isolation.
+    fn needs_ssi(&self) -> bool {
+        if self.watched_keys.is_empty() {
+            return false;
+        }
+        self.queue.iter().any(|op| {
+            op.keys.as_ref().is_some_and(|ks| {
+                ks.iter().any(|k| self.watched_keys.contains_key(k))
+            })
+        })
+    }
+
+    /// Returns a single-element SmallVec holding the storage key for `key`.
+    /// Used by QueuedOp constructors to populate the `keys` field.
+    pub fn key_sv(&self, key: &[u8]) -> SmallVec<[String; 2]> {
+        smallvec![String::from_utf8_lossy(&self.public_key(key)).into_owned()]
+    }
+
+    /// Returns a SmallVec of storage keys for a slice of user-provided keys.
+    /// Used by multi-key QueuedOp constructors to populate the `keys` field.
+    pub fn keys_sv(&self, keys: &[Bytes]) -> SmallVec<[String; 2]> {
+        keys.iter()
+            .map(|k| String::from_utf8_lossy(&self.public_key(k)).into_owned())
+            .collect()
     }
 
     /// The shared key-value store for this connection.
@@ -321,6 +388,7 @@ impl Session {
             is_mutating: false,
             allowed_in_tx: true,
         abort_in_tx: false,
+        keys: None,
         })
     }
 
@@ -342,6 +410,7 @@ impl Session {
             // A command failed while queuing, which aborts the whole txn.
             self.queue.clear();
             self.dirty_exec = false;
+            self.watched_keys.clear();
             return vec![RespValue::Error(Bytes::from_static(
                 b"EXECABORT Transaction discarded because of previous errors.",
             ))];
@@ -355,6 +424,11 @@ impl Session {
         }
 
         let mutating = self.needs_writable_tx();
+        let isolation = if self.needs_ssi() {
+            TxIsolation::SerializableSnapshot
+        } else {
+            TxIsolation::Snapshot
+        };
         // Concurrent writer transactions (BullMQ workers claim jobs with
         // overlapping write sets) make the optimistic store return
         // `Error::Conflict` — addStandardJob and friends must not fail.
@@ -366,7 +440,7 @@ impl Session {
         let mut conflict_retries = 0usize;
         'commit: loop {
             // Try to acquire a tx
-            let tx = match self.store.begin(mutating).await {
+            let tx = match self.store.begin(mutating, isolation).await {
                 Ok(tx) => tx,
                 Err(e) => {
                     self.queue.clear();
@@ -376,16 +450,49 @@ impl Session {
 
             outcomes = Vec::with_capacity(self.queue.len());
 
+            // WATCH pre-check: verify every watched key still holds the value
+            // it had at WATCH time. Reading inside the SSI transaction registers
+            // a readset entry, so a concurrent write to a watched key causes the
+            // later commit to fail with Conflict — covering both the
+            // "already-committed before our EXEC started" case (snapshot mismatch
+            // detected here) and the "committed while our EXEC ran" case (SSI
+            // conflict at commit time).
+            if batch && isolation == TxIsolation::SerializableSnapshot {
+                for (key, expected) in &self.watched_keys {
+                    let current = match tx.get(key.as_bytes()).await {
+                        Ok(entry) => Some(entry.value().to_vec()),
+                        Err(KvError::KeyNotFound) => None,
+                        Err(_) => {
+                            self.queue.clear();
+                            self.watched_keys.clear();
+                            return vec![RespValue::Array(None)];
+                        }
+                    };
+                    if current != *expected {
+                        self.queue.clear();
+                        self.watched_keys.clear();
+                        return vec![RespValue::Array(None)];
+                    }
+                }
+            }
+
             // Apply all our commands to the acquired tx
             for i in 0..self.queue.len() {
                 let outcome = self.queue[i].db_op.run(&*tx).await;
 
                 if is_retryable_conflict(&outcome) {
+                    release_claims(&self.queue, &outcomes);
+                    // Under SSI (WATCH-guarded transaction): a conflict means a
+                    // watched key changed — return nil to the client, never retry.
+                    if isolation == TxIsolation::SerializableSnapshot {
+                        self.queue.clear();
+                        self.watched_keys.clear();
+                        return vec![RespValue::Array(None)];
+                    }
                     // Not a command-level error -- the whole snapshot this attempt was
                     // built on is stale. Abandon this attempt (batch or not) and retry
                     // the entire queue from a fresh transaction, same as a commit-time
                     // conflict.
-                    release_claims(&self.queue, &outcomes);
                     conflict_retries += 1;
                     if conflict_retries >= MAX_CONFLICT_RETRIES {
                         metrics::counter!("invar_conflict_failures").increment(1);
@@ -424,6 +531,14 @@ impl Session {
                     tracing::debug!(ops = outcomes.len(), "tx committed");
                     self.latest_write = handle;
                     break 'commit;
+                }
+                Err(KvError::Conflict) if isolation == TxIsolation::SerializableSnapshot => {
+                    // Under SSI (WATCH-guarded transaction): a commit conflict means
+                    // a watched key was concurrently modified — EXEC returns nil.
+                    release_claims(&self.queue, &outcomes);
+                    self.queue.clear();
+                    self.watched_keys.clear();
+                    return vec![RespValue::Array(None)];
                 }
                 Err(e) => match e {
                     KvError::Conflict if conflict_retries < MAX_CONFLICT_RETRIES => {
@@ -465,6 +580,11 @@ impl Session {
         };
 
         self.queue.clear();
+        if batch {
+            // Redis clears the WATCH set after every EXEC (or DISCARD), whether
+            // the transaction committed or not.
+            self.watched_keys.clear();
+        }
         replies
     }
 
@@ -569,6 +689,59 @@ mod tests {
         assert!(session.is_dirty());
     }
 
+    fn key_str(session: &Session, key: &[u8]) -> String {
+        String::from_utf8_lossy(&session.public_key(key)).into_owned()
+    }
+
+    #[test]
+    fn needs_ssi_false_with_no_watched_keys() {
+        let mut session = test_session();
+        let op = strings::set(&session, b"foo", b"bar", None);
+        session.enqueue_op(op);
+        assert!(!session.needs_ssi(), "no watched keys → SI");
+    }
+
+    #[test]
+    fn needs_ssi_false_when_watched_key_not_in_queue() {
+        let mut session = test_session();
+        session.watched_keys.insert(key_str(&session, b"other"), None);
+        let op = strings::set(&session, b"foo", b"bar", None);
+        session.enqueue_op(op);
+        assert!(!session.needs_ssi(), "watched key not touched by queued op → SI");
+    }
+
+    #[test]
+    fn needs_ssi_true_when_watched_key_in_queue() {
+        let mut session = test_session();
+        session.watched_keys.insert(key_str(&session, b"foo"), None);
+        let op = strings::set(&session, b"foo", b"bar", None);
+        session.enqueue_op(op);
+        assert!(session.needs_ssi(), "watched key touched by queued op → SSI");
+    }
+
+    #[test]
+    fn needs_ssi_true_when_any_watched_key_matches() {
+        let mut session = test_session();
+        // watch two keys; queue an op that touches only the second one
+        session.watched_keys.insert(key_str(&session, b"unrelated"), None);
+        session.watched_keys.insert(key_str(&session, b"bar"), None);
+        let op = strings::set(&session, b"bar", b"val", None);
+        session.enqueue_op(op);
+        assert!(session.needs_ssi(), "one of the watched keys is touched → SSI");
+    }
+
+    #[test]
+    fn needs_ssi_cleared_after_unwatch() {
+        let mut session = test_session();
+        session.watched_keys.insert(key_str(&session, b"foo"), None);
+        let op = strings::set(&session, b"foo", b"bar", None);
+        session.enqueue_op(op);
+        assert!(session.needs_ssi());
+
+        session.unwatch();
+        assert!(!session.needs_ssi(), "unwatch clears the set → back to SI");
+    }
+
     #[tokio::test]
     async fn dispatch_executes_queued_set_and_persists() {
         let mut session = test_session();
@@ -581,7 +754,7 @@ mod tests {
         );
 
         let store = session.store();
-        let tx = store.begin(false).await.unwrap();
+        let tx = store.begin(false, TxIsolation::Snapshot).await.unwrap();
         let item = tx.get(&session.public_key(b"foo")).await.unwrap();
         assert_eq!(item.value(), b"bar");
         drop(tx);

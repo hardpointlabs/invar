@@ -21,6 +21,7 @@ use tokio::time::{Duration, timeout};
 #[derive(ValueEnum, Clone, Debug)]
 enum Backend {
     Slate,
+    Memory,
     Fjall,
 }
 
@@ -87,6 +88,11 @@ async fn main() {
                 .await.inspect_err(|e| tracing::error!(error = %e, "operation failed"))
                 .expect("failed to open SlateDB store"),
             )
+        }
+        Backend::Memory => {
+            Arc::new(SlateDb::in_memory()
+                .await.inspect_err(|e| tracing::error!(error = %e, "operation failed"))
+                .expect("failed to open in-memory store"))
         }
         Backend::Fjall => {
             let path = cli.path.expect("path is required for the Fjall backend");

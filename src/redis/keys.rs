@@ -17,6 +17,7 @@ use bytes::Bytes;
 use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, NoOp, QueuedOp, WireOp};
+use smallvec::smallvec;
 use crate::common::session::Session;
 use crate::common::ValueType;
 use crate::pubsub::redis_glob_match;
@@ -32,6 +33,7 @@ pub fn exists(session: &Session, keys: &[Bytes]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.keys_sv(keys)),
     }
 }
 
@@ -46,6 +48,7 @@ pub fn mget(session: &Session, keys: &[Bytes]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.keys_sv(keys)),
     }
 }
 
@@ -62,6 +65,7 @@ pub fn move_op(session: &Session, key: &[u8], target_db: i32) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -77,6 +81,7 @@ pub fn rename(session: &Session, old_key: &[u8], new_key: &[u8]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(smallvec![String::from_utf8_lossy(&session.public_key(old_key)).into_owned(), String::from_utf8_lossy(&session.public_key(new_key)).into_owned()]),
     }
 }
 
@@ -93,6 +98,7 @@ pub fn rename_nx(session: &Session, old_key: &[u8], new_key: &[u8]) -> QueuedOp 
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(smallvec![String::from_utf8_lossy(&session.public_key(old_key)).into_owned(), String::from_utf8_lossy(&session.public_key(new_key)).into_owned()]),
     }
 }
 
@@ -108,6 +114,7 @@ pub fn expire(session: &Session, key: &[u8], seconds: i64) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -123,6 +130,7 @@ pub fn pexpire(session: &Session, key: &[u8], milliseconds: i64) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -137,6 +145,7 @@ pub fn persist(session: &Session, key: &[u8]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -151,6 +160,7 @@ pub fn ttl(session: &Session, key: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -165,6 +175,7 @@ pub fn pttl(session: &Session, key: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -178,6 +189,7 @@ pub fn key_type(session: &Session, key: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -197,6 +209,7 @@ pub fn del(session: &Session, keys: &[Bytes]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.keys_sv(keys)),
     }
 }
 
@@ -235,6 +248,7 @@ pub fn scan(
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: None,
     }
 }
 
@@ -257,6 +271,7 @@ pub fn idle_time(_: &Session) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: None,
     }
 }
 
@@ -892,13 +907,14 @@ impl WireOp for ScanWire {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kv::kv::TxIsolation;
     use crate::testutil::test_session;
 
     /// Runs one op through its own transaction, committing if it mutates, and
     /// renders the reply.
     async fn exec(session: &Session, op: QueuedOp) -> RespValue {
         let store = session.store();
-        let tx = store.begin(op.is_mutating).await.expect("tx");
+        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -909,7 +925,7 @@ mod tests {
     /// Runs a db op expecting success, returning the raw result.
     async fn exec_db(session: &Session, op: QueuedOp) -> DbResult {
         let store = session.store();
-        let tx = store.begin(op.is_mutating).await.expect("tx");
+        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
         let outcome = op.db_op.run(&*tx).await.expect("op failed");
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -920,7 +936,7 @@ mod tests {
     /// Seeds a string value directly under the public key.
     async fn seed_string(session: &Session, key: &[u8], val: &[u8]) {
         let store = session.store();
-        let tx = store.begin(true).await.expect("tx");
+        let tx = store.begin(true, TxIsolation::Snapshot).await.expect("tx");
         tx.set(Entry::new(session.public_key(key), val.to_vec()).metadata(ValueType::String as u8))
             .expect("seed");
         tx.commit().await.expect("commit");
@@ -929,7 +945,7 @@ mod tests {
     /// Reads the stored public key via a fresh session on the given DB.
     async fn stored(session: &Session, db: i32, key: &[u8]) -> Option<Vec<u8>> {
         let store = session.store();
-        let tx = store.begin(false).await.expect("read tx");
+        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
         match tx.get(&session.public_key_for_db(db, key)).await {
             Ok(item) => Some(item.value().to_vec()),
             Err(KvError::KeyNotFound) => None,
@@ -1094,7 +1110,7 @@ mod tests {
         for (i, (meta, want)) in types.iter().enumerate() {
             let key = format!("key{i}");
             let store = session.store();
-            let tx = store.begin(true).await.expect("tx");
+            let tx = store.begin(true, TxIsolation::Snapshot).await.expect("tx");
             tx.set(Entry::new(session.public_key(key.as_bytes()), b"v".to_vec()).metadata(*meta))
                 .expect("seed");
             tx.commit().await.expect("commit");
@@ -1206,7 +1222,7 @@ mod tests {
         seed_string(&session, b"pub", b"v").await;
 
         let store = session.store();
-        let tx = store.begin(true).await.expect("tx");
+        let tx = store.begin(true, TxIsolation::Snapshot).await.expect("tx");
         tx.set(Entry::new(b"-0:internal".to_vec(), b"v".to_vec()).metadata(ValueType::String as u8))
             .expect("seed internal");
         tx.commit().await.expect("commit");
@@ -1233,7 +1249,7 @@ mod tests {
         let session = test_session();
         seed_string(&session, b"s", b"v").await;
         let store = session.store();
-        let tx = store.begin(true).await.expect("tx");
+        let tx = store.begin(true, TxIsolation::Snapshot).await.expect("tx");
         tx.set(
             Entry::new(session.public_key(b"l"), b"v".to_vec()).metadata(ValueType::List as u8),
         )

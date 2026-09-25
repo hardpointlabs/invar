@@ -14,6 +14,7 @@ use bytes::Bytes;
 use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
+use smallvec::{smallvec, SmallVec};
 use crate::common::session::Session;
 use crate::common::ValueType;
 use crate::resp::RespValue;
@@ -81,9 +82,11 @@ pub fn set_full(
     get: bool,
     keepttl: bool,
 ) -> QueuedOp {
+    let storage_key = session.public_key(key);
+    let key_str = String::from_utf8_lossy(&storage_key).into_owned();
     QueuedOp {
         db_op: Box::new(SetOp {
-            key: session.public_key(key),
+            key: storage_key,
             value: value.to_vec(),
             ttl,
             mode,
@@ -94,6 +97,7 @@ pub fn set_full(
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(smallvec![key_str]),
     }
 }
 
@@ -126,6 +130,7 @@ pub fn get(session: &Session, key: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -141,6 +146,7 @@ pub fn get_set(session: &Session, key: &[u8], value: &[u8]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -155,6 +161,7 @@ pub fn get_del(session: &Session, key: &[u8]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -169,6 +176,7 @@ pub fn strlen(session: &Session, key: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -187,6 +195,7 @@ pub fn substr(session: &Session, key: &[u8], start: i64, end: i64) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -202,6 +211,7 @@ pub fn set_nx(session: &Session, key: &[u8], value: &[u8]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -217,6 +227,7 @@ pub fn append(session: &Session, key: &[u8], value: &[u8]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -233,6 +244,7 @@ pub fn get_ex(session: &Session, args: &[Bytes]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(&args[0])),
     }
 }
 
@@ -248,6 +260,7 @@ pub fn incr_by_float(session: &Session, key: &[u8], amount: f64) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -265,6 +278,7 @@ pub fn mset(session: &Session, args: &[Bytes]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(args.chunks(2).map(|c| String::from_utf8_lossy(&session.public_key(&c[0])).into_owned()).collect::<SmallVec<[String; 2]>>()),
     }
 }
 
@@ -282,6 +296,7 @@ pub fn mset_nx(session: &Session, args: &[Bytes]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(args.chunks(2).map(|c| String::from_utf8_lossy(&session.public_key(&c[0])).into_owned()).collect::<SmallVec<[String; 2]>>()),
     }
 }
 
@@ -298,6 +313,7 @@ pub fn set_range(session: &Session, key: &[u8], offset: i64, value: &[u8]) -> Qu
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -313,6 +329,7 @@ pub fn increment(session: &Session, key: &[u8], amount: i64) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -939,6 +956,7 @@ impl WireOp for BulkStringWire {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kv::kv::TxIsolation;
     use crate::common::ValueType;
     use crate::testutil::test_session;
 
@@ -946,7 +964,7 @@ mod tests {
     /// renders the reply.
     async fn exec(session: &Session, op: QueuedOp) -> RespValue {
         let store = session.store();
-        let tx = store.begin(op.is_mutating).await.expect("tx");
+        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -957,7 +975,7 @@ mod tests {
     /// Runs a db op expecting success, returning the raw result.
     async fn exec_db(session: &Session, op: QueuedOp) -> DbResult {
         let store = session.store();
-        let tx = store.begin(op.is_mutating).await.expect("tx");
+        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
         let outcome = op.db_op.run(&*tx).await.expect("op failed");
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -968,7 +986,7 @@ mod tests {
     /// Runs a db op expecting a Redis error, returning the message Bytes.
     async fn exec_db_err(session: &Session, op: QueuedOp) -> Bytes {
         let store = session.store();
-        let tx = store.begin(op.is_mutating).await.expect("tx");
+        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
         let err = op.db_op.run(&*tx).await.expect_err("expected op error");
         match err_resp(&err) {
             RespValue::Error(msg) => msg,
@@ -979,7 +997,7 @@ mod tests {
     /// Seeds a string value directly under the public key.
     async fn seed_string(session: &Session, key: &[u8], val: &[u8]) {
         let store = session.store();
-        let tx = store.begin(true).await.expect("tx");
+        let tx = store.begin(true, TxIsolation::Snapshot).await.expect("tx");
         tx.set(Entry::new(session.public_key(key), val.to_vec()).metadata(TYPE_STRING))
             .expect("seed");
         tx.commit().await.expect("commit");
@@ -988,7 +1006,7 @@ mod tests {
     /// Seeds a key holding a non-string value type.
     async fn seed_wrong_type(session: &Session, key: &[u8]) {
         let store = session.store();
-        let tx = store.begin(true).await.expect("tx");
+        let tx = store.begin(true, TxIsolation::Snapshot).await.expect("tx");
         tx.set(Entry::new(session.public_key(key), b"v".to_vec()).metadata(ValueType::List as u8))
             .expect("seed");
         tx.commit().await.expect("commit");
@@ -997,7 +1015,7 @@ mod tests {
     /// Reads the stored value at key (any metadata), or None if missing.
     async fn stored(session: &Session, key: &[u8]) -> Option<Vec<u8>> {
         let store = session.store();
-        let tx = store.begin(false).await.expect("read tx");
+        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
         match tx.get(&session.public_key(key)).await {
             Ok(item) => Some(item.value().to_vec()),
             Err(KvError::KeyNotFound) => None,
@@ -1008,7 +1026,7 @@ mod tests {
     /// Reads the stored TTL at key
     async fn stored_ttl(session: &Session, key: &[u8]) -> Option<Duration> {
         let store = session.store();
-        let tx = store.begin(false).await.expect("read tx");
+        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
         match tx.get(&session.public_key(key)).await {
             Ok(item) => item.ttl(),
             Err(e) => panic!("get failed: {e:?}"),

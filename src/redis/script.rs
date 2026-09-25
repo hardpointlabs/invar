@@ -653,6 +653,7 @@ pub fn eval(
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: None,
     }
 }
 
@@ -682,6 +683,7 @@ pub fn evalsha(
                 is_mutating: true,
                 allowed_in_tx: true,
                 abort_in_tx: false,
+        keys: None,
             }
         }
         None => {
@@ -692,6 +694,7 @@ pub fn evalsha(
                 is_mutating: false,
                 allowed_in_tx: true,
                 abort_in_tx: false,
+        keys: None,
             }
         }
     }
@@ -1650,13 +1653,14 @@ fn result_reply(result: &EvalResult) -> RespValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kv::kv::TxIsolation;
     use crate::testutil::test_session;
 
     /// Runs an op through its own transaction and renders the reply.
     async fn exec(op: QueuedOp) -> RespValue {
         let session = test_session();
         let store = session.store();
-        let tx = store.begin(op.is_mutating).await.expect("tx");
+        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
             tx.commit().await.expect("commit");

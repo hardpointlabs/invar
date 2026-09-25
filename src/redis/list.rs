@@ -31,6 +31,7 @@ use bytes::Bytes;
 use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
+use smallvec::smallvec;
 use crate::common::session::Session;
 use crate::common::ValueType;
 use crate::resp::RespValue;
@@ -535,6 +536,7 @@ pub fn lpush(session: &Session, key: &[u8], values: &[Bytes]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -552,6 +554,7 @@ pub fn rpush(session: &Session, key: &[u8], values: &[Bytes]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -570,6 +573,7 @@ pub fn lpushx(session: &Session, key: &[u8], value: &[u8]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -588,6 +592,7 @@ pub fn rpushx(session: &Session, key: &[u8], value: &[u8]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -603,6 +608,7 @@ pub fn lpop(session: &Session, key: &[u8]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -618,6 +624,7 @@ pub fn rpop(session: &Session, key: &[u8]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -631,6 +638,7 @@ pub fn llen(session: &Session, key: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -648,6 +656,7 @@ pub fn lrange(session: &Session, key: &[u8], start: i64, stop: i64) -> QueuedOp 
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -664,6 +673,7 @@ pub fn lindex(session: &Session, key: &[u8], index: i64) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -681,6 +691,7 @@ pub fn lset(session: &Session, key: &[u8], index: i64, value: &[u8]) -> QueuedOp
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -698,6 +709,7 @@ pub fn lrem(session: &Session, key: &[u8], count: i64, value: &[u8]) -> QueuedOp
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -714,6 +726,7 @@ pub fn ltrim(session: &Session, key: &[u8], start: i64, stop: i64) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -738,6 +751,7 @@ pub fn linsert(
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -756,6 +770,7 @@ pub fn rpoplpush(session: &Session, source: &[u8], destination: &[u8]) -> Queued
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(smallvec![String::from_utf8_lossy(&session.public_key(source)).into_owned(), String::from_utf8_lossy(&session.public_key(destination)).into_owned()]),
     }
 }
 
@@ -773,6 +788,7 @@ pub fn lpos(session: &Session, key: &[u8], element: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -1352,6 +1368,7 @@ impl WireOp for NullableIntWire {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kv::kv::TxIsolation;
     use crate::testutil::test_session;
 
     /// Runs one op through its own transaction and commits if it mutates,
@@ -1359,7 +1376,7 @@ mod tests {
     /// `kvs.Update`/`kvs.Read` calls).
     async fn exec(session: &Session, op: QueuedOp) -> RespValue {
         let store = session.store();
-        let tx = store.begin(op.is_mutating).await.expect("tx");
+        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -1370,7 +1387,7 @@ mod tests {
     /// Loads the list stored under `key` for direct inspection.
     async fn load(session: &Session, key: &[u8]) -> Linked {
         let store = session.store();
-        let tx = store.begin(false).await.expect("read tx");
+        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
         let public_key = session.public_key(key);
         let node_prefix = session.private_key(key);
         let ll = load_list(&*tx, &public_key, &node_prefix)
@@ -1962,7 +1979,7 @@ mod tests {
         exec(&session, rpush(&session, key, &[Bytes::from_static(b"v")])).await;
 
         let store = session.store();
-        let tx = store.begin(false).await.expect("read tx");
+        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
         let item = tx.get(&session.public_key(key)).await.expect("sentinel");
         assert_eq!(item.metadata(), TYPE_LIST);
         let val = item.value();

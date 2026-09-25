@@ -146,6 +146,7 @@ pub fn hset(session: &Session, key: &[u8], field_values: &[Bytes]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -163,6 +164,7 @@ pub fn hsetnx(session: &Session, key: &[u8], field: &[u8], value: &[u8]) -> Queu
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -177,6 +179,7 @@ pub fn hget(session: &Session, key: &[u8], field: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -192,6 +195,7 @@ pub fn hmget(session: &Session, key: &[u8], fields: &[Bytes]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -208,6 +212,7 @@ pub fn hdel(session: &Session, key: &[u8], fields: &[Bytes]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -222,6 +227,7 @@ pub fn hexists(session: &Session, key: &[u8], field: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -235,6 +241,7 @@ pub fn hlen(session: &Session, key: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -249,6 +256,7 @@ pub fn hkeys(session: &Session, key: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -263,6 +271,7 @@ pub fn hvals(session: &Session, key: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -278,6 +287,7 @@ pub fn hgetall(session: &Session, key: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -291,6 +301,7 @@ pub fn hmset(session: &Session, key: &[u8], field_values: &[Bytes]) -> QueuedOp 
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -308,6 +319,7 @@ pub fn hincrby(session: &Session, key: &[u8], field: &[u8], amount: i64) -> Queu
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -325,6 +337,7 @@ pub fn hincrbyfloat(session: &Session, key: &[u8], field: &[u8], amount: f64) ->
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -344,6 +357,7 @@ pub fn hrandfield(session: &Session, key: &[u8], count: i64, with_values: bool) 
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -359,6 +373,7 @@ pub fn hstrlen(session: &Session, key: &[u8], field: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -383,6 +398,7 @@ pub fn hscan(
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -1225,11 +1241,12 @@ impl WireOp for HScanWire {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kv::kv::TxIsolation;
     use crate::testutil::test_session;
 
     async fn exec(session: &Session, op: QueuedOp) -> RespValue {
         let store = session.store();
-        let tx = store.begin(op.is_mutating).await.expect("tx");
+        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
             tx.commit().await.expect("commit");

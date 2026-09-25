@@ -79,6 +79,22 @@ pub async fn dispatch_noscript(session: &mut Session, args: &[Bytes]) -> Option<
             Ok(()) => Some(vec![ok_resp()]),
             _ => Some(vec![error(session, "DISCARD without MULTI")]),
         },
+        b"watch" => {
+            if args.len() < 2 {
+                return Some(vec![error(session, "ERR wrong number of arguments for 'watch' command")]);
+            }
+            if session.in_multi() {
+                return Some(vec![RespValue::Error(Bytes::from_static(
+                    b"ERR WATCH inside MULTI is not allowed",
+                ))]);
+            }
+            session.snapshot_and_watch(&args[1..]).await;
+            Some(vec![ok_resp()])
+        }
+        b"unwatch" => {
+            session.unwatch();
+            Some(vec![ok_resp()])
+        }
         _ => None
     }
 }
@@ -2429,6 +2445,7 @@ fn ok() -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: None,
     }
 }
 
@@ -2452,6 +2469,7 @@ fn error_op(session: &mut Session, msg: impl Into<Bytes>) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: true,
+        keys: None,
     }
 }
 

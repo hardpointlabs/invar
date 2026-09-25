@@ -46,6 +46,7 @@ pub fn sync() -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: false,
         abort_in_tx: false,
+        keys: None,
     }
 }
 
@@ -105,6 +106,7 @@ pub fn wait(timeout: Duration, session: &Session) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: false,
         abort_in_tx: false,
+        keys: None,
     }
 }
 
@@ -119,6 +121,7 @@ pub fn lolwut(version: &str, commit: &str) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: None,
     }
 }
 
@@ -130,6 +133,7 @@ pub fn time() -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: None,
     }
 }
 
@@ -143,6 +147,7 @@ pub fn module(args: &[Bytes]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: None,
     }
 }
 
@@ -157,6 +162,7 @@ pub fn bgsave(session: &Session) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: None,
     }
 }
 
@@ -171,6 +177,7 @@ pub fn dbsize(session: &Session) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: None,
     }
 }
 
@@ -186,6 +193,7 @@ pub fn ok_op() -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: None,
     }
 }
 
@@ -197,6 +205,7 @@ pub fn ping(msg: Option<Bytes>) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: None,
     }
 }
 
@@ -208,6 +217,7 @@ pub fn echo(msg: Bytes) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: None,
     }
 }
 
@@ -365,6 +375,7 @@ impl WireOp for EchoOp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kv::kv::TxIsolation;
     use crate::common::ValueType;
     use crate::testutil::test_session;
     use kv::kv::Entry;
@@ -372,7 +383,7 @@ mod tests {
     /// Runs a queued op through its own transaction and renders the reply.
     async fn exec(session: &Session, op: QueuedOp) -> RespValue {
         let store = session.store();
-        let tx = store.begin(op.is_mutating).await.expect("tx");
+        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -383,7 +394,7 @@ mod tests {
     /// Seeds a plain string key in the current DB of `session`.
     async fn seed(session: &Session, key: &[u8]) {
         let store = session.store();
-        let tx = store.begin(true).await.expect("tx");
+        let tx = store.begin(true, TxIsolation::Snapshot).await.expect("tx");
         tx.set(
             Entry::new(session.public_key(key), b"v".to_vec())
                 .metadata(ValueType::String as u8),
@@ -434,6 +445,7 @@ mod tests {
             is_mutating: false,
             allowed_in_tx: false,
             abort_in_tx: false,
+        keys: None,
         };
         let reply = exec(&session, op).await;
         assert_eq!(reply, RespValue::Integer(0));

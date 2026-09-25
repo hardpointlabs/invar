@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 use async_trait::async_trait;
-use kv::kv::{Error as KvError, Error, KeyValueStore, Tx, WriteHandle};
+use kv::kv::{Error as KvError, Error, KeyValueStore, Tx, TxIsolation, WriteHandle};
 
 /// The subset of [`KeyValueStore`] the Redis server needs, usable through a
 /// trait object so sessions, commands and the listener stay backend-agnostic.
@@ -16,7 +16,7 @@ use kv::kv::{Error as KvError, Error, KeyValueStore, Tx, WriteHandle};
 pub trait RedisStore: Send + Sync + 'static {
     /// Opens a manually managed transaction. Callers must [`Tx::commit`] or
     /// [`Tx::discard`] it.
-    async fn begin(&self, mutating: bool) -> Result<Box<dyn Tx>, KvError>;
+    async fn begin(&self, mutating: bool, isolation: TxIsolation) -> Result<Box<dyn Tx>, KvError>;
 
     /// Closes the store, flushing all data to durable storage.
     async fn close(&self) -> Result<(), KvError>;
@@ -35,8 +35,8 @@ pub trait RedisStore: Send + Sync + 'static {
 
 #[async_trait]
 impl<S: KeyValueStore> RedisStore for S {
-    async fn begin(&self, mutating: bool) -> Result<Box<dyn Tx>, KvError> {
-        KeyValueStore::begin(self, mutating).await
+    async fn begin(&self, mutating: bool, isolation: TxIsolation) -> Result<Box<dyn Tx>, KvError> {
+        KeyValueStore::begin(self, mutating, isolation).await
     }
 
     async fn close(&self) -> Result<(), KvError> {

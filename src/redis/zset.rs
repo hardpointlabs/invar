@@ -39,9 +39,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
+use kv::kv::{TxIsolation, BoxFuture, Entry, Error as KvError, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
+use smallvec::{smallvec, SmallVec};
 use crate::common::session::Session;
 use crate::common::{BlockResult, Claim, PopResult, RedisStore, ValueType, WatchRegistry};
 use crate::resp::RespValue;
@@ -608,6 +609,7 @@ pub fn zadd(session: &Session, key: &[u8], args: &[Bytes]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -621,6 +623,7 @@ pub fn zcard(session: &Session, key: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -635,6 +638,7 @@ pub fn zscore(session: &Session, key: &[u8], member: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -650,6 +654,7 @@ pub fn zrem(session: &Session, key: &[u8], members: &[Bytes]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -667,6 +672,7 @@ pub fn zrange(session: &Session, key: &[u8], start: i64, stop: i64, with_scores:
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -690,6 +696,7 @@ pub fn zrevrange(
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -705,6 +712,7 @@ pub fn zrank(session: &Session, key: &[u8], member: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -720,6 +728,7 @@ pub fn zrevrank(session: &Session, key: &[u8], member: &[u8]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -735,6 +744,7 @@ pub fn zcount(session: &Session, key: &[u8], min_str: &str, max_str: &str) -> Qu
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -751,6 +761,7 @@ pub fn zincrby(session: &Session, key: &[u8], increment: f64, member: &[u8]) -> 
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -783,6 +794,7 @@ pub fn zrangebyscore(
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -815,6 +827,7 @@ pub fn zrevrangebyscore(
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -843,6 +856,7 @@ pub fn zrangebylex(
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -871,6 +885,7 @@ pub fn zrevrangebylex(
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -886,6 +901,7 @@ pub fn zlexcount(session: &Session, key: &[u8], min_str: &str, max_str: &str) ->
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -901,6 +917,7 @@ pub fn zremrangebyrank(session: &Session, key: &[u8], start: i64, stop: i64) -> 
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -916,6 +933,7 @@ pub fn zremrangebyscore(session: &Session, key: &[u8], min_str: &str, max_str: &
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -931,6 +949,7 @@ pub fn zremrangebylex(session: &Session, key: &[u8], min_str: &str, max_str: &st
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -946,6 +965,7 @@ pub fn zpopmin(session: &Session, key: &[u8], count: usize) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -961,6 +981,7 @@ pub fn zpopmax(session: &Session, key: &[u8], count: usize) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -976,6 +997,7 @@ pub fn zmscore(session: &Session, key: &[u8], members: &[Bytes]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -993,6 +1015,7 @@ pub fn zrandmember(session: &Session, key: &[u8], count: i64) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.key_sv(key)),
     }
 }
 
@@ -1012,6 +1035,7 @@ pub fn zdiff(session: &Session, with_scores: bool, keys: &[Bytes]) -> QueuedOp {
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.keys_sv(keys)),
     }
 }
 
@@ -1031,6 +1055,12 @@ pub fn zdiffstore(session: &Session, dest: &[u8], keys: &[Bytes]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some({
+            let mut ks = SmallVec::<[String; 2]>::new();
+            ks.push(String::from_utf8_lossy(&session.public_key(dest)).into_owned());
+            ks.extend(keys.iter().map(|k| String::from_utf8_lossy(&session.public_key(k)).into_owned()));
+            ks
+        }),
     }
 }
 
@@ -1056,6 +1086,7 @@ pub fn zinter(
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.keys_sv(keys)),
     }
 }
 
@@ -1081,6 +1112,12 @@ pub fn zinterstore(
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some({
+            let mut ks = SmallVec::<[String; 2]>::new();
+            ks.push(String::from_utf8_lossy(&session.public_key(dest)).into_owned());
+            ks.extend(keys.iter().map(|k| String::from_utf8_lossy(&session.public_key(k)).into_owned()));
+            ks
+        }),
     }
 }
 
@@ -1106,6 +1143,7 @@ pub fn zunion(
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(session.keys_sv(keys)),
     }
 }
 
@@ -1131,6 +1169,12 @@ pub fn zunionstore(
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some({
+            let mut ks = SmallVec::<[String; 2]>::new();
+            ks.push(String::from_utf8_lossy(&session.public_key(dest)).into_owned());
+            ks.extend(keys.iter().map(|k| String::from_utf8_lossy(&session.public_key(k)).into_owned()));
+            ks
+        }),
     }
 }
 
@@ -1148,6 +1192,7 @@ pub fn zrangestore(session: &Session, dest: &[u8], src: &[u8], start: i64, stop:
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some(smallvec![String::from_utf8_lossy(&session.public_key(dest)).into_owned(), String::from_utf8_lossy(&session.public_key(src)).into_owned()]),
     }
 }
 
@@ -2474,7 +2519,7 @@ impl DbOp for BzpopOp {
         Box::pin(async move {
             if self.can_block {
                 // Normal mode: open own writable tx, try pop, block if empty.
-                let own_tx = self.store.begin(true).await?;
+                let own_tx = self.store.begin(true, TxIsolation::Snapshot).await?;
                 match try_pop(&*own_tx, &self.nodes, self.want_min).await {
                     Ok(Some(result)) => {
                         own_tx.commit().await.map_err(DbError::Kv)?;
@@ -2557,6 +2602,11 @@ pub fn bzpop(
         is_mutating: !can_block,
         allowed_in_tx: true,
         abort_in_tx: false,
+        keys: Some({
+            let mut ks = SmallVec::<[String; 2]>::new();
+            ks.extend(keys.iter().map(|k| String::from_utf8_lossy(&session.public_key(k)).into_owned()));
+            ks
+        }),
     }
 }
 
@@ -2570,7 +2620,7 @@ mod tests {
     /// renders the reply (the unit-test equivalent of Go's `kvs.Update`/`Read`).
     async fn exec(session: &Session, op: QueuedOp) -> RespValue {
         let store = session.store();
-        let tx = store.begin(op.is_mutating).await.expect("tx");
+        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -2581,7 +2631,7 @@ mod tests {
     /// Like [`exec`] but takes owned data so it can be spawned as a `'static`
     /// task (needed for blocking-pop tests).
     async fn exec_owned(op: QueuedOp, store: Arc<dyn RedisStore>) -> RespValue {
-        let tx = store.begin(op.is_mutating).await.expect("tx");
+        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -3302,7 +3352,7 @@ mod tests {
             &[Bytes::from_static(b"1"), Bytes::from_static(b"m")],
         );
         let store2 = writer.store();
-        let tx = store2.begin(true).await.expect("tx");
+        let tx = store2.begin(true, TxIsolation::Snapshot).await.expect("tx");
         let outcome = add.db_op.run(&*tx).await.expect("ZADD ok");
         tx.commit().await.expect("commit");
         add.wire_op.reply(Ok(outcome));
