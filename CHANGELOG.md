@@ -1,3 +1,10 @@
+## [1.0.26](https://github.com/hardpointlabs/invar/compare/v1.0.25...v1.0.26) (2026-09-27)
+
+
+### Bug Fixes
+
+* Merge pull request [#94](https://github.com/hardpointlabs/invar/issues/94) from hardpointlabs/cache-cli-flag ([7f1fdd1](https://github.com/hardpointlabs/invar/commit/7f1fdd1fe7dd993aaeee1293a31c15c822733821))
+
 ## [1.0.25](https://github.com/hardpointlabs/invar/compare/v1.0.24...v1.0.25) (2026-09-08)
 
 
