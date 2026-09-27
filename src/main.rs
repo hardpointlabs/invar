@@ -51,6 +51,14 @@ struct Cli {
     /// Bucket prefix to use with the slate backend
     #[arg(long, env = "INVAR_BUCKET_PREFIX", default_value = "/invar")]
     prefix: String,
+
+    /// Path to Foyer on-disk block cache. Only applicable when using the slate backend
+    #[arg(long, env = "INVAR_CACHE_PATH")]
+    cache_path: Option<PathBuf>,
+
+    /// Maximum amount of memory (in MB) that the slate block cache's in-memory tier can use
+    #[arg(long, env = "INVAR_CACHE_MEM_LIMIT", default_value = "16")]
+    cache_mem_limit: Option<usize>,
 }
 
 #[tokio::main]
@@ -84,6 +92,8 @@ async fn main() {
                     path: cli.prefix.clone(),
                     bucket_name: bucket,
                     settings: None,
+                    cache_path: cli.cache_path,
+                    cache_mem_limit: cli.cache_mem_limit.unwrap_or(16),
                 })
                 .await.inspect_err(|e| tracing::error!(error = %e, "operation failed"))
                 .expect("failed to open SlateDB store"),

@@ -9,6 +9,8 @@ path = "lib.rs"
 [dependencies]
 async-trait = "0.1"
 fjall = "3.1"
+foyer = "0.22"
+libc = "0.2"
 metrics = "0.24"
 slatedb = { version = "0.16", features = ["aws", "foyer", "compression"] }
 slatedb-common = "0.16"

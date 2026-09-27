@@ -12,10 +12,16 @@
 //! surface as [`Error::Conflict`].
 
 use std::collections::Bound;
+use std::ffi::CString;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use async_trait::async_trait;
+use foyer::{BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCacheBuilder, PsyncIoEngineConfig};
 use slatedb::config::{PutOptions, Settings, Ttl};
+use slatedb::db_cache::{CachedEntry, DbCache};
+use slatedb::db_cache::foyer_hybrid::FoyerHybridCache;
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 use slatedb::object_store::aws;
@@ -35,6 +41,49 @@ fn map_slate_error(err: SlateError) -> Error {
     }
 }
 
+/// Returns 80% of the free bytes available on the filesystem containing `path`.
+/// Calls `statvfs(2)` on the path itself, or its parent if the path doesn't exist yet.
+fn disk_capacity_bytes(path: &Path) -> Result<usize, Error> {
+    let stat_path = if path.exists() {
+        path.to_path_buf()
+    } else {
+        path.parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("/"))
+    };
+    let c_path = CString::new(stat_path.as_os_str().as_bytes()).map_err(|_| Error::Undefined)?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+    if ret != 0 {
+        return Err(Error::Undefined);
+    }
+    let free_bytes = (stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64);
+    Ok((free_bytes as f64 * 0.8) as usize)
+}
+
+async fn build_foyer_cache(
+    cache_path: &Path,
+    mem_limit_mb: usize,
+) -> Result<Arc<dyn DbCache>, Error> {
+    let disk_capacity = disk_capacity_bytes(cache_path)?;
+    let mem_capacity = if mem_limit_mb == 0 { 16 } else { mem_limit_mb } * 1024 * 1024;
+    let device = FsDeviceBuilder::new(cache_path)
+        .with_capacity(disk_capacity)
+        .build()
+        .map_err(|_| Error::Undefined)?;
+    let cache = HybridCacheBuilder::new()
+        .with_name("slatedb_block_cache")
+        .memory(mem_capacity)
+        .with_weighter(|_, v: &CachedEntry| v.size())
+        .storage()
+        .with_io_engine_config(PsyncIoEngineConfig::new())
+        .with_engine_config(BlockEngineConfig::new(device))
+        .build()
+        .await
+        .map_err(|_| Error::Undefined)?;
+    Ok(Arc::new(FoyerHybridCache::new_with_cache(cache)) as Arc<dyn DbCache>)
+}
+
 /// Options for opening a SlateDB-backed [`KeyValueStore`].
 #[derive(Debug, Clone, Default)]
 pub struct SlateDbOpts {
@@ -42,12 +91,17 @@ pub struct SlateDbOpts {
     pub bucket_name: String,
     /// Optional; applied to the DbBuilder when `Some`.
     pub settings: Option<Settings>,
+    /// Path for the Foyer on-disk block cache tier. Cache is disabled when `None`.
+    pub cache_path: Option<PathBuf>,
+    /// Memory limit for the Foyer in-memory cache tier, in MB. Defaults to 16 when 0.
+    pub cache_mem_limit: usize,
 }
 
 /// SlateDB-backed [`KeyValueStore`].
 #[derive(Clone)]
 pub struct SlateDb {
     db: Db,
+    cache: Option<Arc<dyn DbCache>>,
 }
 
 impl SlateDb {
@@ -55,27 +109,38 @@ impl SlateDb {
         let store = Arc::new(aws::AmazonS3Builder::from_env()
             .with_bucket_name(opts.bucket_name)
             .build().expect("couldn't create s3 client"));
-        Self::build(opts.path, store, opts.settings).await
+        Self::build(opts.path, store, opts.settings, opts.cache_path, opts.cache_mem_limit).await
     }
 
     /// Open a store backed by an in-memory object store (for tests).
     pub async fn in_memory() -> Result<SlateDb, Error> {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        Self::build("test-db".to_string(), store, None).await
+        Self::build("test-db".to_string(), store, None, None, 0).await
     }
 
     async fn build(
         path: String,
         store: Arc<dyn ObjectStore>,
         settings: Option<Settings>,
+        cache_path: Option<PathBuf>,
+        cache_mem_limit: usize,
     ) -> Result<SlateDb, Error> {
         let mut builder = Db::builder(path, store.clone());
         if let Some(settings) = settings {
             builder = builder.with_settings(settings);
         }
         builder = builder.with_metrics_recorder(Arc::new(MetricsRsRecorder) as Arc<dyn MetricsRecorder>);
+
+        let cache: Option<Arc<dyn DbCache>> = if let Some(ref cp) = cache_path {
+            let c = build_foyer_cache(cp, cache_mem_limit).await?;
+            builder = builder.with_db_cache(c.clone());
+            Some(c)
+        } else {
+            None
+        };
+
         let db = builder.build().await.map_err(map_slate_error)?;
-        Ok(SlateDb { db })
+        Ok(SlateDb { db, cache })
     }
 
     async fn delete_scanned(&self, prefix: Option<&[u8]>) -> Result<(), Error> {
@@ -166,7 +231,11 @@ impl KeyValueStore for SlateDb {
     }
 
     async fn close(&self) -> Result<(), Error> {
-        self.db.close().await.map_err(map_slate_error)
+        self.db.close().await.map_err(map_slate_error)?;
+        if let Some(cache) = &self.cache {
+            cache.close().await.map_err(map_slate_error)?;
+        }
+        Ok(())
     }
 
     async fn merge(&self, _key: &[u8], _operand: &[u8]) -> Result<Option<WriteHandle>, Error> {
