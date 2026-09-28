@@ -1,6 +1,13 @@
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::Arc;
+use clap::{Parser, ValueEnum};
+use kv::{
+    fjall::FjallDb,
+    slate::{SlateDb, SlateDbOpts},
+};
+use redis::{RedisListener, RedisStore};
+use tokio::time::{Duration, timeout};
 
 async fn start_metrics_server(addr: SocketAddr) {
     metrics_exporter_prometheus::PrometheusBuilder::new()
@@ -9,14 +16,6 @@ async fn start_metrics_server(addr: SocketAddr) {
         .expect("failed to install Prometheus metrics exporter");
     tracing::info!(%addr, "Prometheus metrics server started");
 }
-
-use clap::{Parser, ValueEnum};
-use kv::{
-    fjall::FjallDb,
-    slate::{SlateDb, SlateDbOpts},
-};
-use redis::{RedisListener, RedisStore};
-use tokio::time::{Duration, timeout};
 
 #[derive(ValueEnum, Clone, Debug)]
 enum Backend {
