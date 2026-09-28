@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use async_trait::async_trait;
-use foyer::{BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCacheBuilder, PsyncIoEngineConfig};
+use foyer::{BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCacheBuilder, HybridCachePolicy, PsyncIoEngineConfig};
 use slatedb::config::{PutOptions, Settings, Ttl};
 use slatedb::db_cache::{CachedEntry, DbCache};
 use slatedb::db_cache::foyer_hybrid::FoyerHybridCache;
@@ -72,6 +72,7 @@ async fn build_foyer_cache(
         .build()
         .map_err(|_| Error::Undefined)?;
     let cache = HybridCacheBuilder::new()
+        .with_policy(HybridCachePolicy::WriteOnInsertion)
         .with_name("slatedb_block_cache")
         .memory(mem_capacity)
         .with_weighter(|_, v: &CachedEntry| v.size())
@@ -89,8 +90,6 @@ async fn build_foyer_cache(
 pub struct SlateDbOpts {
     pub path: String,
     pub bucket_name: String,
-    /// Optional; applied to the DbBuilder when `Some`.
-    pub settings: Option<Settings>,
     /// Path for the Foyer on-disk block cache tier. Cache is disabled when `None`.
     pub cache_path: Option<PathBuf>,
     /// Memory limit for the Foyer in-memory cache tier, in MB. Defaults to 16 when 0.
@@ -109,26 +108,25 @@ impl SlateDb {
         let store = Arc::new(aws::AmazonS3Builder::from_env()
             .with_bucket_name(opts.bucket_name)
             .build().expect("couldn't create s3 client"));
-        Self::build(opts.path, store, opts.settings, opts.cache_path, opts.cache_mem_limit).await
+        Self::build(opts.path, store, opts.cache_path, opts.cache_mem_limit).await
     }
 
     /// Open a store backed by an in-memory object store (for tests).
     pub async fn in_memory() -> Result<SlateDb, Error> {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        Self::build("test-db".to_string(), store, None, None, 0).await
+        Self::build("test-db".to_string(), store, None, 0).await
     }
 
     async fn build(
         path: String,
         store: Arc<dyn ObjectStore>,
-        settings: Option<Settings>,
         cache_path: Option<PathBuf>,
         cache_mem_limit: usize,
     ) -> Result<SlateDb, Error> {
+        let settings = Settings::from_env_with_default(
+            "SLATEDB_", Settings::default()).expect("couldn't read settings");
         let mut builder = Db::builder(path, store.clone());
-        if let Some(settings) = settings {
-            builder = builder.with_settings(settings);
-        }
+        builder = builder.with_settings(settings);
         builder = builder.with_metrics_recorder(Arc::new(MetricsRsRecorder) as Arc<dyn MetricsRecorder>);
 
         let cache: Option<Arc<dyn DbCache>> = if let Some(ref cp) = cache_path {
