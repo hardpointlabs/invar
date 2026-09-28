@@ -91,7 +91,6 @@ async fn main() {
                 SlateDb::open(SlateDbOpts {
                     path: cli.prefix.clone(),
                     bucket_name: bucket,
-                    settings: None,
                     cache_path: cli.cache_path,
                     cache_mem_limit: cli.cache_mem_limit.unwrap_or(16),
                 })
