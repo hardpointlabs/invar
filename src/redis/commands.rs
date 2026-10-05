@@ -47,11 +47,21 @@ pub async fn enqueue_command(session: &mut Session, args: &[Bytes]) -> Vec<RespV
 
     let mut replies = Vec::new();
 
+    let is_flush = matches!(
+        args.first().map(|a| a.to_ascii_lowercase()).as_deref(),
+        Some(b"flushdb") | Some(b"flushall")
+    );
+
     if let Some(queued) = session.enqueue_op(cmd) {
         replies.push(queued);
     }
 
     replies.extend(session.dispatch_pending_ops(false).await);
+
+    if is_flush && !replies.iter().any(|r| matches!(r, RespValue::Error(_))) {
+        session.registry().bump_flush_epoch();
+    }
+
     replies
 }
 
@@ -2512,6 +2522,35 @@ mod tests {
             .map(|arg| Bytes::copy_from_slice(arg.as_bytes()))
             .collect();
         enqueue_command(session, &args).await
+    }
+
+    /// WATCH must abort EXEC if the watched key was *written* after WATCH,
+    /// even if it was later written back to its original value (ABA).
+    /// Real Redis returns a nil multi-bulk here.
+    #[tokio::test]
+    async fn watch_aborts_on_aba_write() {
+        use crate::common::{Session, WatchRegistry};
+        use std::sync::Arc;
+
+        let store = crate::testutil::test_store();
+        let registry = Arc::new(WatchRegistry::new());
+        let mut a = Session::new(store.clone(), registry.clone());
+        let mut b = Session::new(store, registry);
+
+        dispatch(&mut a, &["set", "k", "1"]).await;
+        dispatch(&mut a, &["watch", "k"]).await;
+
+        // B changes k and then restores it before A's EXEC.
+        dispatch(&mut b, &["set", "k", "2"]).await;
+        dispatch(&mut b, &["set", "k", "1"]).await;
+
+        dispatch(&mut a, &["multi"]).await;
+        dispatch(&mut a, &["set", "k", "3"]).await;
+        assert_eq!(
+            dispatch(&mut a, &["exec"]).await,
+            vec![RespValue::Array(None)],
+            "EXEC must abort: k was modified after WATCH"
+        );
     }
 
     #[tokio::test]
