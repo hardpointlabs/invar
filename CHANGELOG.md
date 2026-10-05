@@ -1,3 +1,11 @@
+## [1.0.28](https://github.com/hardpointlabs/invar/compare/v1.0.27...v1.0.28) (2026-10-05)
+
+
+### Bug Fixes
+
+* Merge pull request [#100](https://github.com/hardpointlabs/invar/issues/100) from hardpointlabs/zig-bundle ([538db89](https://github.com/hardpointlabs/invar/commit/538db890a57567d66fbfb1ba88b95ca26c17deed))
+* Merge pull request [#99](https://github.com/hardpointlabs/invar/issues/99) from hardpointlabs/watch-testing ([ccf71a9](https://github.com/hardpointlabs/invar/commit/ccf71a9b2e3a21206c754cf0ddcd5ca214a16fec))
+
 ## [1.0.27](https://github.com/hardpointlabs/invar/compare/v1.0.26...v1.0.27) (2026-09-28)
 
 

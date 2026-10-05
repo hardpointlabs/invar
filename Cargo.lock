@@ -1408,7 +1408,7 @@ dependencies = [
 
 [[package]]
 name = "invar"
-version = "1.0.27"
+version = "1.0.28"
 dependencies = [
  "clap",
  "kv",
