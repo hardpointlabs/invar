@@ -126,6 +126,11 @@ impl Item {
         })
     }
 
+    /// Returns `true` if this item has a TTL that has already elapsed.
+    pub fn is_expired(&self) -> bool {
+        self.ttl().map(|d| d.is_zero()).unwrap_or(false)
+    }
+
     /// Returns the metadata byte set when the entry was written.
     pub fn metadata(&self) -> u8 {
         self.meta

@@ -54,12 +54,17 @@ pub struct Session {
     /// Set by `QUIT`: the listener should close the connection after the
     /// replies are flushed.
     should_close: bool,
-    /// Keys registered via `WATCH` for this session, along with the value each
-    /// key held at the time `WATCH` was called. At `EXEC` time the current
-    /// value is compared against this snapshot; a mismatch means the key was
-    /// modified between `WATCH` and `EXEC` and the transaction is aborted with
-    /// a nil reply.
-    watched_keys: HashMap<String, Option<Vec<u8>>>,
+    /// Keys registered via `WATCH` for this session. Each entry holds:
+    /// - the write version at WATCH time (from the shared registry); any
+    ///   increase by EXEC time means the key was written after WATCH — including
+    ///   ABA writes — and the transaction is aborted with a nil reply.
+    /// - whether the key existed in the store at WATCH time; a change (key
+    ///   expired naturally or was created/deleted) also aborts the transaction.
+    watched_keys: HashMap<String, (u64, bool)>,
+    /// The flush epoch recorded at the time of the most recent `WATCH` call.
+    /// If the epoch advances before `EXEC`, one of the watched keys may have
+    /// been destroyed by a `FLUSHDB`/`FLUSHALL`, so the transaction aborts.
+    watch_flush_epoch: u64,
     /// The client-reported connection name, set via `CLIENT SETNAME` or
     /// `HELLO SETNAME`.
     client_name: String,
@@ -102,6 +107,7 @@ impl Session {
             in_script: false,
             should_close: false,
             watched_keys: HashMap::new(),
+            watch_flush_epoch: 0,
             client_name: String::new(),
             lib_name: String::new(),
             lib_ver: String::new(),
@@ -245,28 +251,20 @@ impl Session {
         self.should_close
     }
 
-    /// Snapshots the current value of each raw user key and records them in
+    /// Records the current write version and existence of each raw user key in
     /// the session-local WATCH set. Called by the `WATCH` command handler.
     pub async fn snapshot_and_watch(&mut self, raw_keys: &[Bytes]) {
-        let Ok(tx) = self.store.begin(false, TxIsolation::Snapshot).await else {
-            // On store failure, record keys with None (unknown snapshot). The
-            // pre-check at EXEC time will then see the real value and may abort.
-            for k in raw_keys {
-                let sk = String::from_utf8_lossy(&self.public_key(k)).into_owned();
-                self.watched_keys.entry(sk).or_insert(None);
-            }
-            return;
-        };
+        self.watch_flush_epoch = self.registry.flush_epoch();
+        let tx = self.store.begin(false, TxIsolation::Snapshot).await;
         for k in raw_keys {
             let sk = String::from_utf8_lossy(&self.public_key(k)).into_owned();
-            let value = match tx.get(sk.as_bytes()).await {
-                Ok(entry) => Some(entry.value().to_vec()),
-                Err(KvError::KeyNotFound) => None,
-                Err(_) => None,
+            let version = self.registry.get_version(&sk);
+            let existed = match &tx {
+                Ok(tx) => tx.get(sk.as_bytes()).await.is_ok(),
+                Err(_) => false,
             };
-            self.watched_keys.insert(sk, value);
+            self.watched_keys.insert(sk, (version, existed));
         }
-        // Read-only — drop the transaction without committing.
     }
 
     /// Clears the session-local WATCH set.
@@ -457,25 +455,36 @@ impl Session {
 
             outcomes = Vec::with_capacity(self.queue.len());
 
-            // WATCH pre-check: verify every watched key still holds the value
-            // it had at WATCH time. Reading inside the SSI transaction registers
-            // a readset entry, so a concurrent write to a watched key causes the
-            // later commit to fail with Conflict — covering both the
-            // "already-committed before our EXEC started" case (snapshot mismatch
-            // detected here) and the "committed while our EXEC ran" case (SSI
-            // conflict at commit time).
-            if batch && isolation == TxIsolation::SerializableSnapshot {
-                for (key, expected) in &self.watched_keys {
-                    let current = match tx.get(key.as_bytes()).await {
-                        Ok(entry) => Some(entry.value().to_vec()),
-                        Err(KvError::KeyNotFound) => None,
+            // WATCH pre-check. Abort if any of:
+            // 1. The flush epoch advanced (FLUSHDB/FLUSHALL ran since WATCH).
+            // 2. A watched key's write version increased — catches any committed
+            //    write, including same-value and ABA (write then restore).
+            // 3. A watched key's existence changed — catches natural TTL expiry,
+            //    which leaves the version counter unchanged.
+            // Reading each key inside the transaction also registers it in the
+            // SSI readset, so a concurrent write during EXEC is caught at commit.
+            if batch && !self.watched_keys.is_empty() {
+                if self.registry.flush_epoch() != self.watch_flush_epoch {
+                    self.queue.clear();
+                    self.watched_keys.clear();
+                    return vec![RespValue::Array(None)];
+                }
+                for (key, (watched_version, existed_at_watch)) in &self.watched_keys {
+                    if self.registry.get_version(key) != *watched_version {
+                        self.queue.clear();
+                        self.watched_keys.clear();
+                        return vec![RespValue::Array(None)];
+                    }
+                    let exists_now = match tx.get(key.as_bytes()).await {
+                        Ok(_) => true,
+                        Err(KvError::KeyNotFound) => false,
                         Err(_) => {
                             self.queue.clear();
                             self.watched_keys.clear();
                             return vec![RespValue::Array(None)];
                         }
                     };
-                    if current != *expected {
+                    if exists_now != *existed_at_watch {
                         self.queue.clear();
                         self.watched_keys.clear();
                         return vec![RespValue::Array(None)];
@@ -537,6 +546,15 @@ impl Session {
                 Ok(handle) => {
                     tracing::debug!(ops = outcomes.len(), "tx committed");
                     self.latest_write = handle;
+                    // Bump write versions for every key touched by a mutating op
+                    // so that concurrent WATCH sessions detect the change at EXEC.
+                    let changed_keys: Vec<String> = self.queue.iter()
+                        .filter(|op| op.is_mutating)
+                        .flat_map(|op| op.keys.iter().flatten().cloned())
+                        .collect();
+                    if !changed_keys.is_empty() {
+                        self.registry.bump_versions(&changed_keys);
+                    }
                     break 'commit;
                 }
                 Err(KvError::Conflict) if isolation == TxIsolation::SerializableSnapshot => {
@@ -711,7 +729,7 @@ mod tests {
     #[test]
     fn needs_ssi_false_when_watched_key_not_in_queue() {
         let mut session = test_session();
-        session.watched_keys.insert(key_str(&session, b"other"), None);
+        session.watched_keys.insert(key_str(&session, b"other"), (0, false));
         let op = strings::set(&session, b"foo", b"bar", None);
         session.enqueue_op(op);
         assert!(!session.needs_ssi(), "watched key not touched by queued op → SI");
@@ -720,7 +738,7 @@ mod tests {
     #[test]
     fn needs_ssi_true_when_watched_key_in_queue() {
         let mut session = test_session();
-        session.watched_keys.insert(key_str(&session, b"foo"), None);
+        session.watched_keys.insert(key_str(&session, b"foo"), (0, false));
         let op = strings::set(&session, b"foo", b"bar", None);
         session.enqueue_op(op);
         assert!(session.needs_ssi(), "watched key touched by queued op → SSI");
@@ -730,8 +748,8 @@ mod tests {
     fn needs_ssi_true_when_any_watched_key_matches() {
         let mut session = test_session();
         // watch two keys; queue an op that touches only the second one
-        session.watched_keys.insert(key_str(&session, b"unrelated"), None);
-        session.watched_keys.insert(key_str(&session, b"bar"), None);
+        session.watched_keys.insert(key_str(&session, b"unrelated"), (0, false));
+        session.watched_keys.insert(key_str(&session, b"bar"), (0, false));
         let op = strings::set(&session, b"bar", b"val", None);
         session.enqueue_op(op);
         assert!(session.needs_ssi(), "one of the watched keys is touched → SSI");
@@ -740,7 +758,7 @@ mod tests {
     #[test]
     fn needs_ssi_cleared_after_unwatch() {
         let mut session = test_session();
-        session.watched_keys.insert(key_str(&session, b"foo"), None);
+        session.watched_keys.insert(key_str(&session, b"foo"), (0, false));
         let op = strings::set(&session, b"foo", b"bar", None);
         session.enqueue_op(op);
         assert!(session.needs_ssi());

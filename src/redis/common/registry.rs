@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::sync::oneshot;
@@ -117,7 +118,8 @@ impl Claim {
 }
 
 /// Process-wide registry mapping a public Redis key to the FIFO queue of
-/// clients currently blocked waiting for a pop on that key.
+/// clients currently blocked waiting for a pop on that key, plus a monotonic
+/// per-key write counter used by `WATCH`/`EXEC` to detect ABA writes.
 ///
 /// Invariants:
 /// - The longest-waiting client on any key is always the front of its queue.
@@ -126,6 +128,14 @@ impl Claim {
 ///   held across an await point.
 pub struct WatchRegistry {
     inner: Mutex<Inner>,
+    /// Monotonically increasing write version for each public storage key.
+    /// Bumped after every committed write. `WATCH` snapshots the current value;
+    /// `EXEC` aborts when the current value exceeds the snapshot — even for
+    /// ABA writes (write then restore original value).
+    write_versions: Mutex<HashMap<String, u64>>,
+    /// Global epoch bumped on every `FLUSHDB`/`FLUSHALL`. Watching sessions
+    /// record the epoch at `WATCH` time and abort if it changed by `EXEC`.
+    flush_epoch: AtomicU64,
 }
 
 struct Inner {
@@ -140,7 +150,35 @@ impl WatchRegistry {
                 waiters: HashMap::new(),
                 next_id: 1,
             }),
+            write_versions: Mutex::new(HashMap::new()),
+            flush_epoch: AtomicU64::new(0),
         }
+    }
+
+    /// Returns the current write version of `key` (0 if never written).
+    pub fn get_version(&self, key: &str) -> u64 {
+        self.write_versions.lock().unwrap().get(key).copied().unwrap_or(0)
+    }
+
+    /// Bumps the write version of each key in `keys` after a successful commit.
+    pub fn bump_versions(&self, keys: &[String]) {
+        let mut map = self.write_versions.lock().unwrap();
+        for key in keys {
+            let v = map.entry(key.clone()).or_insert(0);
+            *v += 1;
+        }
+    }
+
+    /// Returns the current flush epoch.
+    pub fn flush_epoch(&self) -> u64 {
+        self.flush_epoch.load(Ordering::Acquire)
+    }
+
+    /// Bumps the flush epoch. Called after a successful `FLUSHDB` or
+    /// `FLUSHALL`, which logically deletes every key in the store, so all
+    /// in-flight `WATCH` snapshots are invalidated.
+    pub fn bump_flush_epoch(&self) {
+        self.flush_epoch.fetch_add(1, Ordering::Release);
     }
 
     /// Inspects the front of the queue for `public_key` and, if a waiter is

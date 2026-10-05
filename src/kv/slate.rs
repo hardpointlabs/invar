@@ -290,12 +290,12 @@ impl Tx for SlateTx {
         match kv {
             Some(kv) => {
                 let (value, meta) = decode_value(&kv.value);
-                Ok(Item::new(
-                    kv.key.to_vec(),
-                    value.to_vec(),
-                    meta,
-                    kv.expire_ts,
-                ))
+                let item = Item::new(kv.key.to_vec(), value.to_vec(), meta, kv.expire_ts);
+                if item.is_expired() {
+                    Err(Error::KeyNotFound)
+                } else {
+                    Ok(item)
+                }
             }
             None => Err(Error::KeyNotFound),
         }
