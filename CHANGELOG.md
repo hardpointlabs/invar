@@ -1,3 +1,10 @@
+## [1.0.29](https://github.com/hardpointlabs/invar/compare/v1.0.28...v1.0.29) (2026-10-07)
+
+
+### Bug Fixes
+
+* Merge pull request [#101](https://github.com/hardpointlabs/invar/issues/101) from hardpointlabs/readiness-probes ([fe3697c](https://github.com/hardpointlabs/invar/commit/fe3697c6bdf3e3a2d4f99e7a2606f419f467b05d))
+
 ## [1.0.28](https://github.com/hardpointlabs/invar/compare/v1.0.27...v1.0.28) (2026-10-05)
 
 
