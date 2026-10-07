@@ -1415,6 +1415,7 @@ name = "invar"
 version = "1.0.28"
 dependencies = [
  "clap",
+ "humantime",
  "kv",
  "metrics-exporter-prometheus",
  "redis",
