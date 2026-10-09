@@ -143,6 +143,10 @@ struct Cli {
     #[arg(long, env = "INVAR_DATA_PATH", default_value = "/tmp/invar")]
     path: Option<PathBuf>,
 
+    /// TCP port the Redis listener binds to
+    #[arg(long, env = "INVAR_REDIS_PORT", default_value_t = 6379)]
+    redis_port: u16,
+
     /// Optional listen address for the Prometheus metrics exporter
     #[arg(long, env = "INVAR_METRICS_ADDR")]
     metrics_addr: Option<String>,
@@ -227,7 +231,7 @@ async fn main() {
 
     ready.store(true, Ordering::Release);
 
-    let addr: SocketAddr = "0.0.0.0:6379".parse().expect("valid listen address");
+    let addr = SocketAddr::from(([0, 0, 0, 0], cli.redis_port));
     let listener = RedisListener::new(addr, store.clone());
 
     tokio::select! {
