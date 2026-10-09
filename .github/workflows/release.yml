@@ -203,3 +203,39 @@ jobs:
           MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
           MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
           MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+
+      # Last step: the images, binaries and Discord announcement are all done.
+      # Resolve the manifest-list digest of what GoReleaser just pushed so the
+      # private invar-sidecar repo builds against exactly this image.
+      - name: Resolve published image digest
+        if: steps.semantic.outputs.new_release == 'true'
+        id: image
+        env:
+          TAG: ${{ steps.semantic.outputs.new_release_git_tag }}
+        run: |
+          set -euo pipefail
+          digest="$(docker buildx imagetools inspect "ghcr.io/hardpointlabs/invar:${TAG}" --format '{{.Manifest.Digest}}')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::bad digest: $digest"; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      # Separate token, scoped to invar-sidecar only, so the broader token used
+      # above never gains access to it.
+      - name: Generate sidecar dispatch token
+        if: steps.semantic.outputs.new_release == 'true'
+        id: sidecar-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: invar-sidecar
+      - name: Trigger invar-sidecar build
+        if: steps.semantic.outputs.new_release == 'true'
+        env:
+          GH_TOKEN: ${{ steps.sidecar-token.outputs.token }}
+          VERSION: ${{ steps.semantic.outputs.new_release_git_tag }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          gh api repos/hardpointlabs/invar-sidecar/dispatches \
+            -f event_type=invar-release \
+            -f "client_payload[version]=${VERSION}" \
+            -f "client_payload[digest]=${DIGEST}"
