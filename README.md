@@ -17,6 +17,11 @@ It's explicitly designed for single-writer operation and to run at fleet-scale f
 
 Check out the [docs](https://docs.hardpoint.dev/guides/invar) for more details.
 
+## Invar Cloud
+
+> [!TIP]
+> Our fully managed, hosted Invar service is in open alpha. [Sign up for free here!](https://dashboard.hardpoint.dev)
+
 ---
 
 ## Why Invar
