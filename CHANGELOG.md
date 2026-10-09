@@ -1,3 +1,10 @@
+## [1.0.30](https://github.com/hardpointlabs/invar/compare/v1.0.29...v1.0.30) (2026-10-09)
+
+
+### Bug Fixes
+
+* Merge pull request [#107](https://github.com/hardpointlabs/invar/issues/107) from hardpointlabs/sidecar-trigger ([a96783d](https://github.com/hardpointlabs/invar/commit/a96783d938a08d2c468658a2bc37213ed9539018))
+
 ## [1.0.29](https://github.com/hardpointlabs/invar/compare/v1.0.28...v1.0.29) (2026-10-07)
 
 
