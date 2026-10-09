@@ -1,3 +1,10 @@
+## [1.0.31](https://github.com/hardpointlabs/invar/compare/v1.0.30...v1.0.31) (2026-10-09)
+
+
+### Bug Fixes
+
+* Merge pull request [#108](https://github.com/hardpointlabs/invar/issues/108) from hardpointlabs/alpha-ad ([3f709d7](https://github.com/hardpointlabs/invar/commit/3f709d7fc691454f4c8f5e6c2177eafae2ed8db8))
+
 ## [1.0.30](https://github.com/hardpointlabs/invar/compare/v1.0.29...v1.0.30) (2026-10-09)
 
 
