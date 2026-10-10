@@ -13,7 +13,7 @@ foyer = "0.22"
 libc = "0.2"
 metrics = "0.24"
 slatedb = { version = "0.16", features = ["aws", "foyer", "zstd"] }
-slatedb-common = "0.16"
+slatedb-common = "0.17"
 thiserror = "2.0.20"
 tokio = { version = "1", features = ["time"] }
 
