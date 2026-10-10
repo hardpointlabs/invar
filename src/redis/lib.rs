@@ -30,6 +30,6 @@ mod stream;
 mod watch_tests;
 
 pub use common::{RedisStore, Session, WatchRegistry};
-pub use listener::RedisListener;
+pub use listener::{ListenAddr, RedisListener};
 pub use pubsub::PubSubRegistry;
 pub use resp::{RespDecoder, RespError, RespValue};

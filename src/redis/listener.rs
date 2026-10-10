@@ -28,11 +28,15 @@
 //! References:
 //! - <https://smallcultfollowing.com/babysteps/blog/2022/06/13/async-cancellation-a-case-study-of-pub-sub-in-mini-redis/>
 
+use std::net::{SocketAddr, ToSocketAddrs};
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::SinkExt;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncWrite, Interest};
+use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio_stream::StreamExt as TokioStreamExt;
 use tokio_util::codec::Framed;
 
@@ -48,18 +52,113 @@ use crate::resp::{RespDecoder, RespError, RespValue};
 // Listener
 // ---------------------------------------------------------------------------
 
-/// Accepts RESP connections on a TCP address.
+/// Where the Redis listener accepts connections.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListenAddr {
+    Tcp(SocketAddr),
+    Unix(PathBuf),
+}
+
+impl From<SocketAddr> for ListenAddr {
+    fn from(addr: SocketAddr) -> Self {
+        ListenAddr::Tcp(addr)
+    }
+}
+
+impl FromStr for ListenAddr {
+    type Err = String;
+
+    /// A value containing a `/` is a Unix socket path. Anything else is a TCP
+    /// `host:port`, where `host` may be an IP address or a hostname. A hostname
+    /// that does not resolve is an error rather than a fallback.
+    fn from_str(s: &str) -> Result<Self, String> {
+        if s.is_empty() {
+            return Err("address must not be empty".into());
+        }
+        if s.contains('/') {
+            return Ok(ListenAddr::Unix(PathBuf::from(s)));
+        }
+        if let Ok(addr) = s.parse::<SocketAddr>() {
+            return Ok(ListenAddr::Tcp(addr));
+        }
+        let mut addrs = s
+            .to_socket_addrs()
+            .map_err(|e| format!("couldn't resolve '{s}' (expected host:port or a socket path containing '/'): {e}"))?;
+        addrs
+            .next()
+            .map(ListenAddr::Tcp)
+            .ok_or_else(|| format!("'{s}' resolved to no addresses"))
+    }
+}
+
+impl std::fmt::Display for ListenAddr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ListenAddr::Tcp(a) => write!(f, "{a}"),
+            ListenAddr::Unix(p) => write!(f, "{}", p.display()),
+        }
+    }
+}
+
+/// A client connection transport (TCP or Unix socket).
+trait ClientStream: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static {
+    fn peer(&self) -> Option<SocketAddr> {
+        None
+    }
+
+    /// Resolves when the client has closed (or reset) its end, without
+    /// consuming any bytes the connection still has to parse.
+    ///
+    /// Unread bytes (a pipelined request) sit in front of any EOF and keep the
+    /// socket readable, so in that case we poll gently instead of spinning; a
+    /// pipelining client that disconnects mid-block is noticed once its backlog
+    /// is read, as before.
+    fn peer_closed(&self) -> impl std::future::Future<Output = ()> + Send;
+}
+
+impl ClientStream for TcpStream {
+    fn peer(&self) -> Option<SocketAddr> {
+        self.peer_addr().ok()
+    }
+
+    async fn peer_closed(&self) {
+        let mut probe = [0u8; 1];
+        loop {
+            match self.peek(&mut probe).await {
+                Ok(0) | Err(_) => return,
+                Ok(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+            }
+        }
+    }
+}
+
+impl ClientStream for UnixStream {
+    // tokio's UnixStream has no `peek`, so rely on the read-closed readiness
+    // bit, which doesn't consume data.
+    async fn peer_closed(&self) {
+        loop {
+            match self.ready(Interest::READABLE).await {
+                Ok(ready) if !ready.is_read_closed() => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await
+                }
+                _ => return,
+            }
+        }
+    }
+}
+
+/// Accepts RESP connections on a TCP or Unix socket address.
 pub struct RedisListener {
-    addr: std::net::SocketAddr,
+    addr: ListenAddr,
     store: Arc<dyn RedisStore>,
     registry: Arc<WatchRegistry>,
     pubsub: Arc<PubSubRegistry>,
 }
 
 impl RedisListener {
-    pub fn new(addr: std::net::SocketAddr, store: Arc<dyn RedisStore>) -> Self {
+    pub fn new(addr: impl Into<ListenAddr>, store: Arc<dyn RedisStore>) -> Self {
         Self {
-            addr,
+            addr: addr.into(),
             store,
             registry: Arc::new(WatchRegistry::new()),
             pubsub: Arc::new(PubSubRegistry::new()),
@@ -69,24 +168,67 @@ impl RedisListener {
     /// Binds and accepts connections forever. Each connection is handled on
     /// its own Tokio task.
     pub async fn serve(self) -> std::io::Result<()> {
-        let listener = TcpListener::bind(self.addr).await?;
-        let actual = listener.local_addr()?;
-        crate::server::set_addr(actual);
-        tracing::info!("Redis RESP listener on {actual}");
-        loop {
-            let (socket, _peer) = listener.accept().await?;
-            crate::server::conn_opened();
-            let store = self.store.clone();
-            let registry = self.registry.clone();
-            let pubsub = self.pubsub.clone();
-            tokio::spawn(async move {
-                let result = handle_connection(socket, store, registry, pubsub).await;
-                crate::server::conn_closed();
-                if let Err(e) = result {
-                    tracing::error!("invar: connection error: {e}");
+        match self.addr.clone() {
+            ListenAddr::Tcp(addr) => {
+                let listener = TcpListener::bind(addr).await?;
+                let actual = listener.local_addr()?;
+                crate::server::set_addr(actual);
+                tracing::info!("Redis RESP listener on {actual}");
+                loop {
+                    let (socket, _peer) = listener.accept().await?;
+                    self.spawn_conn(socket);
                 }
-            });
+            }
+            ListenAddr::Unix(path) => {
+                remove_stale_socket(&path).await?;
+                let listener = UnixListener::bind(&path)?;
+                crate::server::set_tcp_port(0);
+                tracing::info!("Redis RESP listener on unix socket {}", path.display());
+                loop {
+                    let (socket, _peer) = listener.accept().await?;
+                    self.spawn_conn(socket);
+                }
+            }
         }
+    }
+
+    fn spawn_conn<S: ClientStream>(&self, socket: S) {
+        crate::server::conn_opened();
+        let store = self.store.clone();
+        let registry = self.registry.clone();
+        let pubsub = self.pubsub.clone();
+        tokio::spawn(async move {
+            let result = handle_connection(socket, store, registry, pubsub).await;
+            crate::server::conn_closed();
+            if let Err(e) = result {
+                tracing::error!("invar: connection error: {e}");
+            }
+        });
+    }
+}
+
+/// Removes a socket file left behind by a previous run so the path can be
+/// rebound. Refuses to touch anything that isn't a socket, or a socket that
+/// something is still listening on.
+async fn remove_stale_socket(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::FileTypeExt;
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if !meta.file_type().is_socket() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("{} exists and is not a socket", path.display()),
+        ));
+    }
+    match UnixStream::connect(path).await {
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            format!("{} is in use by another process", path.display()),
+        )),
+        Err(_) => std::fs::remove_file(path),
     }
 }
 
@@ -97,14 +239,14 @@ impl RedisListener {
 /// Serves a single connection until it closes. A protocol violation is
 /// answered with an error and the connection is dropped, as a real Redis
 /// server would.
-async fn handle_connection(
-    socket: TcpStream,
+async fn handle_connection<S: ClientStream>(
+    socket: S,
     store: Arc<dyn RedisStore>,
     registry: Arc<WatchRegistry>,
     pubsub: Arc<PubSubRegistry>,
 ) -> Result<(), RespError> {
     let mut session = Session::new_with_pubsub(store, registry, pubsub.clone());
-    if let Ok(peer) = socket.peer_addr() {
+    if let Some(peer) = socket.peer() {
         session.set_peer_addr(peer);
     }
     let _registry_guard = crate::server::register_session(&session);
@@ -281,7 +423,7 @@ async fn handle_connection(
                                     replies = enqueue_command(&mut session, &args) => replies,
                                     () = async {
                                         if blocked.wait_for(|b| *b).await.is_ok() {
-                                            peer_closed(framed.get_ref()).await;
+                                            framed.get_ref().peer_closed().await;
                                         } else {
                                             std::future::pending::<()>().await;
                                         }
@@ -309,23 +451,6 @@ async fn handle_connection(
     }
 }
 
-/// Resolves when the client has closed (or reset) its end of `socket`,
-/// without consuming any bytes the connection still has to parse.
-///
-/// Unread bytes (a pipelined request) sit in front of any EOF and keep the
-/// socket readable, so in that case we poll gently instead of spinning; a
-/// pipelining client that disconnects mid-block is noticed once its backlog
-/// is read, as before.
-async fn peer_closed(socket: &TcpStream) {
-    let mut probe = [0u8; 1];
-    loop {
-        match socket.peek(&mut probe).await {
-            Ok(0) | Err(_) => return,
-            Ok(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Subscribe-mode command handler
 // ---------------------------------------------------------------------------
@@ -336,8 +461,8 @@ async fn peer_closed(socket: &TcpStream) {
 /// `PUNSUBSCRIBE`, `SUNSUBSCRIBE`, `PING`, and `QUIT` are allowed.
 ///
 /// Returns `true` if the connection should be closed.
-async fn handle_subscribe_mode_command(
-    framed: &mut Framed<TcpStream, RespDecoder>,
+async fn handle_subscribe_mode_command<S: ClientStream>(
+    framed: &mut Framed<S, RespDecoder>,
     session: &mut Session,
     subs: &mut ConnectionSubs,
     args: &[Bytes],
@@ -411,8 +536,8 @@ async fn handle_subscribe_mode_command(
 
 /// Processes a `SUBSCRIBE` or `SSUBSCRIBE` command.  Emits one reply frame
 /// per channel, as Redis specifies.
-async fn handle_subscribe(
-    framed: &mut Framed<TcpStream, RespDecoder>,
+async fn handle_subscribe<S: ClientStream>(
+    framed: &mut Framed<S, RespDecoder>,
     subs: &mut ConnectionSubs,
     channels: &[Bytes],
     _is_pattern: bool,
@@ -432,8 +557,8 @@ async fn handle_subscribe(
 }
 
 /// Processes a `PSUBSCRIBE` command.  Emits one reply frame per pattern.
-async fn handle_psubscribe(
-    framed: &mut Framed<TcpStream, RespDecoder>,
+async fn handle_psubscribe<S: ClientStream>(
+    framed: &mut Framed<S, RespDecoder>,
     subs: &mut ConnectionSubs,
     patterns: &[Bytes],
 ) -> Result<(), RespError> {
@@ -454,8 +579,8 @@ async fn handle_psubscribe(
 /// With explicit channel names: emits one frame per channel.
 /// With no arguments: unsubscribes from all, emits one frame per channel, or
 /// a single null-channel frame if there were none.
-async fn handle_unsubscribe(
-    framed: &mut Framed<TcpStream, RespDecoder>,
+async fn handle_unsubscribe<S: ClientStream>(
+    framed: &mut Framed<S, RespDecoder>,
     subs: &mut ConnectionSubs,
     channels: &[Bytes],
     use_sunsubscribe_frame: bool,
@@ -515,8 +640,8 @@ async fn handle_unsubscribe(
 ///
 /// With explicit patterns: emits one frame per pattern.
 /// With no arguments: unsubscribes from all patterns.
-async fn handle_punsubscribe(
-    framed: &mut Framed<TcpStream, RespDecoder>,
+async fn handle_punsubscribe<S: ClientStream>(
+    framed: &mut Framed<S, RespDecoder>,
     subs: &mut ConnectionSubs,
     patterns: &[Bytes],
 ) -> Result<(), RespError> {
@@ -671,6 +796,79 @@ mod tests {
                 b"OK"
             ))]))
         );
+
+        handle.abort();
+    }
+
+    #[test]
+    fn listen_addr_parsing() {
+        assert_eq!(
+            "0.0.0.0:6379".parse::<ListenAddr>().unwrap(),
+            ListenAddr::Tcp("0.0.0.0:6379".parse().unwrap())
+        );
+        assert_eq!(
+            "[::1]:6380".parse::<ListenAddr>().unwrap(),
+            ListenAddr::Tcp("[::1]:6380".parse().unwrap())
+        );
+        assert!(matches!(
+            "localhost:6379".parse::<ListenAddr>().unwrap(),
+            ListenAddr::Tcp(a) if a.port() == 6379
+        ));
+        assert_eq!(
+            "/foo/my.sock".parse::<ListenAddr>().unwrap(),
+            ListenAddr::Unix("/foo/my.sock".into())
+        );
+        assert_eq!(
+            "./my.sock".parse::<ListenAddr>().unwrap(),
+            ListenAddr::Unix("./my.sock".into())
+        );
+    }
+
+    #[test]
+    fn listen_addr_rejects_unresolvable_or_malformed() {
+        assert!("no-such-host.invalid:6379".parse::<ListenAddr>().is_err());
+        assert!("localhost".parse::<ListenAddr>().is_err());
+        assert!("".parse::<ListenAddr>().is_err());
+    }
+
+    #[tokio::test]
+    async fn serves_over_unix_socket_and_reclaims_stale_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invar.sock");
+
+        // A dead socket file from a previous run must not block startup.
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        assert!(path.exists());
+
+        let handle = tokio::spawn(
+            RedisListener::new(ListenAddr::Unix(path.clone()), test_store()).serve(),
+        );
+        let mut client = loop {
+            match tokio::net::UnixStream::connect(&path).await {
+                Ok(c) => break c,
+                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        };
+        client
+            .write_all(b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n*2\r\n$3\r\nGET\r\n$1\r\nk\r\n")
+            .await
+            .unwrap();
+        let mut framed = Framed::new(client, RespDecoder::new());
+        assert_eq!(
+            FuturesStreamExt::next(&mut framed).await.unwrap().unwrap(),
+            RespValue::SimpleString(Bytes::from_static(b"OK"))
+        );
+        assert_eq!(
+            FuturesStreamExt::next(&mut framed).await.unwrap().unwrap(),
+            RespValue::BulkString(Some(Bytes::from_static(b"v")))
+        );
+
+        // A second listener must refuse a path that is live.
+        let err = RedisListener::new(ListenAddr::Unix(path.clone()), test_store())
+            .serve()
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
 
         handle.abort();
     }
