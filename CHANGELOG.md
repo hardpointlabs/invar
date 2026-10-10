@@ -1,3 +1,10 @@
+## [1.0.33](https://github.com/hardpointlabs/invar/compare/v1.0.32...v1.0.33) (2026-10-10)
+
+
+### Bug Fixes
+
+* Merge pull request [#111](https://github.com/hardpointlabs/invar/issues/111) from hardpointlabs/configurable-redis-addr ([ac60123](https://github.com/hardpointlabs/invar/commit/ac601233c5cc4489e7453b3ae2f207dc0013f5d6))
+
 ## [1.0.32](https://github.com/hardpointlabs/invar/compare/v1.0.31...v1.0.32) (2026-10-10)
 
 
