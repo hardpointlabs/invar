@@ -45,6 +45,11 @@ pub fn set_addr(addr: SocketAddr) {
     TCP_PORT.store(addr.port() as i64, Ordering::Relaxed);
 }
 
+/// Sets the port reported by INFO; 0 when not listening on TCP.
+pub fn set_tcp_port(port: i64) {
+    TCP_PORT.store(port, Ordering::Relaxed);
+}
+
 /// Must be called for every accepted connection.
 pub fn conn_opened() {
     TOTAL_CONNECTIONS_RECEIVED.fetch_add(1, Ordering::Relaxed);

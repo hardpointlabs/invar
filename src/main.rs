@@ -7,7 +7,7 @@ use kv::{
     fjall::FjallDb,
     slate::{SlateDb, SlateDbOpts},
 };
-use redis::{RedisListener, RedisStore};
+use redis::{ListenAddr, RedisListener, RedisStore};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -143,9 +143,10 @@ struct Cli {
     #[arg(long, env = "INVAR_DATA_PATH", default_value = "/tmp/invar")]
     path: Option<PathBuf>,
 
-    /// TCP port the Redis listener binds to
-    #[arg(long, env = "INVAR_REDIS_PORT", default_value_t = 6379)]
-    redis_port: u16,
+    /// Address the Redis listener binds to: `host:port` (IP or hostname), or a
+    /// Unix socket path (any value containing `/`, e.g. `/tmp/invar.sock`)
+    #[arg(long, env = "INVAR_REDIS_ADDR", default_value = "0.0.0.0:6379")]
+    redis_addr: ListenAddr,
 
     /// Optional listen address for the Prometheus metrics exporter
     #[arg(long, env = "INVAR_METRICS_ADDR")]
@@ -231,8 +232,7 @@ async fn main() {
 
     ready.store(true, Ordering::Release);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], cli.redis_port));
-    let listener = RedisListener::new(addr, store.clone());
+    let listener = RedisListener::new(cli.redis_addr.clone(), store.clone());
 
     tokio::select! {
             result = listener.serve() => {
@@ -252,6 +252,10 @@ async fn main() {
         Ok(Ok(())) => tracing::info!("store closed cleanly"),
         Ok(Err(e)) => tracing::error!(error = %e, "error closing store"),
         Err(_) => tracing::warn!(timeout = ?cli.shutdown_timeout, "store close timed out, exiting anyway"),
+    }
+
+    if let ListenAddr::Unix(path) = &cli.redis_addr {
+        let _ = std::fs::remove_file(path);
     }
 
     // The metrics server outlives the store so probes stay answerable while it closes.
