@@ -1,3 +1,11 @@
+## [1.0.32](https://github.com/hardpointlabs/invar/compare/v1.0.31...v1.0.32) (2026-10-10)
+
+
+### Bug Fixes
+
+* Merge pull request [#109](https://github.com/hardpointlabs/invar/issues/109) from hardpointlabs/fix/blocking-waiter-disconnect ([a91ec34](https://github.com/hardpointlabs/invar/commit/a91ec34387f3aa9897a8c19a80cae972fbefa1be))
+* release blocked BZPOP*/XREAD waiters when the client disconnects ([48afc1e](https://github.com/hardpointlabs/invar/commit/48afc1e273177bc957b032b39335b1bba054e460))
+
 ## [1.0.31](https://github.com/hardpointlabs/invar/compare/v1.0.30...v1.0.31) (2026-10-09)
 
 
