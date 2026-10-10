@@ -24,7 +24,7 @@ use kv::kv::{TxIsolation, BoxFuture, Entry, Error as KvError, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use crate::common::session::Session;
-use crate::common::{BlockResult, Claim, RedisStore, StreamResult, ValueType, WatchRegistry};
+use crate::common::{BlockResult, BlockingSignal, Claim, RedisStore, StreamResult, ValueType, WatchRegistry};
 use crate::resp::RespValue;
 
 /// Metadata type byte stamped on the sentinel entry.
@@ -479,6 +479,7 @@ pub fn xread(
             count,
             timeout,
             can_block,
+            blocking: session.blocking_signal(),
         }),
         wire_op: Box::new(XReadWire),
         is_mutating: false,
@@ -837,6 +838,7 @@ struct XReadOp {
     /// Block timeout in seconds; only consulted when `can_block`.
     timeout: f64,
     can_block: bool,
+    blocking: BlockingSignal,
 }
 
 // TODO we should properly type this list of read results,
@@ -952,6 +954,7 @@ impl DbOp for XReadOp {
         let ids = self.ids.clone();
         let count = self.count;
         let timeout = self.timeout;
+        let blocking = self.blocking.clone();
         Box::pin(async move {
             let own_tx = store.begin(false, TxIsolation::Snapshot).await.map_err(DbError::Kv)?;
             let resolved = match resolve_read_ids(&*own_tx, &streams, &ids).await {
@@ -986,6 +989,7 @@ impl DbOp for XReadOp {
             } else {
                 None
             };
+            blocking.entering_block();
             registry.block_stream(&public_keys, duration).await;
 
             // Re-read with a fresh transaction: the wake is delivered only

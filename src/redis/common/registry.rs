@@ -316,6 +316,14 @@ impl WatchRegistry {
             );
         }
 
+        // If this future is dropped while blocked (its client disconnected),
+        // the registration must not outlive it, or a later write would claim
+        // a waiter nobody can reply to.
+        let _deregister = Deregister {
+            registry: self,
+            waiter: waiter.clone(),
+        };
+
         match timeout {
             Some(duration) => {
                 match tokio::time::timeout(duration, &mut rx).await {
@@ -365,6 +373,23 @@ impl WatchRegistry {
     }
 }
 
+/// Removes a waiter's registration when the blocked future holding it is
+/// dropped. A no-op if a writer or a timeout already removed the waiter.
+///
+/// This cannot recover a result a writer has already claimed for the waiter
+/// but not yet delivered; that window (claim to commit) is the same inherent
+/// race Redis has when a client drops as its blocked pop is served.
+struct Deregister<'a> {
+    registry: &'a WatchRegistry,
+    waiter: Arc<Waiter>,
+}
+
+impl Drop for Deregister<'_> {
+    fn drop(&mut self) {
+        self.registry.remove_waiter(&self.waiter);
+    }
+}
+
 impl Default for WatchRegistry {
     fn default() -> Self {
         Self::new()
@@ -402,6 +427,18 @@ mod tests {
             .await;
         assert!(result.is_none());
         // The waiter must have been deregistered.
+        assert!(registry.try_claim(&key()).is_none());
+    }
+
+    #[tokio::test]
+    async fn dropping_blocked_future_deregisters_waiter() {
+        let registry = WatchRegistry::new();
+        let keys = [key()];
+        let blocked = registry.block(&keys, true, None);
+        // Poll once so the waiter registers, then drop the future mid-wait.
+        assert!(tokio::time::timeout(Duration::from_millis(20), blocked)
+            .await
+            .is_err());
         assert!(registry.try_claim(&key()).is_none());
     }
 

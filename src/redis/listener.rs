@@ -268,8 +268,25 @@ async fn handle_connection(
                                 ]))).await?;
                             }
                             _ => {
-                                // Normal command dispatch.
-                                let replies = enqueue_command(&mut session, &args).await;
+                                // Normal command dispatch. Once a command
+                                // reports it is parked waiting on a writer
+                                // (see `BlockingSignal`) it is raced against
+                                // the client hanging up; dropping it
+                                // deregisters its waiter, so a later write
+                                // can't be handed to a dead connection. A
+                                // command that never blocks is never
+                                // cancelled, least of all mid-write.
+                                let mut blocked = session.blocking_signal().arm();
+                                let replies = tokio::select! {
+                                    replies = enqueue_command(&mut session, &args) => replies,
+                                    () = async {
+                                        if blocked.wait_for(|b| *b).await.is_ok() {
+                                            peer_closed(framed.get_ref()).await;
+                                        } else {
+                                            std::future::pending::<()>().await;
+                                        }
+                                    } => return Ok(()),
+                                };
                                 for reply in replies {
                                     framed.send(reply).await?;
                                 }
@@ -288,6 +305,23 @@ async fn handle_connection(
                         .await?;
                 }
             }
+        }
+    }
+}
+
+/// Resolves when the client has closed (or reset) its end of `socket`,
+/// without consuming any bytes the connection still has to parse.
+///
+/// Unread bytes (a pipelined request) sit in front of any EOF and keep the
+/// socket readable, so in that case we poll gently instead of spinning; a
+/// pipelining client that disconnects mid-block is noticed once its backlog
+/// is read, as before.
+async fn peer_closed(socket: &TcpStream) {
+    let mut probe = [0u8; 1];
+    loop {
+        match socket.peek(&mut probe).await {
+            Ok(0) | Err(_) => return,
+            Ok(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
         }
     }
 }
@@ -653,6 +687,126 @@ mod tests {
         // Brief pause to let the listener start accepting.
         tokio::time::sleep(Duration::from_millis(5)).await;
         (addr, handle)
+    }
+
+    /// A client that disconnects while blocked in `BZPOPMIN` must not leave a
+    /// live waiter behind: a later `ZADD` has to keep its element rather than
+    /// hand it to a connection that can never read the reply.
+    #[tokio::test]
+    async fn disconnected_bzpopmin_waiter_does_not_consume_element() {
+        let (addr, handle) = spawn_listener().await;
+
+        let mut blocked = connect_retry(addr).await;
+        send_cmd(&mut blocked, &[b"BZPOPMIN", b"dead-waiter", b"5"]).await;
+        // Let the server register the waiter, then hang up without waiting for a reply.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(blocked);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let writer = connect_retry(addr).await;
+        let mut writer = Framed::new(writer, RespDecoder::new());
+        for cmd in [
+            RespValue::Array(Some(
+                [&b"ZADD"[..], b"dead-waiter", b"1", b"precious"]
+                    .iter()
+                    .map(|p| RespValue::BulkString(Some(Bytes::copy_from_slice(p))))
+                    .collect(),
+            )),
+            RespValue::Array(Some(
+                [&b"ZCARD"[..], b"dead-waiter"]
+                    .iter()
+                    .map(|p| RespValue::BulkString(Some(Bytes::copy_from_slice(p))))
+                    .collect(),
+            )),
+        ] {
+            writer.send(cmd).await.unwrap();
+        }
+        assert_eq!(next_reply(&mut writer).await, RespValue::Integer(1));
+        assert_eq!(
+            next_reply(&mut writer).await,
+            RespValue::Integer(1),
+            "element was popped by a waiter whose client had disconnected"
+        );
+
+        handle.abort();
+    }
+
+    /// Asks `CLIENT LIST` whether a connection from `addr` is still registered.
+    async fn client_listed(
+        conn: &mut Framed<tokio::net::TcpStream, RespDecoder>,
+        addr: std::net::SocketAddr,
+    ) -> bool {
+        let parts: [&[u8]; 2] = [b"CLIENT", b"LIST"];
+        conn.send(RespValue::Array(Some(
+            parts
+                .iter()
+                .map(|p| RespValue::BulkString(Some(Bytes::copy_from_slice(p))))
+                .collect(),
+        )))
+        .await
+        .unwrap();
+        match next_reply(conn).await {
+            RespValue::BulkString(Some(body)) => String::from_utf8_lossy(&body)
+                .contains(&format!("addr={addr} ")),
+            other => panic!("unexpected CLIENT LIST reply: {other:?}"),
+        }
+    }
+
+    /// Polls until `client_listed` equals `want`, or panics after `within`.
+    async fn wait_until_listed(
+        conn: &mut Framed<tokio::net::TcpStream, RespDecoder>,
+        addr: std::net::SocketAddr,
+        want: bool,
+        within: Duration,
+        what: &str,
+    ) {
+        let deadline = tokio::time::Instant::now() + within;
+        while client_listed(conn, addr).await != want {
+            assert!(tokio::time::Instant::now() < deadline, "{what}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// A client that disconnects while blocked in `XREAD BLOCK` must be torn
+    /// down promptly rather than lingering (with its stream waiter) until the
+    /// block times out.
+    #[tokio::test]
+    async fn disconnected_xread_block_waiter_is_released() {
+        let (addr, handle) = spawn_listener().await;
+
+        let observer = connect_retry(addr).await;
+        let mut observer = Framed::new(observer, RespDecoder::new());
+
+        let mut blocked = connect_retry(addr).await;
+        let blocked_addr = blocked.local_addr().unwrap();
+        // Blocks for up to 5s; the assertions below allow far less.
+        send_cmd(
+            &mut blocked,
+            &[b"XREAD", b"BLOCK", b"5000", b"STREAMS", b"dead-xread", b"$"],
+        )
+        .await;
+        wait_until_listed(
+            &mut observer,
+            blocked_addr,
+            true,
+            Duration::from_secs(2),
+            "blocked client never appeared in CLIENT LIST",
+        )
+        .await;
+        // Let the server reach the blocking read and register its waiter.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        drop(blocked);
+        wait_until_listed(
+            &mut observer,
+            blocked_addr,
+            false,
+            Duration::from_secs(2),
+            "connection stayed open after the client disconnected mid-XREAD BLOCK",
+        )
+        .await;
+
+        handle.abort();
     }
 
     #[tokio::test]

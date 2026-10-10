@@ -10,7 +10,7 @@ pub mod store;
 
 pub use op::{DbError, DbOp, DbResult, QueuedOp, WireOp};
 pub use registry::{BlockResult, Claim, PopResult, StreamResult, WaitKind, WatchRegistry};
-pub use session::{Session, SessionError};
+pub use session::{BlockingSignal, Session, SessionError};
 pub use store::RedisStore;
 
 /// The public Redis value types stored as the metadata byte on LSM entries.

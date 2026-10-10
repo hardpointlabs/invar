@@ -44,7 +44,7 @@ use kv::kv::{TxIsolation, BoxFuture, Entry, Error as KvError, Tx};
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use smallvec::{smallvec, SmallVec};
 use crate::common::session::Session;
-use crate::common::{BlockResult, Claim, PopResult, RedisStore, ValueType, WatchRegistry};
+use crate::common::{BlockResult, BlockingSignal, Claim, PopResult, RedisStore, ValueType, WatchRegistry};
 use crate::resp::RespValue;
 
 /// Metadata type byte stamped on every zset sentinel, matching
@@ -2512,6 +2512,7 @@ struct BzpopOp {
     timeout: f64,
     want_min: bool,
     can_block: bool,
+    blocking: BlockingSignal,
 }
 
 impl DbOp for BzpopOp {
@@ -2537,6 +2538,7 @@ impl DbOp for BzpopOp {
                         } else {
                             None
                         };
+                        self.blocking.entering_block();
                         match self.registry.block(&public_keys, self.want_min, duration).await {
                             Some(result) => Ok(Box::new(Some(result)) as DbResult),
                             None => Ok(Box::new(None::<PopResult>) as DbResult),
@@ -2597,6 +2599,7 @@ pub fn bzpop(
             timeout,
             want_min,
             can_block,
+            blocking: session.blocking_signal(),
         }),
         wire_op: Box::new(BzpopWire),
         is_mutating: !can_block,
