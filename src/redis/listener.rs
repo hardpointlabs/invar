@@ -268,24 +268,24 @@ async fn handle_connection(
                                 ]))).await?;
                             }
                             _ => {
-                                // Normal command dispatch. A command that may
-                                // block is raced against the client hanging
-                                // up; dropping it deregisters its waiter, so
-                                // a later write can't be handed to a dead
-                                // connection. Everything else runs to
-                                // completion, never cancelled mid-write.
-                                let may_block = !session.in_multi()
-                                    && matches!(
-                                        name_lower.as_slice(),
-                                        b"bzpopmin" | b"bzpopmax" | b"xread"
-                                    );
-                                let replies = if may_block {
-                                    tokio::select! {
-                                        replies = enqueue_command(&mut session, &args) => replies,
-                                        () = peer_closed(framed.get_ref()) => return Ok(()),
-                                    }
-                                } else {
-                                    enqueue_command(&mut session, &args).await
+                                // Normal command dispatch. Once a command
+                                // reports it is parked waiting on a writer
+                                // (see `BlockingSignal`) it is raced against
+                                // the client hanging up; dropping it
+                                // deregisters its waiter, so a later write
+                                // can't be handed to a dead connection. A
+                                // command that never blocks is never
+                                // cancelled, least of all mid-write.
+                                let mut blocked = session.blocking_signal().arm();
+                                let replies = tokio::select! {
+                                    replies = enqueue_command(&mut session, &args) => replies,
+                                    () = async {
+                                        if blocked.wait_for(|b| *b).await.is_ok() {
+                                            peer_closed(framed.get_ref()).await;
+                                        } else {
+                                            std::future::pending::<()>().await;
+                                        }
+                                    } => return Ok(()),
                                 };
                                 for reply in replies {
                                     framed.send(reply).await?;

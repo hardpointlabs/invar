@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use bytes::Bytes;
+use tokio::sync::watch;
 use kv::kv::{Entry, Error as KvError, TxIsolation, WriteHandle};
 use smallvec::{smallvec, SmallVec};
 
@@ -22,6 +23,36 @@ use crate::pubsub::PubSubRegistry;
 use crate::resp::RespValue;
 
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Raised by a command when it is about to park waiting for another client's
+/// write (`BZPOPMIN`, `XREAD BLOCK`, ...).
+///
+/// The connection loop re-arms it before every command and only starts
+/// watching the socket for a hang-up once it fires. That lets it abandon a
+/// command that is merely waiting, without ever cancelling one that is
+/// mid-write, and without the loop knowing which commands can block.
+#[derive(Clone)]
+pub struct BlockingSignal(Arc<watch::Sender<bool>>);
+
+impl BlockingSignal {
+    fn new() -> Self {
+        Self(Arc::new(watch::channel(false).0))
+    }
+
+    /// Call immediately before awaiting a writer. Must only be called at a
+    /// point where dropping the command's future is safe: no open
+    /// transaction, and nothing but the wait left to cancel.
+    pub fn entering_block(&self) {
+        self.0.send_replace(true);
+    }
+
+    /// Clears the signal for the next command and returns a receiver that
+    /// resolves (via `wait_for(|b| *b)`) once that command starts blocking.
+    pub fn arm(&self) -> watch::Receiver<bool> {
+        self.0.send_replace(false);
+        self.0.subscribe()
+    }
+}
 
 /// Prefix marking internal (non-user-accessible) keys.
 const INTERNAL_PREFIX: &[u8] = b"-";
@@ -78,6 +109,7 @@ pub struct Session {
     store: Arc<dyn RedisStore>,
     registry: Arc<WatchRegistry>,
     pubsub: Arc<PubSubRegistry>,
+    blocking: BlockingSignal,
 }
 
 fn is_retryable_conflict(outcome: &Result<DbResult, DbError>) -> bool {
@@ -115,7 +147,14 @@ impl Session {
             store,
             registry,
             pubsub,
+            blocking: BlockingSignal::new(),
         }
+    }
+
+    /// Handle a blocking command uses to announce it is about to wait, and the
+    /// connection loop uses to learn that it has.
+    pub fn blocking_signal(&self) -> BlockingSignal {
+        self.blocking.clone()
     }
 
     /// The connection ID, unique process-wide.
@@ -687,6 +726,23 @@ mod tests {
         session.enter_multi();
         session.exit_multi(true).unwrap();
         assert!(session.queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn blocking_signal_fires_only_for_the_command_that_blocks() {
+        let signal = test_session().blocking_signal();
+
+        // A command that never blocks leaves the signal low.
+        let mut rx = signal.arm();
+        assert!(!*rx.borrow());
+
+        // A blocking command raises it...
+        signal.entering_block();
+        rx.wait_for(|b| *b).await.unwrap();
+
+        // ...and the next command starts from a cleared signal again.
+        let rx = signal.arm();
+        assert!(!*rx.borrow());
     }
 
     #[test]
