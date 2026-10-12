@@ -33,6 +33,7 @@ use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use smallvec::smallvec;
 use crate::common::session::Session;
+use crate::common::set_keeping_ttl;
 use crate::common::ValueType;
 use crate::resp::RespValue;
 
@@ -429,7 +430,7 @@ async fn read_sentinel(
 }
 
 /// Writes the list sentinel entry with list metadata.
-fn write_sentinel(
+async fn write_sentinel(
     tx: &dyn Tx,
     public_key: &[u8],
     head: Option<[u8; KEY_LENGTH]>,
@@ -444,7 +445,8 @@ fn write_sentinel(
     if let Some(t) = tail {
         buf[20..36].copy_from_slice(&t);
     }
-    tx.set(Entry::new(public_key.to_vec(), buf.to_vec()).metadata(TYPE_LIST))
+    set_keeping_ttl(tx, Entry::new(public_key.to_vec(), buf.to_vec()).metadata(TYPE_LIST))
+        .await
         .map_err(DbError::from)
 }
 
@@ -503,13 +505,13 @@ async fn load_list(tx: &dyn Tx, public_key: &[u8], node_prefix: &[u8]) -> Result
 }
 
 /// Persists the sentinel and every live node, mirroring Go's `persistList`.
-fn persist_list(
+async fn persist_list(
     tx: &dyn Tx,
     public_key: &[u8],
     node_prefix: &[u8],
     ll: &Linked,
 ) -> Result<(), DbError> {
-    write_sentinel(tx, public_key, ll.head, ll.tail, ll.size)?;
+    write_sentinel(tx, public_key, ll.head, ll.tail, ll.size).await?;
     for node in ll.nodes.values() {
         let mut buf = Vec::with_capacity(node.value.len() + 2 * KEY_LENGTH);
         buf.extend_from_slice(&node.value);
@@ -828,7 +830,7 @@ impl DbOp for PushOp {
                     ll.add_first(value.clone());
                 }
             }
-            persist_list(tx, &public_key, &node_prefix, &ll)?;
+            persist_list(tx, &public_key, &node_prefix, &ll).await?;
             let result: DbResult = Box::new(ll.size as i64);
             Ok(result)
         })
@@ -863,7 +865,7 @@ impl DbOp for PopOp {
             if ll.size == 0 {
                 tx.delete(&public_key)?;
             } else {
-                persist_list(tx, &public_key, &node_prefix, &ll)?;
+                persist_list(tx, &public_key, &node_prefix, &ll).await?;
             }
             let result: DbResult = Box::new(value);
             Ok(result)
@@ -1038,7 +1040,7 @@ impl DbOp for LSetOp {
                 return Err(DbError::Kv(KvError::KeyNotFound));
             };
             ll.nodes.get_mut(&k).expect("node present").value = value;
-            persist_list(tx, &public_key, &node_prefix, &ll)?;
+            persist_list(tx, &public_key, &node_prefix, &ll).await?;
             let result: DbResult = Box::new(());
             Ok(result)
         })
@@ -1075,7 +1077,7 @@ impl DbOp for LRemOp {
             if ll.size == 0 {
                 tx.delete(&public_key)?;
             } else {
-                persist_list(tx, &public_key, &node_prefix, &ll)?;
+                persist_list(tx, &public_key, &node_prefix, &ll).await?;
             }
             let result: DbResult = Box::new(removed);
             Ok(result)
@@ -1126,7 +1128,7 @@ impl DbOp for LTrimOp {
                 return Ok(result);
             }
             ll.trim_to(start as usize, stop as usize);
-            persist_list(tx, &public_key, &node_prefix, &ll)?;
+            persist_list(tx, &public_key, &node_prefix, &ll).await?;
             let result: DbResult = Box::new(());
             Ok(result)
         })
@@ -1161,7 +1163,7 @@ impl DbOp for LInsertOp {
                 let result: DbResult = Box::new(-1i64);
                 return Ok(result);
             }
-            persist_list(tx, &public_key, &node_prefix, &ll)?;
+            persist_list(tx, &public_key, &node_prefix, &ll).await?;
             let result: DbResult = Box::new(ll.size as i64);
             Ok(result)
         })
@@ -1202,7 +1204,7 @@ impl DbOp for RPopLPushOp {
             if src_ll.size == 0 {
                 tx.delete(&src_public)?;
             } else {
-                persist_list(tx, &src_public, &src_prefix, &src_ll)?;
+                persist_list(tx, &src_public, &src_prefix, &src_ll).await?;
             }
             // Push to head of destination.
             let mut dst_ll = match load_list(tx, &dst_public, &dst_prefix).await {
@@ -1211,7 +1213,7 @@ impl DbOp for RPopLPushOp {
                 Err(e) => return Err(e),
             };
             dst_ll.add_first(value.clone());
-            persist_list(tx, &dst_public, &dst_prefix, &dst_ll)?;
+            persist_list(tx, &dst_public, &dst_prefix, &dst_ll).await?;
             let result: DbResult = Box::new(Some(value));
             Ok(result)
         })

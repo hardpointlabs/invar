@@ -2937,5 +2937,517 @@
     "type": "integer",
     "version": "5.0.0",
     "description": "WAIT ignores replica arg"
+  },
+  {
+    "name": "TTL preserved after INCR (STRING)",
+    "command": ["TTL", "ttl_keep_string_incr"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.0.0",
+    "description": "INCR on a string with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["SET", "ttl_keep_string_incr", "5"],
+      ["EXPIRE", "ttl_keep_string_incr", "100"],
+      ["INCR", "ttl_keep_string_incr"]
+    ]
+  },
+  {
+    "name": "TTL preserved after INCRBY (STRING)",
+    "command": ["TTL", "ttl_keep_string_incrby"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.0.0",
+    "description": "INCRBY on a string with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["SET", "ttl_keep_string_incrby", "5"],
+      ["EXPIRE", "ttl_keep_string_incrby", "100"],
+      ["INCRBY", "ttl_keep_string_incrby", "10"]
+    ]
+  },
+  {
+    "name": "TTL preserved after DECR (STRING)",
+    "command": ["TTL", "ttl_keep_string_decr"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.0.0",
+    "description": "DECR on a string with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["SET", "ttl_keep_string_decr", "5"],
+      ["EXPIRE", "ttl_keep_string_decr", "100"],
+      ["DECR", "ttl_keep_string_decr"]
+    ]
+  },
+  {
+    "name": "TTL preserved after DECRBY (STRING)",
+    "command": ["TTL", "ttl_keep_string_decrby"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.0.0",
+    "description": "DECRBY on a string with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["SET", "ttl_keep_string_decrby", "5"],
+      ["EXPIRE", "ttl_keep_string_decrby", "100"],
+      ["DECRBY", "ttl_keep_string_decrby", "2"]
+    ]
+  },
+  {
+    "name": "TTL preserved after INCRBYFLOAT (STRING)",
+    "command": ["TTL", "ttl_keep_string_incrbyfloat"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.0.0",
+    "description": "INCRBYFLOAT on a string with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["SET", "ttl_keep_string_incrbyfloat", "1.5"],
+      ["EXPIRE", "ttl_keep_string_incrbyfloat", "100"],
+      ["INCRBYFLOAT", "ttl_keep_string_incrbyfloat", "1.25"]
+    ]
+  },
+  {
+    "name": "TTL preserved after APPEND (STRING)",
+    "command": ["TTL", "ttl_keep_string_append"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.0.0",
+    "description": "APPEND on a string with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["SET", "ttl_keep_string_append", "abc"],
+      ["EXPIRE", "ttl_keep_string_append", "100"],
+      ["APPEND", "ttl_keep_string_append", "def"]
+    ]
+  },
+  {
+    "name": "TTL preserved after SETRANGE (STRING)",
+    "command": ["TTL", "ttl_keep_string_setrange"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.0.0",
+    "description": "SETRANGE on a string with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["SET", "ttl_keep_string_setrange", "hello"],
+      ["EXPIRE", "ttl_keep_string_setrange", "100"],
+      ["SETRANGE", "ttl_keep_string_setrange", "1", "u"]
+    ]
+  },
+  {
+    "name": "TTL preserved after two INCRs in one Lua script (STRING)",
+    "command": ["TTL", "ttl_keep_string_lua_incr_twice"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.0.0",
+    "description": "two INCRs in one Lua script on a string with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["SET", "ttl_keep_string_lua_incr_twice", "5"],
+      ["EXPIRE", "ttl_keep_string_lua_incr_twice", "100"],
+      ["EVAL", "redis.call('INCR',KEYS[1]); redis.call('INCR',KEYS[1])", "1", "ttl_keep_string_lua_incr_twice"]
+    ]
+  },
+  {
+    "name": "TTL preserved after two INCRs in one MULTI/EXEC (STRING)",
+    "command": ["TTL", "ttl_keep_string_multi_incr_twice"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.0.0",
+    "description": "two INCRs in one MULTI/EXEC on a string with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["SET", "ttl_keep_string_multi_incr_twice", "5"],
+      ["EXPIRE", "ttl_keep_string_multi_incr_twice", "100"],
+      ["MULTI"],
+      ["INCR", "ttl_keep_string_multi_incr_twice"],
+      ["INCR", "ttl_keep_string_multi_incr_twice"],
+      ["EXEC"]
+    ]
+  },
+  {
+    "name": "TTL preserved after SETBIT (BITMAP)",
+    "command": ["TTL", "ttl_keep_bitmap_setbit"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "2.2.0",
+    "description": "SETBIT on a bitmap with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["SETBIT", "ttl_keep_bitmap_setbit", "7", "1"],
+      ["EXPIRE", "ttl_keep_bitmap_setbit", "100"],
+      ["SETBIT", "ttl_keep_bitmap_setbit", "15", "1"]
+    ]
+  },
+  {
+    "name": "TTL preserved after PFADD (HLL)",
+    "command": ["TTL", "ttl_keep_hll_pfadd"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "2.8.9",
+    "description": "PFADD on a hll with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["PFADD", "ttl_keep_hll_pfadd", "a"],
+      ["EXPIRE", "ttl_keep_hll_pfadd", "100"],
+      ["PFADD", "ttl_keep_hll_pfadd", "b", "c"]
+    ]
+  },
+  {
+    "name": "TTL preserved after HSET new field (HASH)",
+    "command": ["TTL", "ttl_keep_hash_hset"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "2.0.0",
+    "description": "HSET new field on a hash with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["HSET", "ttl_keep_hash_hset", "f", "v"],
+      ["EXPIRE", "ttl_keep_hash_hset", "100"],
+      ["HSET", "ttl_keep_hash_hset", "g", "w"]
+    ]
+  },
+  {
+    "name": "TTL preserved after HSETNX new field (HASH)",
+    "command": ["TTL", "ttl_keep_hash_hsetnx"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "2.0.0",
+    "description": "HSETNX new field on a hash with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["HSET", "ttl_keep_hash_hsetnx", "f", "v"],
+      ["EXPIRE", "ttl_keep_hash_hsetnx", "100"],
+      ["HSETNX", "ttl_keep_hash_hsetnx", "g", "w"]
+    ]
+  },
+  {
+    "name": "TTL preserved after HMSET new fields (HASH)",
+    "command": ["TTL", "ttl_keep_hash_hmset"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "2.0.0",
+    "description": "HMSET new fields on a hash with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["HSET", "ttl_keep_hash_hmset", "f", "v"],
+      ["EXPIRE", "ttl_keep_hash_hmset", "100"],
+      ["HMSET", "ttl_keep_hash_hmset", "g", "w", "h", "x"]
+    ]
+  },
+  {
+    "name": "TTL preserved after HINCRBY new field (HASH)",
+    "command": ["TTL", "ttl_keep_hash_hincrby"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "2.0.0",
+    "description": "HINCRBY new field on a hash with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["HSET", "ttl_keep_hash_hincrby", "f", "v"],
+      ["EXPIRE", "ttl_keep_hash_hincrby", "100"],
+      ["HINCRBY", "ttl_keep_hash_hincrby", "n", "3"]
+    ]
+  },
+  {
+    "name": "TTL preserved after HDEL one of two fields (HASH)",
+    "command": ["TTL", "ttl_keep_hash_hdel"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "2.0.0",
+    "description": "HDEL one of two fields on a hash with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["HSET", "ttl_keep_hash_hdel", "f", "v", "g", "w"],
+      ["EXPIRE", "ttl_keep_hash_hdel", "100"],
+      ["HDEL", "ttl_keep_hash_hdel", "f"]
+    ]
+  },
+  {
+    "name": "TTL preserved after two HSETs in one Lua script (HASH)",
+    "command": ["TTL", "ttl_keep_hash_lua_hset_twice"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "2.0.0",
+    "description": "two HSETs in one Lua script on a hash with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["HSET", "ttl_keep_hash_lua_hset_twice", "f", "v"],
+      ["EXPIRE", "ttl_keep_hash_lua_hset_twice", "100"],
+      ["EVAL", "redis.call('HSET',KEYS[1],'g','1'); redis.call('HSET',KEYS[1],'h','2')", "1", "ttl_keep_hash_lua_hset_twice"]
+    ]
+  },
+  {
+    "name": "TTL preserved after SADD new member (SET)",
+    "command": ["TTL", "ttl_keep_set_sadd"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.0.0",
+    "description": "SADD new member on a set with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["SADD", "ttl_keep_set_sadd", "a"],
+      ["EXPIRE", "ttl_keep_set_sadd", "100"],
+      ["SADD", "ttl_keep_set_sadd", "b"]
+    ]
+  },
+  {
+    "name": "TTL preserved after SREM one of two members (SET)",
+    "command": ["TTL", "ttl_keep_set_srem"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.0.0",
+    "description": "SREM one of two members on a set with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["SADD", "ttl_keep_set_srem", "a", "b"],
+      ["EXPIRE", "ttl_keep_set_srem", "100"],
+      ["SREM", "ttl_keep_set_srem", "a"]
+    ]
+  },
+  {
+    "name": "TTL preserved after SPOP one of two members (SET)",
+    "command": ["TTL", "ttl_keep_set_spop"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.0.0",
+    "description": "SPOP one of two members on a set with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["SADD", "ttl_keep_set_spop", "a", "b"],
+      ["EXPIRE", "ttl_keep_set_spop", "100"],
+      ["SPOP", "ttl_keep_set_spop"]
+    ]
+  },
+  {
+    "name": "TTL preserved after RPUSH (LIST)",
+    "command": ["TTL", "ttl_keep_list_rpush"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.0.0",
+    "description": "RPUSH on a list with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["RPUSH", "ttl_keep_list_rpush", "a"],
+      ["EXPIRE", "ttl_keep_list_rpush", "100"],
+      ["RPUSH", "ttl_keep_list_rpush", "b"]
+    ]
+  },
+  {
+    "name": "TTL preserved after LPUSH (LIST)",
+    "command": ["TTL", "ttl_keep_list_lpush"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.0.0",
+    "description": "LPUSH on a list with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["RPUSH", "ttl_keep_list_lpush", "a"],
+      ["EXPIRE", "ttl_keep_list_lpush", "100"],
+      ["LPUSH", "ttl_keep_list_lpush", "b"]
+    ]
+  },
+  {
+    "name": "TTL preserved after LPOP one of two elements (LIST)",
+    "command": ["TTL", "ttl_keep_list_lpop"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.0.0",
+    "description": "LPOP one of two elements on a list with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["RPUSH", "ttl_keep_list_lpop", "a", "b"],
+      ["EXPIRE", "ttl_keep_list_lpop", "100"],
+      ["LPOP", "ttl_keep_list_lpop"]
+    ]
+  },
+  {
+    "name": "TTL preserved after RPOP one of two elements (LIST)",
+    "command": ["TTL", "ttl_keep_list_rpop"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.0.0",
+    "description": "RPOP one of two elements on a list with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["RPUSH", "ttl_keep_list_rpop", "a", "b"],
+      ["EXPIRE", "ttl_keep_list_rpop", "100"],
+      ["RPOP", "ttl_keep_list_rpop"]
+    ]
+  },
+  {
+    "name": "TTL preserved after LSET (LIST)",
+    "command": ["TTL", "ttl_keep_list_lset"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.0.0",
+    "description": "LSET on a list with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["RPUSH", "ttl_keep_list_lset", "a", "b"],
+      ["EXPIRE", "ttl_keep_list_lset", "100"],
+      ["LSET", "ttl_keep_list_lset", "0", "z"]
+    ]
+  },
+  {
+    "name": "TTL preserved after LINSERT (LIST)",
+    "command": ["TTL", "ttl_keep_list_linsert"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.0.0",
+    "description": "LINSERT on a list with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["RPUSH", "ttl_keep_list_linsert", "a", "b"],
+      ["EXPIRE", "ttl_keep_list_linsert", "100"],
+      ["LINSERT", "ttl_keep_list_linsert", "BEFORE", "b", "m"]
+    ]
+  },
+  {
+    "name": "TTL preserved after LREM one of two elements (LIST)",
+    "command": ["TTL", "ttl_keep_list_lrem"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.0.0",
+    "description": "LREM one of two elements on a list with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["RPUSH", "ttl_keep_list_lrem", "a", "b"],
+      ["EXPIRE", "ttl_keep_list_lrem", "100"],
+      ["LREM", "ttl_keep_list_lrem", "1", "a"]
+    ]
+  },
+  {
+    "name": "TTL preserved after LTRIM (LIST)",
+    "command": ["TTL", "ttl_keep_list_ltrim"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.0.0",
+    "description": "LTRIM on a list with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["RPUSH", "ttl_keep_list_ltrim", "a", "b", "c"],
+      ["EXPIRE", "ttl_keep_list_ltrim", "100"],
+      ["LTRIM", "ttl_keep_list_ltrim", "0", "1"]
+    ]
+  },
+  {
+    "name": "TTL preserved after two RPUSHes in one Lua script (LIST)",
+    "command": ["TTL", "ttl_keep_list_lua_rpush_twice"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.0.0",
+    "description": "two RPUSHes in one Lua script on a list with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["RPUSH", "ttl_keep_list_lua_rpush_twice", "a"],
+      ["EXPIRE", "ttl_keep_list_lua_rpush_twice", "100"],
+      ["EVAL", "redis.call('RPUSH',KEYS[1],'b'); redis.call('RPUSH',KEYS[1],'c')", "1", "ttl_keep_list_lua_rpush_twice"]
+    ]
+  },
+  {
+    "name": "TTL preserved after ZADD new member (ZSET)",
+    "command": ["TTL", "ttl_keep_zset_zadd"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.2.0",
+    "description": "ZADD new member on a zset with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["ZADD", "ttl_keep_zset_zadd", "1", "a"],
+      ["EXPIRE", "ttl_keep_zset_zadd", "100"],
+      ["ZADD", "ttl_keep_zset_zadd", "2", "b"]
+    ]
+  },
+  {
+    "name": "TTL preserved after ZINCRBY new member (ZSET)",
+    "command": ["TTL", "ttl_keep_zset_zincrby"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.2.0",
+    "description": "ZINCRBY new member on a zset with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["ZADD", "ttl_keep_zset_zincrby", "1", "a"],
+      ["EXPIRE", "ttl_keep_zset_zincrby", "100"],
+      ["ZINCRBY", "ttl_keep_zset_zincrby", "5", "b"]
+    ]
+  },
+  {
+    "name": "TTL preserved after ZREM one of two members (ZSET)",
+    "command": ["TTL", "ttl_keep_zset_zrem"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.2.0",
+    "description": "ZREM one of two members on a zset with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["ZADD", "ttl_keep_zset_zrem", "1", "a", "2", "b"],
+      ["EXPIRE", "ttl_keep_zset_zrem", "100"],
+      ["ZREM", "ttl_keep_zset_zrem", "a"]
+    ]
+  },
+  {
+    "name": "TTL preserved after ZPOPMIN one of two members (ZSET)",
+    "command": ["TTL", "ttl_keep_zset_zpopmin"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.2.0",
+    "description": "ZPOPMIN one of two members on a zset with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["ZADD", "ttl_keep_zset_zpopmin", "1", "a", "2", "b"],
+      ["EXPIRE", "ttl_keep_zset_zpopmin", "100"],
+      ["ZPOPMIN", "ttl_keep_zset_zpopmin"]
+    ]
+  },
+  {
+    "name": "TTL preserved after XADD second entry (STREAM)",
+    "command": ["TTL", "ttl_keep_stream_xadd"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "5.0.0",
+    "description": "XADD second entry on a stream with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["XADD", "ttl_keep_stream_xadd", "1-1", "f", "v"],
+      ["EXPIRE", "ttl_keep_stream_xadd", "100"],
+      ["XADD", "ttl_keep_stream_xadd", "1-2", "f", "w"]
+    ]
+  },
+  {
+    "name": "TTL preserved after XDEL one of two entries (STREAM)",
+    "command": ["TTL", "ttl_keep_stream_xdel"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "5.0.0",
+    "description": "XDEL one of two entries on a stream with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["XADD", "ttl_keep_stream_xdel", "1-1", "f", "v"],
+      ["XADD", "ttl_keep_stream_xdel", "1-2", "f", "w"],
+      ["EXPIRE", "ttl_keep_stream_xdel", "100"],
+      ["XDEL", "ttl_keep_stream_xdel", "1-1"]
+    ]
+  },
+  {
+    "name": "TTL preserved after XTRIM MAXLEN (STREAM)",
+    "command": ["TTL", "ttl_keep_stream_xtrim"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "5.0.0",
+    "description": "XTRIM MAXLEN on a stream with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["XADD", "ttl_keep_stream_xtrim", "1-1", "f", "v"],
+      ["XADD", "ttl_keep_stream_xtrim", "1-2", "f", "w"],
+      ["EXPIRE", "ttl_keep_stream_xtrim", "100"],
+      ["XTRIM", "ttl_keep_stream_xtrim", "MAXLEN", "1"]
+    ]
+  },
+  {
+    "name": "TTL preserved after BF.ADD new item (BLOOM)",
+    "command": ["TTL", "ttl_keep_bloom_add"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.0.0",
+    "description": "BF.ADD new item on a bloom with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["BF.ADD", "ttl_keep_bloom_add", "a"],
+      ["EXPIRE", "ttl_keep_bloom_add", "100"],
+      ["BF.ADD", "ttl_keep_bloom_add", "b"]
+    ]
+  },
+  {
+    "name": "TTL preserved after BF.MADD new items (BLOOM)",
+    "command": ["TTL", "ttl_keep_bloom_madd"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.0.0",
+    "description": "BF.MADD new items on a bloom with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["BF.ADD", "ttl_keep_bloom_madd", "a"],
+      ["EXPIRE", "ttl_keep_bloom_madd", "100"],
+      ["BF.MADD", "ttl_keep_bloom_madd", "b", "c"]
+    ]
+  },
+  {
+    "name": "TTL preserved after BF.INSERT new item (BLOOM)",
+    "command": ["TTL", "ttl_keep_bloom_insert"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "1.0.0",
+    "description": "BF.INSERT new item on a bloom with a TTL must keep the key's expiry (TTL stays positive)",
+    "setup": [
+      ["BF.ADD", "ttl_keep_bloom_insert", "a"],
+      ["EXPIRE", "ttl_keep_bloom_insert", "100"],
+      ["BF.INSERT", "ttl_keep_bloom_insert", "ITEMS", "b"]
+    ]
   }
 ]

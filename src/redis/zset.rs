@@ -44,6 +44,7 @@ use kv::kv::{TxIsolation, BoxFuture, Entry, Error as KvError, Tx};
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use smallvec::{smallvec, SmallVec};
 use crate::common::session::Session;
+use crate::common::set_keeping_ttl;
 use crate::common::{BlockResult, BlockingSignal, Claim, PopResult, RedisStore, ValueType, WatchRegistry};
 use crate::resp::RespValue;
 
@@ -200,10 +201,12 @@ async fn zset_count(tx: &dyn Tx, public_key: &[u8]) -> Result<Option<u32>, DbErr
 }
 
 /// Writes the zset sentinel entry with sorted-set metadata.
-fn write_sentinel(tx: &dyn Tx, public_key: &[u8], count: u32) -> Result<(), DbError> {
-    tx.set(
+async fn write_sentinel(tx: &dyn Tx, public_key: &[u8], count: u32) -> Result<(), DbError> {
+    set_keeping_ttl(
+        tx,
         Entry::new(public_key.to_vec(), count.to_be_bytes().to_vec()).metadata(TYPE_SORTED_SET),
-    )?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -295,7 +298,7 @@ async fn pop_one_min(tx: &dyn Tx, node: &NodeRef) -> Result<Option<MemberScore>,
     if new_count == 0 {
         tx.delete(&node.public_key)?;
     } else {
-        write_sentinel(tx, &node.public_key, new_count)?;
+        write_sentinel(tx, &node.public_key, new_count).await?;
     }
     Ok(Some(MemberScore {
         member: e.member.clone(),
@@ -317,7 +320,7 @@ async fn pop_one_max(tx: &dyn Tx, node: &NodeRef) -> Result<Option<MemberScore>,
     if new_count == 0 {
         tx.delete(&node.public_key)?;
     } else {
-        write_sentinel(tx, &node.public_key, new_count)?;
+        write_sentinel(tx, &node.public_key, new_count).await?;
     }
     Ok(Some(MemberScore {
         member: e.member.clone(),
@@ -573,7 +576,7 @@ async fn store_zset_result(
         tx.set(Entry::new(dest.score_key(e.score, &e.member), Vec::new()))?;
         tx.set(Entry::new(dest.member_key(&e.member), score_bytes(e.score)))?;
     }
-    write_sentinel(tx, &dest.public_key, members.len() as u32)?;
+    write_sentinel(tx, &dest.public_key, members.len() as u32).await?;
     Ok(members.len() as i64)
 }
 
@@ -1289,7 +1292,7 @@ impl DbOp for ZRemOp {
             if count == 0 {
                 tx.delete(&node.public_key)?;
             } else {
-                write_sentinel(tx, &node.public_key, count)?;
+                write_sentinel(tx, &node.public_key, count).await?;
             }
             let result: DbResult = Box::new(removed);
             Ok(result)
@@ -1595,7 +1598,7 @@ impl DbOp for ZAddOp {
             }
 
             if added > 0 || changed > 0 {
-                write_sentinel(tx, &node.public_key, count)?;
+                write_sentinel(tx, &node.public_key, count).await?;
             }
 
             // After persisting the write, claim the front waiter (if any) and
@@ -1678,7 +1681,7 @@ impl DbOp for ZIncrByOp {
                     tx.set(Entry::new(node.score_key(increment, &member), Vec::new()))?;
                     tx.set(Entry::new(member_key, score_bytes(increment)))?;
                     let new_count = existing_count.map_or(1, |c| c + 1);
-                    write_sentinel(tx, &node.public_key, new_count)?;
+                    write_sentinel(tx, &node.public_key, new_count).await?;
                     let result: DbResult = Box::new(increment);
                     return Ok(result);
                 }
@@ -1898,7 +1901,7 @@ impl DbOp for RemRangeByRankOp {
             if new_count == 0 {
                 tx.delete(&node.public_key)?;
             } else {
-                write_sentinel(tx, &node.public_key, new_count as u32)?;
+                write_sentinel(tx, &node.public_key, new_count as u32).await?;
             }
             let result: DbResult = Box::new(removed);
             Ok(result)
@@ -1957,7 +1960,7 @@ impl DbOp for RemRangeByScoreOp {
             if new_count == 0 {
                 tx.delete(&node.public_key)?;
             } else {
-                write_sentinel(tx, &node.public_key, new_count as u32)?;
+                write_sentinel(tx, &node.public_key, new_count as u32).await?;
             }
             let result: DbResult = Box::new(removed);
             Ok(result)
@@ -2005,7 +2008,7 @@ impl DbOp for RemRangeByLexOp {
             if new_count == 0 {
                 tx.delete(&node.public_key)?;
             } else {
-                write_sentinel(tx, &node.public_key, new_count as u32)?;
+                write_sentinel(tx, &node.public_key, new_count as u32).await?;
             }
             let result: DbResult = Box::new(removed);
             Ok(result)
@@ -2039,7 +2042,7 @@ impl DbOp for ZPopOp {
                 if new_count == 0 {
                     tx.delete(&node.public_key)?;
                 } else {
-                    write_sentinel(tx, &node.public_key, new_count as u32)?;
+                    write_sentinel(tx, &node.public_key, new_count as u32).await?;
                 }
                 let result: DbResult = Box::new(
                     popped
@@ -2061,7 +2064,7 @@ impl DbOp for ZPopOp {
                 if new_count == 0 {
                     tx.delete(&node.public_key)?;
                 } else {
-                    write_sentinel(tx, &node.public_key, new_count as u32)?;
+                    write_sentinel(tx, &node.public_key, new_count as u32).await?;
                 }
                 let result: DbResult = Box::new(
                     popped

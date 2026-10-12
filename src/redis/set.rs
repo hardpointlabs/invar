@@ -35,6 +35,7 @@ use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use smallvec::{smallvec, SmallVec};
 use crate::common::session::Session;
+use crate::common::set_keeping_ttl;
 use crate::common::ValueType;
 use crate::resp::RespValue;
 
@@ -142,8 +143,12 @@ async fn set_count(tx: &dyn Tx, public_key: &[u8]) -> Result<Option<u32>, DbErro
 }
 
 /// Writes the set sentinel entry with set metadata.
-fn write_sentinel(tx: &dyn Tx, public_key: &[u8], count: u32) -> Result<(), DbError> {
-    tx.set(Entry::new(public_key.to_vec(), count.to_be_bytes().to_vec()).metadata(TYPE_SET))?;
+async fn write_sentinel(tx: &dyn Tx, public_key: &[u8], count: u32) -> Result<(), DbError> {
+    set_keeping_ttl(
+        tx,
+        Entry::new(public_key.to_vec(), count.to_be_bytes().to_vec()).metadata(TYPE_SET),
+    )
+    .await?;
     Ok(())
 }
 
@@ -217,7 +222,7 @@ async fn store_set_result(
             .metadata(TYPE_SET),
         )?;
     }
-    write_sentinel(tx, dest_public_key, members.len() as u32)?;
+    write_sentinel(tx, dest_public_key, members.len() as u32).await?;
     Ok(members.len() as i64)
 }
 
@@ -523,7 +528,7 @@ impl DbOp for SAddOp {
                     Err(e) => return Err(e.into()),
                 }
             }
-            write_sentinel(tx, &public_key, count)?;
+            write_sentinel(tx, &public_key, count).await?;
             let result: DbResult = Box::new(added);
             Ok(result)
         })
@@ -566,7 +571,7 @@ impl DbOp for SRemOp {
             if count == 0 {
                 tx.delete(&public_key)?;
             } else {
-                write_sentinel(tx, &public_key, count)?;
+                write_sentinel(tx, &public_key, count).await?;
             }
             let result: DbResult = Box::new(removed);
             Ok(result)
@@ -690,7 +695,7 @@ impl DbOp for SPopOp {
                 if remaining == 0 {
                     tx.delete(&public_key)?;
                 } else {
-                    write_sentinel(tx, &public_key, remaining)?;
+                    write_sentinel(tx, &public_key, remaining).await?;
                 }
             }
             let result: DbResult = Box::new(member);
@@ -791,7 +796,7 @@ impl DbOp for SMoveOp {
             if src_remaining == 0 {
                 tx.delete(&src_public_key)?;
             } else {
-                write_sentinel(tx, &src_public_key, src_remaining)?;
+                write_sentinel(tx, &src_public_key, src_remaining).await?;
             }
 
             let dst_internal = internal_member_key(&dst_node_prefix, &member);
@@ -803,7 +808,7 @@ impl DbOp for SMoveOp {
                         None => 1,
                         Some(dst_count) => dst_count + 1,
                     };
-                    write_sentinel(tx, &dst_public_key, dst_count)?;
+                    write_sentinel(tx, &dst_public_key, dst_count).await?;
                 }
                 Err(e) => return Err(e.into()),
             }

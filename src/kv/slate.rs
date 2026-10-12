@@ -11,11 +11,11 @@
 //! Transactions use SlateDB's snapshot isolation; write-write conflicts
 //! surface as [`Error::Conflict`].
 
-use std::collections::Bound;
+use std::collections::{Bound, HashMap};
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use async_trait::async_trait;
 use foyer::{BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCacheBuilder, HybridCachePolicy, PsyncIoEngineConfig};
@@ -30,6 +30,7 @@ use slatedb_common::metrics::MetricsRecorder;
 
 use crate::kv::{write_handle, BoxFuture, Entry, Error, Item, KeyValueIterator, KeyValueStore, Tx, TxIsolation, WriteHandle};
 use crate::metrics::MetricsRsRecorder;
+use crate::time::now_millis;
 
 /// Maps a SlateDB error to the kv abstraction's error space, mirroring the
 /// Go backend: transaction conflicts surface as [`Error::Conflict`],
@@ -193,7 +194,7 @@ impl KeyValueStore for SlateDb {
             .begin(level)
             .await
             .map_err(map_slate_error)?;
-        Ok(Box::new(SlateTx { tx }))
+        Ok(Box::new(SlateTx { tx, pending_expiry: Mutex::new(HashMap::new()) }))
     }
 
     async fn update<F>(&self, f: F) -> Result<Option<WriteHandle>, Error>
@@ -281,6 +282,20 @@ impl KeyValueStore for SlateDb {
 
 struct SlateTx {
     tx: DbTransaction,
+    /// Expiry (absolute Unix ms, `None` = never) of every key written in this
+    /// transaction. SlateDB stamps `expire_ts` when a write lands, so an
+    /// uncommitted write reads back without one; without this, updating a key
+    /// twice in one transaction (MULTI, Lua scripts) would drop its TTL.
+    pending_expiry: Mutex<HashMap<Vec<u8>, Option<i64>>>,
+}
+
+impl SlateTx {
+    /// Locks the pending-expiry map. A panic while it was held cannot leave
+    /// the map half-updated (each critical section is a single insert, remove
+    /// or lookup), so a poisoned lock is safe to keep using.
+    fn pending_expiry(&self) -> std::sync::MutexGuard<'_, HashMap<Vec<u8>, Option<i64>>> {
+        self.pending_expiry.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 }
 
 #[async_trait]
@@ -290,7 +305,11 @@ impl Tx for SlateTx {
         match kv {
             Some(kv) => {
                 let (value, meta) = decode_value(&kv.value);
-                let item = Item::new(kv.key.to_vec(), value.to_vec(), meta, kv.expire_ts);
+                let expire_ts = match self.pending_expiry().get(key) {
+                    Some(pending) => *pending,
+                    None => kv.expire_ts,
+                };
+                let item = Item::new(kv.key.to_vec(), value.to_vec(), meta, expire_ts);
                 if item.is_expired() {
                     Err(Error::KeyNotFound)
                 } else {
@@ -303,8 +322,13 @@ impl Tx for SlateTx {
 
     fn set(&self, entry: Entry) -> Result<(), Error> {
         let stored = encode_value(entry.metadata_byte(), entry.value());
-        if !entry.ttl_value().is_zero() {
-            let ms = entry.ttl_value().as_millis() as u64;
+        let ttl = entry.ttl_value();
+        self.pending_expiry().insert(
+            entry.key().to_vec(),
+            (!ttl.is_zero()).then(|| now_millis().saturating_add(ttl.as_millis() as i64)),
+        );
+        if !ttl.is_zero() {
+            let ms = ttl.as_millis() as u64;
             self.tx
                 .put_with_options(
                     entry.key(),
@@ -320,6 +344,7 @@ impl Tx for SlateTx {
     }
 
     fn delete(&self, key: &[u8]) -> Result<(), Error> {
+        self.pending_expiry().remove(key);
         self.tx.delete(key).map_err(map_slate_error)
     }
 
@@ -705,6 +730,30 @@ mod tests {
             })
             .await
             .expect("get failed");
+        store.close().await.expect("close");
+    }
+
+    /// SlateDB stamps `expire_ts` when a write lands, so an uncommitted write
+    /// reads back without one. `get` must still report the TTL the
+    /// transaction itself set, or a second update to the same key within the
+    /// transaction (MULTI, Lua scripts) would lose it.
+    #[tokio::test]
+    async fn uncommitted_ttl_is_visible_to_reads_in_the_same_tx() {
+        let store = in_memory().await;
+        let tx = store.begin(true, TxIsolation::Snapshot).await.expect("begin");
+
+        tx.set(Entry::new(b"k".to_vec(), b"v".to_vec()).ttl(Duration::from_secs(60)))
+            .expect("set");
+        let remaining = tx.get(b"k").await.expect("get").ttl().expect("pending write keeps its TTL");
+        assert!(
+            remaining > Duration::from_secs(55) && remaining <= Duration::from_secs(60),
+            "remaining TTL was {remaining:?}"
+        );
+
+        // Rewriting without a TTL clears it, as a plain overwrite should.
+        tx.set(Entry::new(b"k".to_vec(), b"v2".to_vec())).expect("set");
+        assert_eq!(tx.get(b"k").await.expect("get").ttl(), None);
+        tx.discard();
         store.close().await.expect("close");
     }
 

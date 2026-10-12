@@ -24,6 +24,7 @@ use kv::kv::{TxIsolation, BoxFuture, Entry, Error as KvError, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use crate::common::session::Session;
+use crate::common::set_keeping_ttl;
 use crate::common::{BlockResult, BlockingSignal, Claim, RedisStore, StreamResult, ValueType, WatchRegistry};
 use crate::resp::RespValue;
 
@@ -234,8 +235,8 @@ async fn read_sentinel(tx: &dyn Tx, public_key: &[u8]) -> Result<StreamMeta, DbE
     StreamMeta::decode(item.value()).ok_or(DbError::Kv(KvError::KeyNotFound))
 }
 
-fn write_sentinel(tx: &dyn Tx, public_key: &[u8], meta: &StreamMeta) -> Result<(), DbError> {
-    tx.set(Entry::new(public_key.to_vec(), meta.encode()).metadata(TYPE_STREAM))?;
+async fn write_sentinel(tx: &dyn Tx, public_key: &[u8], meta: &StreamMeta) -> Result<(), DbError> {
+    set_keeping_ttl(tx, Entry::new(public_key.to_vec(), meta.encode()).metadata(TYPE_STREAM)).await?;
     Ok(())
 }
 
@@ -705,12 +706,12 @@ impl DbOp for XAddOp {
             if is_first {
                 meta.first_id = id;
             }
-            write_sentinel(tx, &public_key, &meta)?;
+            write_sentinel(tx, &public_key, &meta).await?;
 
             // Trim if requested.
             if max_len.is_some() || min_id.is_some() {
                 do_trim(tx, &public_key, &node_prefix, &mut meta, max_len, min_id).await?;
-                write_sentinel(tx, &public_key, &meta)?;
+                write_sentinel(tx, &public_key, &meta).await?;
             }
 
             // A new entry may satisfy a blocked XREAD client parked on this
@@ -1051,7 +1052,7 @@ impl DbOp for XDelOp {
                 meta.first_id = StreamEntryId::ZERO;
                 meta.last_id = StreamEntryId::ZERO;
             }
-            write_sentinel(tx, &public_key, &meta)?;
+            write_sentinel(tx, &public_key, &meta).await?;
             let result: DbResult = Box::new(deleted);
             Ok(result)
         })
@@ -1084,7 +1085,7 @@ impl DbOp for XTrimOp {
             };
             let before = meta.count;
             do_trim(tx, &public_key, &node_prefix, &mut meta, max_len, min_id).await?;
-            write_sentinel(tx, &public_key, &meta)?;
+            write_sentinel(tx, &public_key, &meta).await?;
             let result: DbResult = Box::new((before - meta.count) as i64);
             Ok(result)
         })
@@ -1213,7 +1214,7 @@ impl DbOp for XSetIdOp {
                 Err(e) => return Err(e),
             };
             meta.last_id = last_id;
-            write_sentinel(tx, &public_key, &meta)?;
+            write_sentinel(tx, &public_key, &meta).await?;
             let result: DbResult = Box::new(());
             Ok(result)
         })

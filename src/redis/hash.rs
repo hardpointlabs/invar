@@ -24,6 +24,7 @@ use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use crate::common::session::Session;
+use crate::common::set_keeping_ttl;
 use crate::common::ValueType;
 use crate::resp::RespValue;
 
@@ -86,8 +87,12 @@ async fn read_sentinel(tx: &dyn Tx, public_key: &[u8]) -> Result<u32, DbError> {
 }
 
 /// Writes the hash sentinel entry with hash metadata.
-fn write_sentinel(tx: &dyn Tx, public_key: &[u8], count: u32) -> Result<(), DbError> {
-    tx.set(Entry::new(public_key.to_vec(), count.to_be_bytes().to_vec()).metadata(TYPE_HASH))?;
+async fn write_sentinel(tx: &dyn Tx, public_key: &[u8], count: u32) -> Result<(), DbError> {
+    set_keeping_ttl(
+        tx,
+        Entry::new(public_key.to_vec(), count.to_be_bytes().to_vec()).metadata(TYPE_HASH),
+    )
+    .await?;
     Ok(())
 }
 
@@ -440,7 +445,7 @@ impl DbOp for HSetOp {
                 i += 2;
             }
 
-            write_sentinel(tx, &public_key, count)?;
+            write_sentinel(tx, &public_key, count).await?;
             let result: DbResult = Box::new(added);
             Ok(result)
         })
@@ -480,7 +485,7 @@ impl DbOp for HSetNxOp {
                 Err(e) => return Err(e),
             };
             count += 1;
-            write_sentinel(tx, &public_key, count)?;
+            write_sentinel(tx, &public_key, count).await?;
 
             let result: DbResult = Box::new(1i64);
             Ok(result)
@@ -577,7 +582,7 @@ impl DbOp for HDelOp {
             if count == 0 {
                 tx.delete(&public_key)?;
             } else {
-                write_sentinel(tx, &public_key, count)?;
+                write_sentinel(tx, &public_key, count).await?;
             }
 
             let result: DbResult = Box::new(removed);
@@ -780,7 +785,7 @@ impl DbOp for HIncrByOp {
                     Err(e) => return Err(e),
                 };
                 count += 1;
-                write_sentinel(tx, &public_key, count)?;
+                write_sentinel(tx, &public_key, count).await?;
             }
 
             let result: DbResult = Box::new(new_val);
@@ -836,7 +841,7 @@ impl DbOp for HIncrByFloatOp {
                     Err(e) => return Err(e),
                 };
                 count += 1;
-                write_sentinel(tx, &public_key, count)?;
+                write_sentinel(tx, &public_key, count).await?;
             }
 
             let result: DbResult = Box::new(Some(new_str.into_bytes()));

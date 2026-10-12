@@ -95,6 +95,15 @@ impl Entry {
         self
     }
 
+    /// Gives this entry the remaining TTL of `item`, so rewriting a key keeps
+    /// its expiry. Does nothing when `item` never expires.
+    pub fn keep_ttl_of(self, item: &Item) -> Self {
+        match item.ttl() {
+            Some(remaining) => self.ttl(remaining),
+            None => self,
+        }
+    }
+
     /// Returns the TTL set via [`Entry::ttl`], or `Duration::ZERO` if none
     /// was set.
     pub fn ttl_value(&self) -> Duration {
