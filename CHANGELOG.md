@@ -1,3 +1,12 @@
+## [1.0.34](https://github.com/hardpointlabs/invar/compare/v1.0.33...v1.0.34) (2026-10-12)
+
+
+### Bug Fixes
+
+* keep a key's TTL when a command updates its value ([d4cd74f](https://github.com/hardpointlabs/invar/commit/d4cd74f624096a71f4db68c3d640c8dd25534419))
+* make Lua tonumber() match Lua 5.1 for booleans and floats ([0f4b61d](https://github.com/hardpointlabs/invar/commit/0f4b61dbeb4572da69c0296c904cc5d780220e01))
+* report a transaction's own pending TTL when reading its writes back ([202b7ca](https://github.com/hardpointlabs/invar/commit/202b7ca01b6a2888ac474f9e7d02aa7acace5b3e))
+
 ## [1.0.33](https://github.com/hardpointlabs/invar/compare/v1.0.32...v1.0.33) (2026-10-10)
 
 
