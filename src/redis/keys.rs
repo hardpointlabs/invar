@@ -1042,6 +1042,81 @@ mod tests {
         );
     }
 
+    fn bs(s: &str) -> Bytes {
+        Bytes::copy_from_slice(s.as_bytes())
+    }
+
+    /// Remaining TTL of `key` in seconds, as `TTL` reports it (-1 = none).
+    async fn ttl_secs(session: &Session, key: &[u8]) -> i64 {
+        *exec_db(session, ttl(session, key)).await.downcast::<i64>().unwrap()
+    }
+
+    /// Runs `setup`, gives `key` a 100s TTL, runs `mutate` and asserts the
+    /// TTL survived: Redis keeps a key's expiry when a command modifies it.
+    async fn assert_mutation_keeps_ttl(
+        session: &Session,
+        key: &[u8],
+        setup: QueuedOp,
+        mutate: QueuedOp,
+    ) {
+        exec(session, setup).await;
+        exec(session, expire(session, key, 100)).await;
+        assert!((90..=100).contains(&ttl_secs(session, key).await), "setup should leave a TTL");
+
+        let reply = exec(session, mutate).await;
+        assert!(!matches!(reply, RespValue::Error(_)), "mutation failed: {reply:?}");
+
+        let remaining = ttl_secs(session, key).await;
+        assert!((90..=100).contains(&remaining), "TTL was lost or changed: {remaining}");
+    }
+
+    #[tokio::test]
+    async fn string_updates_keep_the_ttl() {
+        use crate::strings;
+        let s = test_session();
+        seed_string(&s, b"n", b"5").await;
+        assert_mutation_keeps_ttl(&s, b"n", strings::increment(&s, b"n", 1), strings::increment(&s, b"n", 2)).await;
+        seed_string(&s, b"n2", b"5").await;
+        assert_mutation_keeps_ttl(&s, b"n2", strings::increment(&s, b"n2", 0), strings::increment(&s, b"n2", -3)).await;
+        seed_string(&s, b"a", b"x").await;
+        assert_mutation_keeps_ttl(&s, b"a", strings::append(&s, b"a", b"y"), strings::append(&s, b"a", b"z")).await;
+        seed_string(&s, b"r", b"hello").await;
+        assert_mutation_keeps_ttl(&s, b"r", strings::set_range(&s, b"r", 0, b"j"), strings::set_range(&s, b"r", 1, b"u")).await;
+        seed_string(&s, b"f", b"1.5").await;
+        assert_mutation_keeps_ttl(&s, b"f", strings::incr_by_float(&s, b"f", 0.0), strings::incr_by_float(&s, b"f", 1.0)).await;
+        seed_string(&s, b"b", b"\x00").await;
+        assert_mutation_keeps_ttl(&s, b"b", crate::bitmap::set_bit(&s, b"b", 1, 1), crate::bitmap::set_bit(&s, b"b", 2, 1)).await;
+        assert_mutation_keeps_ttl(&s, b"hll", crate::hll::pfadd(&s, b"hll", &[bs("a")]), crate::hll::pfadd(&s, b"hll", &[bs("b"),  bs("c")])).await;
+    }
+
+    #[tokio::test]
+    async fn compound_updates_keep_the_ttl() {
+        let s = test_session();
+        assert_mutation_keeps_ttl(&s, b"h", crate::hash::hset(&s, b"h", &[bs("f"),  bs("v")]), crate::hash::hset(&s, b"h", &[bs("g"),  bs("w")])).await;
+        assert_mutation_keeps_ttl(&s, b"st", crate::set::sadd(&s, b"st", &[bs("x")]), crate::set::sadd(&s, b"st", &[bs("y")])).await;
+        assert_mutation_keeps_ttl(&s, b"z", crate::zset::zadd(&s, b"z", &[bs("1"),  bs("a")]), crate::zset::zadd(&s, b"z", &[bs("2"),  bs("b")])).await;
+        assert_mutation_keeps_ttl(&s, b"l", crate::list::rpush(&s, b"l", &[bs("a")]), crate::list::rpush(&s, b"l", &[bs("b")])).await;
+        assert_mutation_keeps_ttl(&s, b"l2", crate::list::lpush(&s, b"l2", &[bs("a")]), crate::list::lpush(&s, b"l2", &[bs("b")])).await;
+        assert_mutation_keeps_ttl(
+            &s,
+            b"x",
+            crate::stream::xadd(&s, b"x", false, None, None, None, &[bs("f"),  bs("1")]),
+            crate::stream::xadd(&s, b"x", false, None, None, None, &[bs("f"),  bs("2")]),
+        )
+        .await;
+        assert_mutation_keeps_ttl(&s, b"bf", crate::bloom::add(&s, b"bf", b"one"), crate::bloom::add(&s, b"bf", b"two")).await;
+    }
+
+    /// Commands that replace the value are the ones that clear an expiry.
+    #[tokio::test]
+    async fn overwriting_commands_still_clear_the_ttl() {
+        let s = test_session();
+        seed_string(&s, b"k", b"v").await;
+        exec(&s, expire(&s, b"k", 100)).await;
+        exec(&s, crate::strings::get_set(&s, b"k", b"new")).await;
+        assert_eq!(ttl_secs(&s, b"k").await, -1);
+    }
+
     #[tokio::test]
     async fn renamenx_respects_existing_target() {
         let session = test_session();

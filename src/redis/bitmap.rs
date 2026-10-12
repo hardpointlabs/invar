@@ -16,6 +16,7 @@ use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use smallvec::SmallVec;
 use crate::common::session::Session;
+use crate::common::set_keeping_ttl;
 use crate::common::ValueType;
 use crate::resp::RespValue;
 
@@ -134,7 +135,7 @@ impl DbOp for SetBitOp {
                 data[byte_index as usize] &= !mask;
             }
 
-            tx.set(Entry::new(key, data).metadata(TYPE_STRING))?;
+            set_keeping_ttl(tx, Entry::new(key, data).metadata(TYPE_STRING)).await?;
             let result: DbResult = Box::new(old_bit);
             Ok(result)
         })

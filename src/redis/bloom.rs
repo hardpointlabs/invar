@@ -28,6 +28,7 @@ use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use crate::common::session::Session;
+use crate::common::set_keeping_ttl;
 use crate::common::ValueType;
 use crate::resp::RespValue;
 
@@ -330,8 +331,8 @@ async fn read_meta_or_nil(tx: &dyn Tx, meta_key: &[u8]) -> Result<Option<BloomMe
 }
 
 /// Persists the meta entry under the public key.
-fn write_meta(tx: &dyn Tx, meta_key: &[u8], m: &BloomMeta) -> Result<(), KvError> {
-    tx.set(Entry::new(meta_key.to_vec(), encode_meta(m)).metadata(TYPE_BLOOM))
+async fn write_meta(tx: &dyn Tx, meta_key: &[u8], m: &BloomMeta) -> Result<(), KvError> {
+    set_keeping_ttl(tx, Entry::new(meta_key.to_vec(), encode_meta(m)).metadata(TYPE_BLOOM)).await
 }
 
 /// Reads one fixed-size page, returning a fresh all-zero page when none has
@@ -370,7 +371,7 @@ async fn add_one(
                 non_scaling: false,
                 filters: vec![filter],
             };
-            write_meta(tx, meta_key, &m)?;
+            write_meta(tx, meta_key, &m).await?;
             m
         }
     };
@@ -437,7 +438,7 @@ async fn add_one(
     if let Some(last) = meta.filters.last_mut() {
         last.inserted += 1;
     }
-    write_meta(tx, meta_key, &meta)?;
+    write_meta(tx, meta_key, &meta).await?;
 
     Ok(1)
 }
@@ -653,7 +654,7 @@ impl DbOp for ReserveOp {
                         non_scaling,
                         filters: vec![filter],
                     };
-                    write_meta(tx, &meta_key, &meta)?;
+                    write_meta(tx, &meta_key, &meta).await?;
                     let result: DbResult = Box::new(());
                     Ok(result)
                 }
@@ -792,7 +793,7 @@ impl DbOp for InsertOp {
                         non_scaling: info.non_scaling,
                         filters: vec![filter],
                     };
-                    write_meta(tx, &meta_key, &m)?;
+                    write_meta(tx, &meta_key, &m).await?;
                 }
             }
             let mut results = Vec::with_capacity(info.items.len());

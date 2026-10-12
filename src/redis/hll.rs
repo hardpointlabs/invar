@@ -20,6 +20,7 @@ use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use smallvec::SmallVec;
 use crate::common::session::Session;
+use crate::common::set_keeping_ttl;
 use crate::common::ValueType;
 use crate::resp::RespValue;
 
@@ -398,7 +399,7 @@ impl DbOp for PfAddOp {
 
             if updated == 1 {
                 hll_invalidate_cache(&mut hll_data);
-                tx.set(Entry::new(key, hll_data).metadata(TYPE_STRING))?;
+                set_keeping_ttl(tx, Entry::new(key, hll_data).metadata(TYPE_STRING)).await?;
             }
 
             let result: DbResult = Box::new(updated);

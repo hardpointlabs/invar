@@ -16,6 +16,7 @@ use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use smallvec::{smallvec, SmallVec};
 use crate::common::session::Session;
+use crate::common::set_keeping_ttl;
 use crate::common::ValueType;
 use crate::resp::RespValue;
 
@@ -603,7 +604,7 @@ impl DbOp for AppendOp {
                 }
                 None => value.clone(),
             };
-            tx.set(Entry::new(key, new_val.clone()).metadata(TYPE_STRING))?;
+            set_keeping_ttl(tx, Entry::new(key, new_val.clone()).metadata(TYPE_STRING)).await?;
             let result: DbResult = Box::new(new_val.len() as i64);
             Ok(result)
         })
@@ -743,9 +744,11 @@ impl DbOp for IncrByFloatOp {
                         }
                         return Ok(Box::new("inf".to_string()) as DbResult);
                     }
-                    tx.set(
+                    set_keeping_ttl(
+                        tx,
                         Entry::new(key, format_float(result).into_bytes()).metadata(TYPE_STRING),
-                    )?;
+                    )
+                    .await?;
                     format_float(result)
                 }
             };
@@ -826,7 +829,7 @@ impl DbOp for SetRangeOp {
                 }
             };
             let len = new_val.len();
-            tx.set(Entry::new(key, new_val).metadata(TYPE_STRING))?;
+            set_keeping_ttl(tx, Entry::new(key, new_val).metadata(TYPE_STRING)).await?;
             let result: DbResult = Box::new(len as i64);
             Ok(result)
         })
@@ -860,7 +863,11 @@ impl DbOp for IncrementOp {
                 .and_then(|s| s.parse::<i64>().ok())
                 .ok_or_else(|| DbError::Redis("value is not an integer or out of range".into()))?;
             let new_value = current.wrapping_add(amount);
-            tx.set(Entry::new(key, new_value.to_string().into_bytes()).metadata(item.metadata()))?;
+            tx.set(
+                Entry::new(key, new_value.to_string().into_bytes())
+                    .metadata(item.metadata())
+                    .keep_ttl_of(&item),
+            )?;
             let result: DbResult = Box::new(new_value);
             Ok(result)
         })
