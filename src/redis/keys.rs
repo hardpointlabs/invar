@@ -20,6 +20,7 @@ use crate::common::op::{err_resp, DbError, DbOp, DbResult, NoOp, QueuedOp, WireO
 use smallvec::smallvec;
 use crate::common::session::Session;
 use crate::common::ValueType;
+use crate::list;
 use crate::pubsub::redis_glob_match;
 use crate::resp::RespValue;
 
@@ -194,9 +195,10 @@ pub fn key_type(session: &Session, key: &[u8]) -> QueuedOp {
 }
 
 /// `DEL key [key ...]` / `UNLINK key [key ...]` — removes the given keys,
-/// returning the number removed. Compound values (sets, hashes, sorted sets)
-/// have their internal field/member/score index entries cleared too, so a
-/// later re-creation of the same key starts from a clean slate.
+/// returning the number removed. Compound values (sets, hashes, sorted sets,
+/// lists, streams, bloom filters) have their internal entries cleared too, so
+/// a later re-creation of the same key starts from a clean slate. As in
+/// Redis, that makes the cost proportional to the size of the value.
 pub fn del(session: &Session, keys: &[Bytes]) -> QueuedOp {
     QueuedOp {
         db_op: Box::new(DelOp {
@@ -589,7 +591,7 @@ impl DbOp for DelOp {
                     Err(e) => return Err(e.into()),
                     Ok(item) => item,
                 };
-                clear_compound_entries(tx, node_prefix, item.metadata()).await?;
+                clear_compound_entries(tx, public_key, node_prefix, item.metadata()).await?;
                 tx.delete(public_key)?;
                 count += 1;
             }
@@ -602,20 +604,30 @@ impl DbOp for DelOp {
 /// Deletes the internal entry keys owned by a compound value so that
 /// recreating the public key later starts from an empty container:
 ///
-/// * Set and hash field/member entries live under `-<db>:<key>\x00...`.
+/// * Set and hash field/member entries, stream entries and bloom filter pages
+///   live under `-<db>:<key>\x00...`.
 /// * Sorted-set score index entries live under `-<db>:<key>:score:` and
 ///   member index entries under `-<db>:<key>:member:`.
+/// * List nodes live under `-<db>:<key>:<nodeKey>`; they are found by walking
+///   the chain from the sentinel at `public_key`.
 ///
 /// Returns without deleting anything for value types that keep no internal
-/// entries (strings, and until type-specific layouts are ported, lists and
-/// streams).
+/// entries (strings, HyperLogLogs, JSON documents).
 async fn clear_compound_entries(
     tx: &dyn Tx,
+    public_key: &[u8],
     node_prefix: &[u8],
     metadata: u8,
 ) -> Result<(), DbError> {
     let mut prefixes: Vec<Vec<u8>> = Vec::new();
-    if metadata == ValueType::Set as u8 || metadata == ValueType::Hash as u8 {
+    if metadata == ValueType::List as u8 {
+        return list::delete_nodes(tx, public_key, node_prefix).await;
+    }
+    if metadata == ValueType::Set as u8
+        || metadata == ValueType::Hash as u8
+        || metadata == ValueType::Stream as u8
+        || metadata == ValueType::Bloom as u8
+    {
         let mut prefix = node_prefix.to_vec();
         prefix.push(0);
         prefixes.push(prefix);
@@ -1023,6 +1035,95 @@ mod tests {
 
         let reply = exec(&session, move_op(&session, b"missing", 5)).await;
         assert_eq!(expect_int(&reply), 0);
+    }
+
+    /// Number of internal (`-`-prefixed) entries currently in the store.
+    async fn internal_entry_count(session: &Session) -> usize {
+        let store = session.store();
+        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
+        let mut it = tx.new_prefix_iterator(b"-").await.expect("iterator");
+        let mut count = 0;
+        while it.next().await {
+            count += 1;
+        }
+        it.close().await.expect("close");
+        count
+    }
+
+    /// Builds a value of each compound type under `key`, so tests can check
+    /// that DEL leaves nothing behind for any of them.
+    fn build_ops(session: &Session, ty: &str, key: &[u8]) -> Vec<QueuedOp> {
+        match ty {
+            "list" => vec![crate::list::rpush(session, key, &[bs("a"), bs("b"), bs("c")])],
+            "hash" => vec![crate::hash::hset(session, key, &[bs("f"), bs("v"), bs("g"), bs("w")])],
+            "set" => vec![crate::set::sadd(session, key, &[bs("x"), bs("y")])],
+            "zset" => vec![crate::zset::zadd(session, key, &[bs("1"), bs("a"), bs("2"), bs("b")])],
+            "stream" => vec![
+                crate::stream::xadd(session, key, false, None, None, None, &[bs("f"), bs("1")]),
+                crate::stream::xadd(session, key, false, None, None, None, &[bs("f"), bs("2")]),
+            ],
+            "bloom" => vec![crate::bloom::add(session, key, b"item")],
+            other => panic!("unknown type {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn del_removes_every_internal_entry_of_each_compound_type() {
+        for ty in ["list", "hash", "set", "zset", "stream", "bloom"] {
+            let session = test_session();
+            for op in build_ops(&session, ty, b"k") {
+                exec(&session, op).await;
+            }
+            assert!(internal_entry_count(&session).await > 0, "{ty}: test data must create internal entries");
+
+            let reply = exec(&session, del(&session, &[bs("k")])).await;
+            assert_eq!(expect_int(&reply), 1, "{ty}");
+            assert_eq!(internal_entry_count(&session).await, 0, "{ty}: DEL left internal entries behind");
+        }
+    }
+
+    /// Stale internal entries used to reappear when a key was recreated under
+    /// the same name.
+    #[tokio::test]
+    async fn recreating_a_deleted_stream_does_not_resurrect_old_entries() {
+        let session = test_session();
+        // Explicit, different IDs: auto-generated ones from the same
+        // millisecond would collide on one key and hide the leftover.
+        let id = |s: &[u8]| crate::stream::parse_stream_id_arg(s).expect("valid id");
+        exec(&session, crate::stream::xadd(&session, b"st", false, None, None, id(b"1-1"), &[bs("f"), bs("old")])).await;
+        exec(&session, del(&session, &[bs("st")])).await;
+        exec(&session, crate::stream::xadd(&session, b"st", false, None, None, id(b"2-1"), &[bs("f"), bs("new")])).await;
+
+        let reply = exec(&session, crate::stream::xrange(&session, b"st", None, None, 1000)).await;
+        match reply {
+            RespValue::Array(Some(entries)) => assert_eq!(entries.len(), 1, "old entry resurfaced: {entries:?}"),
+            other => panic!("unexpected XRANGE reply: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn recreating_a_deleted_bloom_filter_does_not_resurrect_old_items() {
+        let session = test_session();
+        exec(&session, crate::bloom::add(&session, b"bf", b"old")).await;
+        exec(&session, del(&session, &[bs("bf")])).await;
+        exec(&session, crate::bloom::add(&session, b"bf", b"other")).await;
+
+        let reply = exec(&session, crate::bloom::exists(&session, b"bf", b"old")).await;
+        assert_eq!(reply, RespValue::Integer(0), "item from the deleted filter is still present");
+    }
+
+    /// `foo`'s list nodes share a string prefix with `foo:bar`'s; deleting one
+    /// must not touch the other.
+    #[tokio::test]
+    async fn del_of_a_list_leaves_a_similarly_named_list_intact() {
+        let session = test_session();
+        exec(&session, crate::list::rpush(&session, b"foo", &[bs("1"), bs("2")])).await;
+        exec(&session, crate::list::rpush(&session, b"foo:bar", &[bs("3"), bs("4")])).await;
+        let neighbour = exec(&session, crate::list::lrange(&session, b"foo:bar", 0, -1)).await;
+
+        exec(&session, del(&session, &[bs("foo")])).await;
+
+        assert_eq!(exec(&session, crate::list::lrange(&session, b"foo:bar", 0, -1)).await, neighbour);
     }
 
     #[tokio::test]
