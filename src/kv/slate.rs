@@ -289,6 +289,15 @@ struct SlateTx {
     pending_expiry: Mutex<HashMap<Vec<u8>, Option<i64>>>,
 }
 
+impl SlateTx {
+    /// Locks the pending-expiry map. A panic while it was held cannot leave
+    /// the map half-updated (each critical section is a single insert, remove
+    /// or lookup), so a poisoned lock is safe to keep using.
+    fn pending_expiry(&self) -> std::sync::MutexGuard<'_, HashMap<Vec<u8>, Option<i64>>> {
+        self.pending_expiry.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 #[async_trait]
 impl Tx for SlateTx {
     async fn get(&self, key: &[u8]) -> Result<Item, Error> {
@@ -296,7 +305,7 @@ impl Tx for SlateTx {
         match kv {
             Some(kv) => {
                 let (value, meta) = decode_value(&kv.value);
-                let expire_ts = match self.pending_expiry.lock().unwrap().get(key) {
+                let expire_ts = match self.pending_expiry().get(key) {
                     Some(pending) => *pending,
                     None => kv.expire_ts,
                 };
@@ -314,7 +323,7 @@ impl Tx for SlateTx {
     fn set(&self, entry: Entry) -> Result<(), Error> {
         let stored = encode_value(entry.metadata_byte(), entry.value());
         let ttl = entry.ttl_value();
-        self.pending_expiry.lock().unwrap().insert(
+        self.pending_expiry().insert(
             entry.key().to_vec(),
             (!ttl.is_zero()).then(|| now_millis().saturating_add(ttl.as_millis() as i64)),
         );
@@ -335,7 +344,7 @@ impl Tx for SlateTx {
     }
 
     fn delete(&self, key: &[u8]) -> Result<(), Error> {
-        self.pending_expiry.lock().unwrap().remove(key);
+        self.pending_expiry().remove(key);
         self.tx.delete(key).map_err(map_slate_error)
     }
 
