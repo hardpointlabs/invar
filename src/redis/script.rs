@@ -958,7 +958,7 @@ fn run_script(
                     stack.push_back(Value::Integer(n));
                 }
                 Value::Number(n) => {
-                    stack.push_back(Value::Integer(n as i64));
+                    stack.push_back(Value::Number(n));
                 }
                 Value::String(s) => {
                     let s = s.as_bytes();
@@ -993,9 +993,8 @@ fn run_script(
                         stack.push_back(Value::Nil);
                     }
                 }
-                Value::Boolean(b) => {
-                    stack.push_back(Value::Integer(if b { 1 } else { 0 }));
-                }
+                // Booleans (e.g. the `false` an absent HMGET field becomes)
+                // and every other type convert to nil, as in Lua 5.1.
                 _ => {
                     stack.push_back(Value::Nil);
                 }
@@ -1834,6 +1833,49 @@ mod tests {
         ))
         .await;
         assert_eq!(expect_bulk(&reply).as_deref(), Some(b"testval".as_slice()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tonumber_of_non_numeric_types_is_nil() {
+        let reply = exec(eval_op(
+            "return {tostring(tonumber(false)), tostring(tonumber(true)), tostring(tonumber({})), tostring(tonumber('abc'))}",
+            &[],
+            &[],
+        ))
+        .await;
+        let got: Vec<_> = expect_array(&reply)
+            .iter()
+            .map(|v| expect_bulk(v).unwrap())
+            .collect();
+        assert_eq!(got, vec![Bytes::from("nil"); 4]);
+    }
+
+    /// An absent HMGET field arrives in Lua as `false`; BullMQ's scheduler
+    /// scripts rely on `tonumber` of it being nil to skip their `every` branch.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tonumber_of_absent_hmget_field_is_falsy() {
+        let reply = exec(eval_op(
+            "local r = redis.call('HMGET', 'nokey', 'every'); if tonumber(r[1]) then return 1 end; return 0",
+            &[],
+            &[],
+        ))
+        .await;
+        assert_eq!(expect_integer(&reply), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tonumber_keeps_fractional_part_of_numbers() {
+        let reply = exec(eval_op(
+            "return {tostring(tonumber(2.5)), tostring(tonumber(-2.5)), tostring(tonumber(0.75) * 100), tostring(tonumber('2.5')), tostring(tonumber(7))}",
+            &[],
+            &[],
+        ))
+        .await;
+        let got: Vec<_> = expect_array(&reply)
+            .iter()
+            .map(|v| String::from_utf8(expect_bulk(v).unwrap().to_vec()).unwrap())
+            .collect();
+        assert_eq!(got, ["2.5", "-2.5", "75", "2.5", "7"]);
     }
 
     #[tokio::test(flavor = "multi_thread")]
