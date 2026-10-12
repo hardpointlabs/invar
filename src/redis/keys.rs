@@ -14,12 +14,13 @@
 use std::ops::Bound;
 
 use bytes::Bytes;
-use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
+use kv::kv::{BoxFuture, Entry, Error as KvError, Item, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, NoOp, QueuedOp, WireOp};
 use smallvec::smallvec;
 use crate::common::session::Session;
 use crate::common::ValueType;
+use crate::list;
 use crate::pubsub::redis_glob_match;
 use crate::resp::RespValue;
 
@@ -365,8 +366,7 @@ impl DbOp for RenameOp {
                 }
                 Err(e) => return Err(e.into()),
             };
-            tx.set(Entry::new(new, item.value().to_vec()).metadata(item.metadata()))?;
-            tx.delete(&old)?;
+            rename_entry(tx, &old, &new, &item).await?;
             let result: DbResult = Box::new(Some(()));
             Ok(result)
         })
@@ -399,8 +399,7 @@ impl DbOp for RenameNXOp {
                 }
                 Err(e) => return Err(e.into()),
             };
-            tx.set(Entry::new(new, item.value().to_vec()).metadata(item.metadata()))?;
-            tx.delete(&old)?;
+            rename_entry(tx, &old, &new, &item).await?;
             let result: DbResult = Box::new(Some(1i64));
             Ok(result)
         })
@@ -643,6 +642,76 @@ async fn clear_compound_entries(
             tx.delete(&key)?;
         }
     }
+    Ok(())
+}
+
+/// Re-keys every entry under `from` to live under `to` instead (keeping the
+/// part of the key after the prefix, the value and the metadata byte).
+async fn move_prefix(tx: &dyn Tx, from: &[u8], to: &[u8]) -> Result<(), DbError> {
+    let mut it = tx.new_prefix_iterator(from).await?;
+    let mut moved = Vec::new();
+    while it.next().await {
+        if let Some(item) = it.item() {
+            moved.push((item.key().to_vec(), item.value().to_vec(), item.metadata()));
+        }
+    }
+    let err = it.err().cloned();
+    if let Some(e) = err {
+        it.close().await?;
+        return Err(DbError::Kv(e));
+    }
+    it.close().await?;
+    for (key, value, metadata) in moved {
+        let mut new_key = to.to_vec();
+        new_key.extend_from_slice(&key[from.len()..]);
+        tx.set(Entry::new(new_key, value).metadata(metadata))?;
+        tx.delete(&key)?;
+    }
+    Ok(())
+}
+
+/// Moves the key `old` (already read as `item`) to `new` for `RENAME`:
+/// the destination's own internal entries are cleared, the source's internal
+/// entries are re-keyed under the new name, and the public entry follows with
+/// its remaining TTL. `RENAME k k` is a no-op.
+///
+/// Compound values keep their data under internal keys derived from the
+/// key's *name* (`-<db>:<name>...`), so copying only the public entry would
+/// leave the data unreachable under the old name.
+async fn rename_entry(tx: &dyn Tx, old: &[u8], new: &[u8], item: &Item) -> Result<(), DbError> {
+    if old == new {
+        return Ok(());
+    }
+    let node_prefix = |public: &[u8]| [b"-".as_slice(), public].concat();
+    let (old_prefix, new_prefix) = (node_prefix(old), node_prefix(new));
+
+    match tx.get(new).await {
+        Ok(existing) => clear_compound_entries(tx, &new_prefix, existing.metadata()).await?,
+        Err(KvError::KeyNotFound) => {}
+        Err(e) => return Err(e.into()),
+    }
+
+    let metadata = item.metadata();
+    if metadata == ValueType::List as u8 {
+        list::move_nodes(tx, old, &old_prefix, &new_prefix).await?;
+    } else if metadata == ValueType::Set as u8
+        || metadata == ValueType::Hash as u8
+        || metadata == ValueType::Stream as u8
+        || metadata == ValueType::Bloom as u8
+    {
+        move_prefix(tx, &[old_prefix.as_slice(), &[0]].concat(), &[new_prefix.as_slice(), &[0]].concat()).await?;
+    } else if metadata == ValueType::SortedSet as u8 {
+        for part in [b":score:".as_slice(), b":member:".as_slice()] {
+            move_prefix(tx, &[old_prefix.as_slice(), part].concat(), &[new_prefix.as_slice(), part].concat()).await?;
+        }
+    }
+
+    let mut entry = Entry::new(new.to_vec(), item.value().to_vec()).metadata(metadata);
+    if let Some(ttl) = item.ttl() {
+        entry = entry.ttl(ttl);
+    }
+    tx.set(entry)?;
+    tx.delete(old)?;
     Ok(())
 }
 
@@ -1039,6 +1108,150 @@ mod tests {
         assert_eq!(
             reply,
             RespValue::Error(Bytes::from_static(b"ERR no such key"))
+        );
+    }
+
+    fn b(s: &str) -> Bytes {
+        Bytes::copy_from_slice(s.as_bytes())
+    }
+
+    /// Renames `old` to `new` and checks that `read` returns the same data
+    /// under `new` that it returned under `old`, and nothing under `old`.
+    async fn assert_rename_moves_data(
+        session: &Session,
+        old: &[u8],
+        new: &[u8],
+        read: impl Fn(&Session, &[u8]) -> QueuedOp,
+    ) {
+        let before = exec(session, read(session, old)).await;
+        let empty = exec(session, read(session, b"never-existed")).await;
+        assert_ne!(before, empty, "test data must be visible before the rename");
+
+        let reply = exec(session, rename(session, old, new)).await;
+        assert_eq!(reply, RespValue::SimpleString(Bytes::from_static(b"OK")));
+
+        assert_eq!(exec(session, read(session, new)).await, before, "data lost by RENAME");
+        assert_eq!(exec(session, read(session, old)).await, empty, "old name still has data");
+    }
+
+    #[tokio::test]
+    async fn rename_moves_list_elements() {
+        let session = test_session();
+        exec(&session, crate::list::rpush(&session, b"l", &[b("a"), b("b"), b("c")])).await;
+        assert_rename_moves_data(&session, b"l", b"l2", |s, k| crate::list::lrange(s, k, 0, -1)).await;
+    }
+
+    #[tokio::test]
+    async fn rename_moves_hash_fields() {
+        let session = test_session();
+        exec(&session, crate::hash::hset(&session, b"h", &[b("f"), b("v"), b("g"), b("w")])).await;
+        assert_rename_moves_data(&session, b"h", b"h2", crate::hash::hgetall).await;
+    }
+
+    #[tokio::test]
+    async fn rename_moves_set_members() {
+        let session = test_session();
+        exec(&session, crate::set::sadd(&session, b"s", &[b("x"), b("y")])).await;
+
+        exec(&session, rename(&session, b"s", b"s2")).await;
+
+        // SMEMBERS has no defined order, so compare as sorted lists.
+        let sorted = |reply: RespValue| match reply {
+            RespValue::Array(Some(mut members)) => {
+                members.sort_by_key(|m| format!("{m:?}"));
+                members
+            }
+            other => panic!("unexpected SMEMBERS reply: {other:?}"),
+        };
+        let expected = vec![
+            RespValue::BulkString(Some(b("x"))),
+            RespValue::BulkString(Some(b("y"))),
+        ];
+        assert_eq!(sorted(exec(&session, crate::set::smembers(&session, b"s2")).await), expected);
+        assert!(sorted(exec(&session, crate::set::smembers(&session, b"s")).await).is_empty());
+    }
+
+    #[tokio::test]
+    async fn rename_moves_sorted_set_members() {
+        let session = test_session();
+        exec(&session, crate::zset::zadd(&session, b"z", &[b("1"), b("a"), b("2"), b("b")])).await;
+        assert_rename_moves_data(&session, b"z", b"z2", |s, k| crate::zset::zrange(s, k, 0, -1, true)).await;
+    }
+
+    #[tokio::test]
+    async fn rename_moves_stream_entries() {
+        let session = test_session();
+        exec(&session, crate::stream::xadd(&session, b"x", false, None, None, None, &[b("f"), b("v")])).await;
+        assert_rename_moves_data(&session, b"x", b"x2", |s, k| crate::stream::xrange(s, k, None, None, 1000)).await;
+    }
+
+    #[tokio::test]
+    async fn rename_moves_bloom_filter_pages() {
+        let session = test_session();
+        exec(&session, crate::bloom::add(&session, b"bf", b"item")).await;
+        assert_rename_moves_data(&session, b"bf", b"bf2", |s, k| crate::bloom::exists(s, k, b"item")).await;
+    }
+
+    #[tokio::test]
+    async fn rename_carries_the_ttl_to_the_new_key() {
+        let session = test_session();
+        seed_string(&session, b"old", b"v").await;
+        exec(&session, expire(&session, b"old", 100)).await;
+
+        exec(&session, rename(&session, b"old", b"new")).await;
+
+        let remaining = *exec_db(&session, ttl(&session, b"new")).await.downcast::<i64>().unwrap();
+        assert!((90..=100).contains(&remaining), "ttl was {remaining}");
+    }
+
+    #[tokio::test]
+    async fn rename_replaces_a_compound_destination_instead_of_merging() {
+        let session = test_session();
+        exec(&session, crate::hash::hset(&session, b"src", &[b("f"), b("v")])).await;
+        exec(&session, crate::hash::hset(&session, b"dst", &[b("stale"), b("x")])).await;
+
+        exec(&session, rename(&session, b"src", b"dst")).await;
+
+        let got = exec(&session, crate::hash::hgetall(&session, b"dst")).await;
+        let expected = RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b("f"))),
+            RespValue::BulkString(Some(b("v"))),
+        ]));
+        assert_eq!(got, expected);
+    }
+
+    #[tokio::test]
+    async fn rename_to_the_same_key_keeps_the_value() {
+        let session = test_session();
+        seed_string(&session, b"k", b"v").await;
+        exec(&session, crate::hash::hset(&session, b"h", &[b("f"), b("v")])).await;
+        let before = exec(&session, crate::hash::hgetall(&session, b"h")).await;
+
+        assert_eq!(
+            exec(&session, rename(&session, b"k", b"k")).await,
+            RespValue::SimpleString(Bytes::from_static(b"OK"))
+        );
+        exec(&session, rename(&session, b"h", b"h")).await;
+
+        assert_eq!(stored(&session, 0, b"k").await, Some(b"v".to_vec()));
+        assert_eq!(exec(&session, crate::hash::hgetall(&session, b"h")).await, before);
+    }
+
+    /// `foo`'s internal keys share a string prefix with `foo:bar`'s; renaming
+    /// one must not drag the other along.
+    #[tokio::test]
+    async fn rename_leaves_keys_with_a_shared_name_prefix_alone() {
+        let session = test_session();
+        exec(&session, crate::list::rpush(&session, b"foo", &[b("1"), b("2")])).await;
+        exec(&session, crate::list::rpush(&session, b"foo:bar", &[b("3"), b("4")])).await;
+        let neighbour = exec(&session, crate::list::lrange(&session, b"foo:bar", 0, -1)).await;
+
+        exec(&session, rename(&session, b"foo", b"baz")).await;
+
+        assert_eq!(exec(&session, crate::list::lrange(&session, b"foo:bar", 0, -1)).await, neighbour);
+        assert_eq!(
+            exec(&session, crate::list::llen(&session, b"baz")).await,
+            RespValue::Integer(2)
         );
     }
 

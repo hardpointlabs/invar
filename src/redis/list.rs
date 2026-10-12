@@ -404,6 +404,38 @@ fn node_key(node_prefix: &[u8], node_key: &[u8]) -> Vec<u8> {
     key
 }
 
+/// Re-keys every node of the list stored under `public_key` from
+/// `old_prefix` to `new_prefix` (both of the form `-<db>:<name>`), for
+/// `RENAME`. Nodes are found by walking the chain from the sentinel's head,
+/// because a prefix scan on `-<db>:<name>:` would also match the entries of
+/// unrelated keys such as `<name>:other`. Links store only the 16-byte node
+/// key, so node contents are copied unchanged.
+pub(crate) async fn move_nodes(
+    tx: &dyn Tx,
+    public_key: &[u8],
+    old_prefix: &[u8],
+    new_prefix: &[u8],
+) -> Result<(), DbError> {
+    let (size, head, _tail) = read_sentinel(tx, public_key).await?;
+    let mut current = head;
+    for _ in 0..size {
+        if current == [0u8; KEY_LENGTH] {
+            break;
+        }
+        let item = tx.get(&node_key(old_prefix, &current)).await?;
+        let value = item.value();
+        if value.len() < 2 * KEY_LENGTH {
+            return Err(DbError::Kv(KvError::KeyNotFound));
+        }
+        let mut next = [0u8; KEY_LENGTH];
+        next.copy_from_slice(&value[value.len() - KEY_LENGTH..]);
+        tx.set(Entry::new(node_key(new_prefix, &current), value.to_vec()).metadata(item.metadata()))?;
+        tx.delete(&node_key(old_prefix, &current))?;
+        current = next;
+    }
+    Ok(())
+}
+
 /// Reads the list sentinel (size + head + tail), verifying the entry is a
 /// list. A missing key or a value too short to be a sentinel maps to
 /// [`KvError::KeyNotFound`]; a key holding any other type is
