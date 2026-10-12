@@ -119,6 +119,10 @@ struct Linked {
     head: Option<[u8; KEY_LENGTH]>,
     tail: Option<[u8; KEY_LENGTH]>,
     nodes: HashMap<[u8; KEY_LENGTH], ListNode>,
+    /// Nodes taken out of the chain since the list was loaded. Their stored
+    /// entries must be deleted when the list is persisted, or they are left
+    /// behind forever.
+    removed: Vec<[u8; KEY_LENGTH]>,
 }
 
 impl Linked {
@@ -128,7 +132,25 @@ impl Linked {
             head: None,
             tail: None,
             nodes: HashMap::new(),
+            removed: Vec::new(),
         }
+    }
+
+    /// Deletes the stored entries of every node removed from this list.
+    fn delete_removed_nodes(&self, tx: &dyn Tx, node_prefix: &[u8]) -> Result<(), DbError> {
+        for key in &self.removed {
+            tx.delete(&node_key(node_prefix, key))?;
+        }
+        Ok(())
+    }
+
+    /// Deletes the stored entries of every node of this list, live or removed.
+    fn delete_all_nodes(&self, tx: &dyn Tx, node_prefix: &[u8]) -> Result<(), DbError> {
+        self.delete_removed_nodes(tx, node_prefix)?;
+        for key in self.nodes.keys() {
+            tx.delete(&node_key(node_prefix, key))?;
+        }
+        Ok(())
     }
 
     /// The node keys in chain order, head to tail.
@@ -196,6 +218,7 @@ impl Linked {
     fn remove_first(&mut self) -> Option<Vec<u8>> {
         let head = self.head?;
         let node = self.nodes.remove(&head)?;
+        self.removed.push(head);
         let value = node.value;
         let new_head = node.next;
         self.head = new_head;
@@ -215,6 +238,7 @@ impl Linked {
     fn remove_last(&mut self) -> Option<Vec<u8>> {
         let tail = self.tail?;
         let node = self.nodes.remove(&tail)?;
+        self.removed.push(tail);
         let value = node.value;
         let new_tail = node.prev;
         self.tail = new_tail;
@@ -253,6 +277,7 @@ impl Linked {
                     }
                 }
                 self.nodes.remove(&k);
+                self.removed.push(k);
                 removed += 1;
                 self.size = self.size.saturating_sub(1);
             } else {
@@ -296,6 +321,7 @@ impl Linked {
                 }
             }
             self.nodes.remove(&k);
+            self.removed.push(k);
             removed += 1;
             self.size = self.size.saturating_sub(1);
         }
@@ -318,6 +344,7 @@ impl Linked {
         for (i, &k) in keys.iter().enumerate() {
             if i < start || i > stop {
                 self.nodes.remove(&k);
+                self.removed.push(k);
                 continue;
             }
             if let Some(n) = self.nodes.get_mut(&k) {
@@ -541,6 +568,7 @@ async fn persist_list(
     ll: &Linked,
 ) -> Result<(), DbError> {
     write_sentinel(tx, public_key, ll.head, ll.tail, ll.size).await?;
+    ll.delete_removed_nodes(tx, node_prefix)?;
     for node in ll.nodes.values() {
         let mut buf = Vec::with_capacity(node.value.len() + 2 * KEY_LENGTH);
         buf.extend_from_slice(&node.value);
@@ -892,6 +920,7 @@ impl DbOp for PopOp {
                 ll.remove_first()
             };
             if ll.size == 0 {
+                ll.delete_removed_nodes(tx, &node_prefix)?;
                 tx.delete(&public_key)?;
             } else {
                 persist_list(tx, &public_key, &node_prefix, &ll).await?;
@@ -1104,6 +1133,7 @@ impl DbOp for LRemOp {
                 ll.remove_matching(count, &value)
             };
             if ll.size == 0 {
+                ll.delete_removed_nodes(tx, &node_prefix)?;
                 tx.delete(&public_key)?;
             } else {
                 persist_list(tx, &public_key, &node_prefix, &ll).await?;
@@ -1152,6 +1182,7 @@ impl DbOp for LTrimOp {
                 stop = size - 1;
             }
             if start > stop || start >= size {
+                ll.delete_all_nodes(tx, &node_prefix)?;
                 tx.delete(&public_key)?;
                 let result: DbResult = Box::new(());
                 return Ok(result);
@@ -1231,6 +1262,7 @@ impl DbOp for RPopLPushOp {
             };
             // Save source list.
             if src_ll.size == 0 {
+                src_ll.delete_removed_nodes(tx, &src_prefix)?;
                 tx.delete(&src_public)?;
             } else {
                 persist_list(tx, &src_public, &src_prefix, &src_ll).await?;

@@ -1126,6 +1126,57 @@ mod tests {
         assert_eq!(exec(&session, crate::list::lrange(&session, b"foo:bar", 0, -1)).await, neighbour);
     }
 
+    /// Pushes `values` onto list `l` and returns the session.
+    async fn list_of(values: &[&str]) -> Session {
+        let session = test_session();
+        let values: Vec<Bytes> = values.iter().map(|v| bs(v)).collect();
+        exec(&session, crate::list::rpush(&session, b"l", &values)).await;
+        session
+    }
+
+    /// A list's stored nodes must track its live elements: removing elements
+    /// deletes their nodes instead of orphaning them.
+    #[tokio::test]
+    async fn list_removals_delete_the_removed_nodes() {
+        let s = list_of(&["a", "b", "c", "d", "e"]).await;
+        assert_eq!(internal_entry_count(&s).await, 5);
+
+        exec(&s, crate::list::lpop(&s, b"l")).await;
+        assert_eq!(internal_entry_count(&s).await, 4, "LPOP");
+        exec(&s, crate::list::rpop(&s, b"l")).await;
+        assert_eq!(internal_entry_count(&s).await, 3, "RPOP");
+        exec(&s, crate::list::lrem(&s, b"l", 1, b"c")).await;
+        assert_eq!(internal_entry_count(&s).await, 2, "LREM");
+        exec(&s, crate::list::rpush(&s, b"l", &[bs("x"), bs("y"), bs("z")])).await;
+        assert_eq!(internal_entry_count(&s).await, 5);
+        exec(&s, crate::list::ltrim(&s, b"l", 0, 1)).await;
+        assert_eq!(internal_entry_count(&s).await, 2, "LTRIM");
+    }
+
+    #[tokio::test]
+    async fn list_emptied_by_any_command_leaves_no_nodes() {
+        // Popped to empty.
+        let s = list_of(&["a", "b"]).await;
+        exec(&s, crate::list::lpop(&s, b"l")).await;
+        exec(&s, crate::list::lpop(&s, b"l")).await;
+        assert_eq!(internal_entry_count(&s).await, 0, "LPOP to empty");
+
+        // Removed to empty.
+        let s = list_of(&["a", "a"]).await;
+        exec(&s, crate::list::lrem(&s, b"l", 0, b"a")).await;
+        assert_eq!(internal_entry_count(&s).await, 0, "LREM to empty");
+
+        // Trimmed to an empty range.
+        let s = list_of(&["a", "b", "c"]).await;
+        exec(&s, crate::list::ltrim(&s, b"l", 5, 10)).await;
+        assert_eq!(internal_entry_count(&s).await, 0, "LTRIM out of range");
+
+        // Source of RPOPLPUSH emptied; the element lives on in the destination.
+        let s = list_of(&["a"]).await;
+        exec(&s, crate::list::rpoplpush(&s, b"l", b"dst")).await;
+        assert_eq!(internal_entry_count(&s).await, 1, "RPOPLPUSH source emptied");
+    }
+
     #[tokio::test]
     async fn rename_renames_and_overwrites() {
         let session = test_session();
