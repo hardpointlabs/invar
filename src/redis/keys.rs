@@ -14,11 +14,12 @@
 use std::ops::Bound;
 
 use bytes::Bytes;
-use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
+use kv::kv::{BoxFuture, Entry, Error as KvError, Item, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, NoOp, QueuedOp, WireOp};
 use smallvec::smallvec;
 use crate::common::session::Session;
+use crate::common::namespace::{self, base_type, encode_sentinel, prefix_of, with_db, ElementPrefix};
 use crate::common::ValueType;
 use crate::list;
 use crate::pubsub::redis_glob_match;
@@ -53,14 +54,19 @@ pub fn mget(session: &Session, keys: &[Bytes]) -> QueuedOp {
     }
 }
 
-/// `MOVE key db` — moves the key to another DB, returning 1 if moved and 0 if
-/// the source key doesn't exist. The target entry preserves the metadata but
-/// not any TTL.
+/// `MOVE key db` — moves the key to another DB with its TTL, returning 1 if
+/// moved and 0 if the key is missing in this DB or already exists in the
+/// target. Moving to the current DB is an error, as in Redis.
+///
+/// The elements of a compound value are addressed by a prefix that contains
+/// its DB number, so they are re-keyed too: O(size of the value).
 pub fn move_op(session: &Session, key: &[u8], target_db: i32) -> QueuedOp {
     QueuedOp {
         db_op: Box::new(MoveOp {
             source: session.public_key(key),
             target: session.public_key_for_db(target_db, key),
+            target_db,
+            same_db: target_db == session.current_db(),
         }),
         wire_op: Box::new(IntWire),
         is_mutating: true,
@@ -401,13 +407,19 @@ impl DbOp for MGetOp {
 struct MoveOp {
     source: Vec<u8>,
     target: Vec<u8>,
+    target_db: i32,
+    same_db: bool,
 }
 
 impl DbOp for MoveOp {
     fn run<'a>(&'a self, tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
         let source = self.source.clone();
         let target = self.target.clone();
+        let (target_db, same_db) = (self.target_db, self.same_db);
         Box::pin(async move {
+            if same_db {
+                return Err(DbError::Redis("source and destination objects are the same".into()));
+            }
             let item = match tx.get(&source).await {
                 Ok(item) => item,
                 Err(KvError::KeyNotFound) => {
@@ -416,12 +428,66 @@ impl DbOp for MoveOp {
                 }
                 Err(e) => return Err(e.into()),
             };
-            tx.set(Entry::new(target, item.value().to_vec()).metadata(item.metadata()))?;
+            match tx.get(&target).await {
+                Ok(_) => {
+                    let result: DbResult = Box::new(0i64);
+                    return Ok(result);
+                }
+                Err(KvError::KeyNotFound) => {}
+                Err(e) => return Err(e.into()),
+            }
+            let corrupt = || DbError::Redis("internal error: malformed element prefix".into());
+            let legacy = |public: &[u8]| [b"-".as_slice(), public].concat();
+            let from = prefix_of(&item, &legacy(&source))?;
+            let to = if from.is_explicit() {
+                ElementPrefix::explicit(with_db(&from, target_db).ok_or_else(corrupt)?)
+            } else {
+                ElementPrefix::legacy(legacy(&target))
+            };
+            move_elements(tx, &source, base_type(item.metadata()), &from, &to).await?;
+            let (value, metadata) = if to.is_explicit() {
+                encode_sentinel(namespace::payload(&item)?.to_vec(), base_type(item.metadata()), &to)
+            } else {
+                (item.value().to_vec(), item.metadata())
+            };
+            tx.set(Entry::new(target, value).metadata(metadata).keep_ttl_of(&item))?;
             tx.delete(&source)?;
             let result: DbResult = Box::new(1i64);
             Ok(result)
         })
     }
+}
+
+/// Moves the key `old` (already read as `item`) to `new` for `RENAME`:
+/// the destination's own elements are cleared, the elements follow if they
+/// are addressed by the old name, and the public entry moves with its
+/// remaining TTL. `RENAME k k` is a no-op.
+///
+/// A value whose sentinel records a namespace needs nothing but its sentinel
+/// copied, so renaming it is O(1). A legacy value's elements are addressed by
+/// its name (`-<db>:<name>...`), so they are re-keyed: O(size of the value).
+async fn rename_entry(tx: &dyn Tx, old: &[u8], new: &[u8], item: &Item) -> Result<(), DbError> {
+    if old == new {
+        return Ok(());
+    }
+    let legacy = |public: &[u8]| [b"-".as_slice(), public].concat();
+
+    match tx.get(new).await {
+        Ok(existing) => {
+            let prefix = prefix_of(&existing, &legacy(new))?;
+            clear_compound_entries(tx, new, &prefix, existing.metadata()).await?;
+        }
+        Err(KvError::KeyNotFound) => {}
+        Err(e) => return Err(e.into()),
+    }
+
+    let source = prefix_of(item, &legacy(old))?;
+    if !source.is_explicit() {
+        move_elements(tx, old, base_type(item.metadata()), &source, &legacy(new)).await?;
+    }
+    tx.set(Entry::new(new.to_vec(), item.value().to_vec()).metadata(item.metadata()).keep_ttl_of(item))?;
+    tx.delete(old)?;
+    Ok(())
 }
 
 struct RenameOp {
@@ -442,8 +508,7 @@ impl DbOp for RenameOp {
                 }
                 Err(e) => return Err(e.into()),
             };
-            tx.set(Entry::new(new, item.value().to_vec()).metadata(item.metadata()))?;
-            tx.delete(&old)?;
+            rename_entry(tx, &old, &new, &item).await?;
             let result: DbResult = Box::new(Some(()));
             Ok(result)
         })
@@ -476,8 +541,7 @@ impl DbOp for RenameNXOp {
                 }
                 Err(e) => return Err(e.into()),
             };
-            tx.set(Entry::new(new, item.value().to_vec()).metadata(item.metadata()))?;
-            tx.delete(&old)?;
+            rename_entry(tx, &old, &new, &item).await?;
             let result: DbResult = Box::new(Some(1i64));
             Ok(result)
         })
@@ -641,7 +705,7 @@ impl DbOp for TypeOp {
         let key = self.key.clone();
         Box::pin(async move {
             let name = match tx.get(&key).await {
-                Ok(item) => type_name(item.metadata()).to_string(),
+                Ok(item) => type_name(base_type(item.metadata())).to_string(),
                 Err(KvError::KeyNotFound) => "none".to_string(),
                 Err(e) => return Err(e.into()),
             };
@@ -660,13 +724,14 @@ impl DbOp for DelOp {
         let keys = self.keys.clone();
         Box::pin(async move {
             let mut count = 0i64;
-            for (public_key, node_prefix) in &keys {
+            for (public_key, legacy_prefix) in &keys {
                 let item = match tx.get(public_key).await {
                     Err(KvError::KeyNotFound) => continue,
                     Err(e) => return Err(e.into()),
                     Ok(item) => item,
                 };
-                clear_compound_entries(tx, public_key, node_prefix, item.metadata()).await?;
+                let prefix = prefix_of(&item, legacy_prefix)?;
+                clear_compound_entries(tx, public_key, &prefix, item.metadata()).await?;
                 tx.delete(public_key)?;
                 count += 1;
             }
@@ -674,6 +739,67 @@ impl DbOp for DelOp {
             Ok(result)
         })
     }
+}
+
+/// The prefixes, under a value's element prefix, that its element entries
+/// live under, for the types that keep the elements as one family of keys.
+/// Lists are not covered: their nodes are found by walking the chain.
+fn element_prefixes(base_type: u8, prefix: &[u8]) -> Vec<Vec<u8>> {
+    if base_type == ValueType::Set as u8
+        || base_type == ValueType::Hash as u8
+        || base_type == ValueType::Stream as u8
+        || base_type == ValueType::Bloom as u8
+    {
+        vec![[prefix, b"\0"].concat()]
+    } else if base_type == ValueType::SortedSet as u8 {
+        vec![[prefix, b":score:"].concat(), [prefix, b":member:"].concat()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Re-keys every entry under `from` to live under `to` instead (keeping the
+/// part of the key after the prefix, the value and the metadata byte).
+async fn move_prefix(tx: &dyn Tx, from: &[u8], to: &[u8]) -> Result<(), DbError> {
+    let mut it = tx.new_prefix_iterator(from).await?;
+    let mut moved = Vec::new();
+    while it.next().await {
+        if let Some(item) = it.item() {
+            moved.push((item.key().to_vec(), item.value().to_vec(), item.metadata()));
+        }
+    }
+    let err = it.err().cloned();
+    if let Some(e) = err {
+        it.close().await?;
+        return Err(DbError::Kv(e));
+    }
+    it.close().await?;
+    for (key, value, metadata) in moved {
+        let mut new_key = to.to_vec();
+        new_key.extend_from_slice(&key[from.len()..]);
+        tx.set(Entry::new(new_key, value).metadata(metadata))?;
+        tx.delete(&key)?;
+    }
+    Ok(())
+}
+
+/// Moves the elements of the compound value whose sentinel is at
+/// `public_key` from element prefix `from` to element prefix `to`. O(size of
+/// the value). Does nothing for types that keep no elements.
+pub(crate) async fn move_elements(
+    tx: &dyn Tx,
+    public_key: &[u8],
+    base_type: u8,
+    from: &[u8],
+    to: &[u8],
+) -> Result<(), DbError> {
+    if base_type == ValueType::List as u8 {
+        return list::move_nodes(tx, public_key, from, to).await;
+    }
+    for (from, to) in element_prefixes(base_type, from).into_iter().zip(element_prefixes(base_type, to)) {
+        move_prefix(tx, &from, &to).await?;
+    }
+    Ok(())
 }
 
 /// Deletes the internal entry keys owned by a compound value so that
@@ -694,25 +820,11 @@ async fn clear_compound_entries(
     node_prefix: &[u8],
     metadata: u8,
 ) -> Result<(), DbError> {
-    let mut prefixes: Vec<Vec<u8>> = Vec::new();
+    let metadata = base_type(metadata);
     if metadata == ValueType::List as u8 {
         return list::delete_nodes(tx, public_key, node_prefix).await;
     }
-    if metadata == ValueType::Set as u8
-        || metadata == ValueType::Hash as u8
-        || metadata == ValueType::Stream as u8
-        || metadata == ValueType::Bloom as u8
-    {
-        let mut prefix = node_prefix.to_vec();
-        prefix.push(0);
-        prefixes.push(prefix);
-    } else if metadata == ValueType::SortedSet as u8 {
-        prefixes.push([node_prefix, b":score:"].concat());
-        prefixes.push([node_prefix, b":member:"].concat());
-    } else {
-        return Ok(());
-    }
-    for prefix in prefixes {
+    for prefix in element_prefixes(metadata, node_prefix) {
         let mut it = tx.new_prefix_iterator(&prefix).await?;
         let mut keys = Vec::new();
         while it.next().await {
@@ -801,7 +913,7 @@ impl DbOp for ScanOp {
                     }
                 }
                 if let Some(want) = type_filter {
-                    if item.metadata() != want {
+                    if base_type(item.metadata()) != want {
                         continue;
                     }
                 }
@@ -1303,6 +1415,227 @@ mod tests {
         assert_eq!(key_names(&session, b"*").await, ["one"]);
         session.switch_db(0);
         assert_eq!(key_names(&session, b"*").await, ["zero"]);
+    }
+
+    // --- compound values in the legacy and the namespaced layout (RFC 0001) ---
+
+    const TYPES: [&str; 6] = ["list", "hash", "set", "zset", "stream", "bloom"];
+
+    /// An op that reads back everything of the value of type `ty` under `key`.
+    fn read_op(session: &Session, ty: &str, key: &[u8]) -> QueuedOp {
+        match ty {
+            "list" => crate::list::lrange(session, key, 0, -1),
+            "hash" => crate::hash::hgetall(session, key),
+            "set" => crate::set::smembers(session, key),
+            "zset" => crate::zset::zrange(session, key, 0, -1, true),
+            "stream" => crate::stream::xrange(session, key, None, None, 1000),
+            "bloom" => crate::bloom::exists(session, key, b"item"),
+            other => panic!("unknown type {other}"),
+        }
+    }
+
+    /// What `read_op` returns, with unordered replies sorted.
+    async fn read_back(session: &Session, ty: &str, key: &[u8]) -> RespValue {
+        match exec(session, read_op(session, ty, key)).await {
+            RespValue::Array(Some(mut items)) if ty == "set" => {
+                items.sort_by_key(|i| format!("{i:?}"));
+                RespValue::Array(Some(items))
+            }
+            other => other,
+        }
+    }
+
+    async fn build(session: &Session, ty: &str, key: &[u8]) {
+        for op in build_ops(session, ty, key) {
+            exec(session, op).await;
+        }
+    }
+
+    /// The namespace used for `ty` in these tests (db 0).
+    fn ns_for(ty: &str) -> Vec<u8> {
+        format!("+0:ns-{ty:-<8}-keys").into_bytes()
+    }
+
+    #[tokio::test]
+    async fn del_removes_a_namespaced_value_completely() {
+        for ty in TYPES {
+            let s = test_session();
+            build(&s, ty, b"k").await;
+            let ns = ns_for(ty);
+            crate::testutil::namespace_key(&s, b"k", &ns).await;
+            assert!(crate::testutil::entries_under(&s, &ns).await > 0, "{ty}");
+
+            assert_eq!(expect_int(&exec(&s, del(&s, &[bs("k")])).await), 1, "{ty}");
+            assert_eq!(crate::testutil::entries_under(&s, &ns).await, 0, "{ty}: DEL left elements in the namespace");
+            assert_eq!(crate::testutil::stored_type_byte(&s, &s.public_key(b"k")).await, None, "{ty}");
+        }
+    }
+
+    /// Renaming a namespaced value copies the sentinel and nothing else: every
+    /// element entry is byte-for-byte what it was, so the cost does not grow
+    /// with the size of the value.
+    #[tokio::test]
+    async fn renaming_a_namespaced_value_does_not_touch_its_elements() {
+        for ty in TYPES {
+            let s = test_session();
+            build(&s, ty, b"old").await;
+            let ns = ns_for(ty);
+            crate::testutil::namespace_key(&s, b"old", &ns).await;
+            let before = read_back(&s, ty, b"old").await;
+            let elements = crate::testutil::entries_snapshot(&s, &ns).await;
+            let empty = read_back(&s, ty, b"never-existed").await;
+            assert_ne!(before, empty, "{ty}: test data must be visible");
+
+            let reply = exec(&s, rename(&s, b"old", b"new")).await;
+            assert_eq!(reply, RespValue::SimpleString(Bytes::from_static(b"OK")), "{ty}");
+
+            assert_eq!(read_back(&s, ty, b"new").await, before, "{ty}: data lost by RENAME");
+            assert_eq!(read_back(&s, ty, b"old").await, empty, "{ty}: old name still has data");
+            assert_eq!(crate::testutil::entries_snapshot(&s, &ns).await, elements, "{ty}: RENAME rewrote elements");
+            let meta = crate::testutil::stored_type_byte(&s, &s.public_key(b"new")).await.unwrap();
+            assert!(crate::common::namespace::is_namespaced(meta), "{ty}: the namespace must follow the key");
+        }
+    }
+
+    /// A legacy value's elements are addressed by its name, so they are re-keyed.
+    #[tokio::test]
+    async fn renaming_a_legacy_value_moves_its_elements() {
+        for ty in TYPES {
+            let s = test_session();
+            build(&s, ty, b"old").await;
+            let before = read_back(&s, ty, b"old").await;
+            let empty = read_back(&s, ty, b"never-existed").await;
+
+            exec(&s, rename(&s, b"old", b"new")).await;
+
+            assert_eq!(read_back(&s, ty, b"new").await, before, "{ty}");
+            assert_eq!(read_back(&s, ty, b"old").await, empty, "{ty}");
+            assert_eq!(internal_entry_count(&s).await, crate::testutil::entries_under(&s, &s.private_key(b"new")).await, "{ty}: stray entries");
+        }
+    }
+
+    #[tokio::test]
+    async fn rename_over_a_namespaced_destination_replaces_it() {
+        let s = test_session();
+        build(&s, "hash", b"dst").await;
+        crate::testutil::exec(&s, crate::hash::hset(&s, b"dst", &[bs("stale"), bs("x")])).await;
+        crate::testutil::namespace_key(&s, b"dst", b"+0:ns-dst-0001").await;
+        crate::testutil::exec(&s, crate::hash::hset(&s, b"src", &[bs("f"), bs("v")])).await;
+
+        exec(&s, rename(&s, b"src", b"dst")).await;
+
+        let got = exec(&s, crate::hash::hgetall(&s, b"dst")).await;
+        assert_eq!(got, RespValue::Array(Some(vec![RespValue::BulkString(Some(bs("f"))), RespValue::BulkString(Some(bs("v")))])));
+        assert_eq!(crate::testutil::entries_under(&s, b"+0:ns-dst-0001").await, 0, "the old destination's elements must be cleared");
+    }
+
+    #[tokio::test]
+    async fn rename_carries_the_ttl_of_a_namespaced_value() {
+        let s = test_session();
+        build(&s, "list", b"old").await;
+        exec(&s, expire(&s, b"old", 100)).await;
+        crate::testutil::namespace_key(&s, b"old", b"+0:ns-ttl-0001").await;
+        exec(&s, rename(&s, b"old", b"new")).await;
+        let remaining = ttl_secs(&s, b"new").await;
+        assert!((90..=100).contains(&remaining), "ttl was {remaining}");
+    }
+
+    #[tokio::test]
+    async fn type_scan_keys_and_expiry_see_through_the_namespace() {
+        let s = test_session();
+        for ty in TYPES {
+            build(&s, ty, ty.as_bytes()).await;
+            crate::testutil::namespace_key(&s, ty.as_bytes(), &ns_for(ty)).await;
+        }
+        // TYPE and EXISTS.
+        for ty in TYPES {
+            let reply = exec(&s, key_type(&s, ty.as_bytes())).await;
+            let expected = if ty == "zset" { "zset" } else { ty };
+            assert_eq!(reply, RespValue::SimpleString(Bytes::copy_from_slice(expected.as_bytes())), "{ty}");
+        }
+        assert_eq!(expect_int(&exec(&s, exists(&s, &[bs("hash"), bs("list"), bs("nope")])).await), 2);
+        // KEYS lists each namespaced key once, none of its elements.
+        assert_eq!(key_names(&s, b"*").await, ["bloom", "hash", "list", "set", "stream", "zset"]);
+        // SCAN with a TYPE filter.
+        let scan_reply = exec(&s, scan(&s, b"0", 100, None, type_byte(b"hash"))).await;
+        let RespValue::Array(Some(parts)) = scan_reply else { panic!("SCAN must reply an array") };
+        assert_eq!(parts[1], RespValue::Array(Some(vec![RespValue::BulkString(Some(bs("hash")))])));
+        // EXPIRE / TTL / PERSIST keep the value and the namespace.
+        exec(&s, expire(&s, b"set", 100)).await;
+        assert!((90..=100).contains(&ttl_secs(&s, b"set").await));
+        exec(&s, persist(&s, b"set")).await;
+        assert_eq!(ttl_secs(&s, b"set").await, -1);
+        assert_eq!(read_back(&s, "set", b"set").await, {
+            let t = test_session();
+            build(&t, "set", b"set").await;
+            read_back(&t, "set", b"set").await
+        });
+        let meta = crate::testutil::stored_type_byte(&s, &s.public_key(b"set")).await.unwrap();
+        assert!(crate::common::namespace::is_namespaced(meta));
+    }
+
+    // --- MOVE ---
+
+    #[tokio::test]
+    async fn move_carries_a_legacy_value_to_another_db() {
+        for ty in TYPES {
+            let mut s = test_session();
+            build(&s, ty, b"k").await;
+            exec(&s, expire(&s, b"k", 100)).await;
+            let before = read_back(&s, ty, b"k").await;
+
+            assert_eq!(expect_int(&exec(&s, move_op(&s, b"k", 1)).await), 1, "{ty}");
+
+            assert_eq!(internal_entry_count(&s).await, crate::testutil::entries_under(&s, b"-1:k").await, "{ty}: nothing may stay behind in db 0");
+            s.switch_db(1);
+            assert_eq!(read_back(&s, ty, b"k").await, before, "{ty}: data lost by MOVE");
+            assert!((90..=100).contains(&ttl_secs(&s, b"k").await), "{ty}: TTL");
+            s.switch_db(0);
+            assert_eq!(stored(&s, 0, b"k").await, None, "{ty}");
+        }
+    }
+
+    #[tokio::test]
+    async fn move_carries_a_namespaced_value_to_another_db() {
+        for ty in TYPES {
+            let mut s = test_session();
+            build(&s, ty, b"k").await;
+            let ns = ns_for(ty);
+            crate::testutil::namespace_key(&s, b"k", &ns).await;
+            let before = read_back(&s, ty, b"k").await;
+            let elements = crate::testutil::entries_snapshot(&s, &ns).await.len();
+
+            assert_eq!(expect_int(&exec(&s, move_op(&s, b"k", 1)).await), 1, "{ty}");
+
+            // The namespace's db number follows the key, so FLUSHDB of db 0 cannot destroy it.
+            assert_eq!(crate::testutil::entries_under(&s, &ns).await, 0, "{ty}: elements left in db 0's namespace");
+            let moved = crate::common::namespace::with_db(&ns, 1).unwrap();
+            assert_eq!(crate::testutil::entries_under(&s, &moved).await, elements, "{ty}");
+            s.switch_db(1);
+            assert_eq!(read_back(&s, ty, b"k").await, before, "{ty}: data lost by MOVE");
+        }
+    }
+
+    #[tokio::test]
+    async fn move_does_nothing_when_the_target_exists_or_the_db_is_the_same() {
+        let s = test_session();
+        build(&s, "hash", b"k").await;
+        let before = read_back(&s, "hash", b"k").await;
+        // Occupy the key in db 1.
+        {
+            let mut other = Session::new(s.store(), s.registry());
+            other.switch_db(1);
+            seed_string(&other, b"k", b"already here").await;
+        }
+        assert_eq!(expect_int(&exec(&s, move_op(&s, b"k", 1)).await), 0);
+        assert_eq!(read_back(&s, "hash", b"k").await, before, "a refused MOVE must leave the source alone");
+        assert_eq!(stored(&s, 1, b"k").await, Some(b"already here".to_vec()));
+
+        let reply = exec(&s, move_op(&s, b"k", 0)).await;
+        assert_eq!(reply, RespValue::Error(Bytes::from_static(b"ERR source and destination objects are the same")));
+        assert_eq!(read_back(&s, "hash", b"k").await, before, "MOVE to the same db must not delete the key");
+
+        assert_eq!(expect_int(&exec(&s, move_op(&s, b"missing", 1)).await), 0);
     }
 
     #[tokio::test]

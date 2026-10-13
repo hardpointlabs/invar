@@ -3,6 +3,7 @@
 //! command batching via the [`DbOp`]/[`WireOp`] abstractions, and the
 //! [`WatchRegistry`] that tracks clients blocked on key changes.
 
+pub mod namespace;
 pub mod op;
 pub mod registry;
 pub mod session;

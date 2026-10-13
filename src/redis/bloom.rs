@@ -28,7 +28,7 @@ use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use crate::common::session::Session;
-use crate::common::set_keeping_ttl;
+use crate::common::namespace::{self, resolve_prefix, ElementPrefix};
 use crate::common::ValueType;
 use crate::resp::RespValue;
 
@@ -316,23 +316,30 @@ fn page_key(page_prefix: &[u8], filter_id: u64, page_num: u64) -> Vec<u8> {
 }
 
 /// Reads and decodes the meta entry stored under the public key.
-async fn read_meta(tx: &dyn Tx, meta_key: &[u8]) -> Result<BloomMeta, KvError> {
+async fn read_meta(tx: &dyn Tx, meta_key: &[u8]) -> Result<BloomMeta, DbError> {
     let item = tx.get(meta_key).await?;
-    decode_meta(item.value())
+    Ok(decode_meta(namespace::payload(&item)?)?)
 }
 
 /// Reads the meta, mapping a missing key to `Ok(None)`.
-async fn read_meta_or_nil(tx: &dyn Tx, meta_key: &[u8]) -> Result<Option<BloomMeta>, KvError> {
+async fn read_meta_or_nil(tx: &dyn Tx, meta_key: &[u8]) -> Result<Option<BloomMeta>, DbError> {
     match read_meta(tx, meta_key).await {
         Ok(m) => Ok(Some(m)),
-        Err(KvError::KeyNotFound) => Ok(None),
+        Err(DbError::Kv(KvError::KeyNotFound)) => Ok(None),
         Err(e) => Err(e),
     }
 }
 
-/// Persists the meta entry under the public key.
-async fn write_meta(tx: &dyn Tx, meta_key: &[u8], m: &BloomMeta) -> Result<(), KvError> {
-    set_keeping_ttl(tx, Entry::new(meta_key.to_vec(), encode_meta(m)).metadata(TYPE_BLOOM)).await
+/// Persists the meta entry under the public key. `prefix` is the prefix the
+/// filter's pages are stored under; the entry records it when it is a
+/// namespace and keeps the key's TTL.
+async fn write_meta(
+    tx: &dyn Tx,
+    meta_key: &[u8],
+    m: &BloomMeta,
+    prefix: &ElementPrefix,
+) -> Result<(), DbError> {
+    namespace::write_sentinel(tx, meta_key, encode_meta(m), TYPE_BLOOM, prefix).await
 }
 
 /// Reads one fixed-size page, returning a fresh all-zero page when none has
@@ -359,7 +366,7 @@ fn write_page(tx: &dyn Tx, page_key: &[u8], data: &[u8]) -> Result<(), DbError> 
 async fn add_one(
     tx: &dyn Tx,
     meta_key: &[u8],
-    page_prefix: &[u8],
+    page_prefix: &ElementPrefix,
     item: &[u8],
 ) -> Result<i64, DbError> {
     let mut meta = match read_meta_or_nil(tx, meta_key).await? {
@@ -371,7 +378,7 @@ async fn add_one(
                 non_scaling: false,
                 filters: vec![filter],
             };
-            write_meta(tx, meta_key, &m).await?;
+            write_meta(tx, meta_key, &m, page_prefix).await?;
             m
         }
     };
@@ -438,7 +445,7 @@ async fn add_one(
     if let Some(last) = meta.filters.last_mut() {
         last.inserted += 1;
     }
-    write_meta(tx, meta_key, &meta).await?;
+    write_meta(tx, meta_key, &meta, page_prefix).await?;
 
     Ok(1)
 }
@@ -503,6 +510,7 @@ pub fn reserve(
     QueuedOp {
         db_op: Box::new(ReserveOp {
             meta_key: session.public_key(key),
+            page_prefix: session.private_key(key),
             error_rate,
             capacity,
             expansion,
@@ -626,6 +634,7 @@ pub fn info(session: &Session, key: &[u8]) -> QueuedOp {
 
 struct ReserveOp {
     meta_key: Vec<u8>,
+    page_prefix: Vec<u8>,
     error_rate: f64,
     capacity: u64,
     expansion: i64,
@@ -635,6 +644,7 @@ struct ReserveOp {
 impl DbOp for ReserveOp {
     fn run<'a>(&'a self, tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
         let meta_key = self.meta_key.clone();
+        let page_prefix = self.page_prefix.clone();
         let error_rate = self.error_rate;
         let capacity = self.capacity;
         let expansion = self.expansion;
@@ -654,7 +664,8 @@ impl DbOp for ReserveOp {
                         non_scaling,
                         filters: vec![filter],
                     };
-                    write_meta(tx, &meta_key, &meta).await?;
+                    // A new filter: its pages live under the name-derived prefix.
+                    write_meta(tx, &meta_key, &meta, &ElementPrefix::legacy(page_prefix)).await?;
                     let result: DbResult = Box::new(());
                     Ok(result)
                 }
@@ -676,6 +687,7 @@ impl DbOp for AddOp {
         let page_prefix = self.page_prefix.clone();
         let item = self.item.clone();
         Box::pin(async move {
+            let page_prefix = resolve_prefix(tx, &meta_key, &page_prefix).await?;
             let added = add_one(tx, &meta_key, &page_prefix, &item).await?;
             let result: DbResult = Box::new(added);
             Ok(result)
@@ -695,6 +707,7 @@ impl DbOp for ExistsOp {
         let page_prefix = self.page_prefix.clone();
         let item = self.item.clone();
         Box::pin(async move {
+            let page_prefix = resolve_prefix(tx, &meta_key, &page_prefix).await?;
             let present = exists_one(tx, &meta_key, &page_prefix, &item).await?;
             let result: DbResult = Box::new(present);
             Ok(result)
@@ -714,6 +727,7 @@ impl DbOp for MAddOp {
         let page_prefix = self.page_prefix.clone();
         let items = self.items.clone();
         Box::pin(async move {
+            let page_prefix = resolve_prefix(tx, &meta_key, &page_prefix).await?;
             let mut results = Vec::with_capacity(items.len());
             for item in &items {
                 results.push(add_one(tx, &meta_key, &page_prefix, item).await?);
@@ -736,6 +750,7 @@ impl DbOp for MExistsOp {
         let page_prefix = self.page_prefix.clone();
         let items = self.items.clone();
         Box::pin(async move {
+            let page_prefix = resolve_prefix(tx, &meta_key, &page_prefix).await?;
             let mut results = Vec::with_capacity(items.len());
             for item in &items {
                 let present = exists_one(tx, &meta_key, &page_prefix, item).await?;
@@ -766,6 +781,7 @@ impl DbOp for InsertOp {
             items: self.info.items.clone(),
         };
         Box::pin(async move {
+            let page_prefix = resolve_prefix(tx, &meta_key, &page_prefix).await?;
             match read_meta_or_nil(tx, &meta_key).await? {
                 Some(_) => {}
                 None => {
@@ -793,7 +809,7 @@ impl DbOp for InsertOp {
                         non_scaling: info.non_scaling,
                         filters: vec![filter],
                     };
-                    write_meta(tx, &meta_key, &m).await?;
+                    write_meta(tx, &meta_key, &m, &page_prefix).await?;
                 }
             }
             let mut results = Vec::with_capacity(info.items.len());
@@ -991,6 +1007,70 @@ mod tests {
             RespValue::Error(e) => e.clone(),
             other => panic!("expected error, got {other:?}"),
         }
+    }
+
+    // --- namespaced layout (RFC 0001) ---
+
+    const NS_B: &[u8] = b"+0:ns-bloom-00b";
+
+    fn items(range: std::ops::Range<u32>) -> Vec<Bytes> {
+        range.map(|i| Bytes::from(format!("item-{i}"))).collect()
+    }
+
+    /// Runs the op on a legacy twin and on the namespaced one; replies must match.
+    async fn both(legacy: &Session, ns: &Session, build: impl Fn(&Session) -> QueuedOp) -> RespValue {
+        let a = crate::testutil::exec(legacy, build(legacy)).await;
+        let b = crate::testutil::exec(ns, build(ns)).await;
+        assert_eq!(a, b, "a namespaced bloom filter must answer exactly like a legacy one");
+        a
+    }
+
+    #[tokio::test]
+    async fn a_namespaced_bloom_filter_behaves_like_a_legacy_one() {
+        let (legacy, ns) = (test_session(), test_session());
+        for s in [&legacy, &ns] {
+            crate::testutil::exec(s, madd(s, b"bf", &items(0..200))).await;
+        }
+        crate::testutil::namespace_key(&ns, b"bf", NS_B).await;
+
+        // Reads: items that were added and items that were not.
+        both(&legacy, &ns, |s| exists(s, b"bf", b"item-7")).await;
+        both(&legacy, &ns, |s| exists(s, b"bf", b"never-added")).await;
+        both(&legacy, &ns, |s| mexists(s, b"bf", &[items(0..3), items(900..903)].concat())).await;
+        both(&legacy, &ns, |s| info(s, b"bf")).await;
+
+        // Writes.
+        both(&legacy, &ns, |s| add(s, b"bf", b"fresh")).await;
+        both(&legacy, &ns, |s| add(s, b"bf", b"item-7")).await;
+        both(&legacy, &ns, |s| madd(s, b"bf", &items(200..260))).await;
+        both(&legacy, &ns, |s| {
+            insert(s, b"bf", InsertInfo {
+                capacity: 0, error: 0.0, expansion: 0, no_create: true, non_scaling: false,
+                items: items(300..310),
+            })
+        })
+        .await;
+        both(&legacy, &ns, |s| mexists(s, b"bf", &[items(0..3), items(200..203), items(300..303)].concat())).await;
+        both(&legacy, &ns, |s| info(s, b"bf")).await;
+        both(&legacy, &ns, |s| reserve(s, b"bf", 0.01, 100, 2, false)).await; // the key exists
+
+        // The pages live under the namespace, none under the name-derived prefix,
+        // and the meta entry still records it.
+        assert_eq!(crate::testutil::entries_under(&ns, &ns.private_key(b"bf")).await, 0);
+        assert!(crate::testutil::entries_under(&ns, NS_B).await > 0);
+        let meta = crate::testutil::stored_type_byte(&ns, &ns.public_key(b"bf")).await.unwrap();
+        assert_eq!(meta, TYPE_BLOOM | crate::common::namespace::NAMESPACE_FLAG);
+    }
+
+    #[tokio::test]
+    async fn a_namespaced_bloom_filter_keeps_its_ttl() {
+        let s = test_session();
+        crate::testutil::exec(&s, add(&s, b"bf", b"a")).await;
+        crate::testutil::exec(&s, crate::keys::expire(&s, b"bf", 100)).await;
+        crate::testutil::namespace_key(&s, b"bf", NS_B).await;
+        crate::testutil::exec(&s, add(&s, b"bf", b"b")).await;
+        let ttl = crate::testutil::exec(&s, crate::keys::ttl(&s, b"bf")).await;
+        assert!(matches!(ttl, RespValue::Integer(n) if (90..=100).contains(&n)), "ttl was {ttl:?}");
     }
 
     #[tokio::test]
@@ -1240,7 +1320,7 @@ mod tests {
         let meta_key = session.public_key(b"bf");
         let page_prefix = session.private_key(b"bf");
         for i in 0u8..20 {
-            add_one(&*tx, &meta_key, &page_prefix, &[i])
+            add_one(&*tx, &meta_key, &ElementPrefix::legacy(page_prefix.clone()), &[i])
                 .await
                 .expect("add");
         }
@@ -1279,7 +1359,7 @@ mod tests {
         let meta_key = session.public_key(b"bf");
         let page_prefix = session.private_key(b"bf");
         for i in 0u8..100 {
-            add_one(&*tx, &meta_key, &page_prefix, &[i])
+            add_one(&*tx, &meta_key, &ElementPrefix::legacy(page_prefix.clone()), &[i])
                 .await
                 .expect("add");
         }
@@ -1451,13 +1531,13 @@ mod tests {
         // First add per item is new (1); a repeat in the same session must be a
         // no-op (0) — mirroring Go's duplicate property.
         for (i, item) in items.iter().enumerate() {
-            let r = add_one(&*tx, &meta_key, &page_prefix, item)
+            let r = add_one(&*tx, &meta_key, &ElementPrefix::legacy(page_prefix.clone()), item)
                 .await
                 .expect("add");
             assert_eq!(r, 1, "first add of item {i} must be new");
         }
         for item in &items {
-            let r = add_one(&*tx, &meta_key, &page_prefix, item)
+            let r = add_one(&*tx, &meta_key, &ElementPrefix::legacy(page_prefix.clone()), item)
                 .await
                 .expect("add");
             assert_eq!(r, 0, "repeat add must be a no-op");
@@ -1491,7 +1571,7 @@ mod tests {
         {
             let tx = store.begin(true, TxIsolation::Snapshot).await.expect("write tx");
             for i in 0..n {
-                add_one(&*tx, &meta_key, &page_prefix, &item(i))
+                add_one(&*tx, &meta_key, &ElementPrefix::legacy(page_prefix.clone()), &item(i))
                     .await
                     .expect("add");
             }

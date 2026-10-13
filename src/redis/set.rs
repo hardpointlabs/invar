@@ -35,7 +35,7 @@ use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use smallvec::{smallvec, SmallVec};
 use crate::common::session::Session;
-use crate::common::set_keeping_ttl;
+use crate::common::namespace::{self, base_type, resolve_prefix, ElementPrefix};
 use crate::common::ValueType;
 use crate::resp::RespValue;
 
@@ -120,10 +120,10 @@ fn member_from_internal_key(key: &[u8]) -> Vec<u8> {
 /// missing key.
 async fn read_sentinel(tx: &dyn Tx, public_key: &[u8]) -> Result<u32, DbError> {
     let item = tx.get(public_key).await?;
-    if item.metadata() != TYPE_SET {
+    if base_type(item.metadata()) != TYPE_SET {
         return Err(DbError::WrongType);
     }
-    let val = item.value();
+    let val = namespace::payload(&item)?;
     if val.len() < 4 {
         return Err(DbError::Kv(KvError::KeyNotFound));
     }
@@ -142,14 +142,16 @@ async fn set_count(tx: &dyn Tx, public_key: &[u8]) -> Result<Option<u32>, DbErro
     }
 }
 
-/// Writes the set sentinel entry with set metadata.
-async fn write_sentinel(tx: &dyn Tx, public_key: &[u8], count: u32) -> Result<(), DbError> {
-    set_keeping_ttl(
-        tx,
-        Entry::new(public_key.to_vec(), count.to_be_bytes().to_vec()).metadata(TYPE_SET),
-    )
-    .await?;
-    Ok(())
+/// Writes the set sentinel entry with set metadata. `prefix` is the prefix the
+/// set's members are stored under; the sentinel records it when it is a
+/// namespace and keeps the key's TTL.
+async fn write_sentinel(
+    tx: &dyn Tx,
+    public_key: &[u8],
+    count: u32,
+    prefix: &ElementPrefix,
+) -> Result<(), DbError> {
+    namespace::write_sentinel(tx, public_key, count.to_be_bytes().to_vec(), TYPE_SET, prefix).await
 }
 
 /// Loads every member of a set into a set, mirroring Go's `loadSetMembers`.
@@ -163,7 +165,8 @@ async fn load_set_members(
     if set_count(tx, public_key).await?.is_none() {
         return Ok(HashSet::new());
     }
-    let mut it = tx.new_prefix_iterator(&members_prefix(node_prefix)).await?;
+    let node_prefix = resolve_prefix(tx, public_key, node_prefix).await?;
+    let mut it = tx.new_prefix_iterator(&members_prefix(&node_prefix)).await?;
     let mut members = HashSet::new();
     while it.next().await {
         if let Some(item) = it.item() {
@@ -183,7 +186,8 @@ async fn load_set_members(
 /// (mirroring Go's `ClearPrefixedKeys`). Used by the `*STORE` commands to
 /// clear a destination before writing its new result.
 async fn clear_set(tx: &dyn Tx, public_key: &[u8], node_prefix: &[u8]) -> Result<(), DbError> {
-    let mut it = tx.new_prefix_iterator(&members_prefix(node_prefix)).await?;
+    let node_prefix = resolve_prefix(tx, public_key, node_prefix).await?;
+    let mut it = tx.new_prefix_iterator(&members_prefix(&node_prefix)).await?;
     let mut keys = Vec::new();
     while it.next().await {
         if let Some(item) = it.item() {
@@ -213,16 +217,18 @@ async fn store_set_result(
     members: &[Vec<u8>],
 ) -> Result<i64, DbError> {
     clear_set(tx, dest_public_key, dest_node_prefix).await?;
+    // The destination was just cleared, so it is a new set.
+    let dest_prefix = ElementPrefix::legacy(dest_node_prefix.to_vec());
     for member in members {
         tx.set(
             Entry::new(
-                internal_member_key(dest_node_prefix, member),
+                internal_member_key(&dest_prefix, member),
                 member.clone(),
             )
             .metadata(TYPE_SET),
         )?;
     }
-    write_sentinel(tx, dest_public_key, members.len() as u32).await?;
+    write_sentinel(tx, dest_public_key, members.len() as u32, &dest_prefix).await?;
     Ok(members.len() as i64)
 }
 
@@ -510,6 +516,7 @@ impl DbOp for SAddOp {
         let node_prefix = self.node_prefix.clone();
         let members = self.members.clone();
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             let mut count = match read_sentinel(tx, &public_key).await {
                 Ok(count) => count,
                 Err(DbError::Kv(KvError::KeyNotFound)) => 0,
@@ -528,7 +535,7 @@ impl DbOp for SAddOp {
                     Err(e) => return Err(e.into()),
                 }
             }
-            write_sentinel(tx, &public_key, count).await?;
+            write_sentinel(tx, &public_key, count, &node_prefix).await?;
             let result: DbResult = Box::new(added);
             Ok(result)
         })
@@ -547,6 +554,7 @@ impl DbOp for SRemOp {
         let node_prefix = self.node_prefix.clone();
         let members = self.members.clone();
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             let mut count = match read_sentinel(tx, &public_key).await {
                 Ok(count) => count,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
@@ -571,7 +579,7 @@ impl DbOp for SRemOp {
             if count == 0 {
                 tx.delete(&public_key)?;
             } else {
-                write_sentinel(tx, &public_key, count).await?;
+                write_sentinel(tx, &public_key, count, &node_prefix).await?;
             }
             let result: DbResult = Box::new(removed);
             Ok(result)
@@ -608,6 +616,7 @@ impl DbOp for SMembersOp {
         let public_key = self.public_key.clone();
         let node_prefix = self.node_prefix.clone();
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             let members = load_set_members(tx, &public_key, &node_prefix).await?;
             let result: DbResult = Box::new(members.into_iter().collect::<Vec<Vec<u8>>>());
             Ok(result)
@@ -627,6 +636,7 @@ impl DbOp for SIsMemberOp {
         let node_prefix = self.node_prefix.clone();
         let member = self.member.clone();
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             match set_count(tx, &public_key).await? {
                 None => {
                     let result: DbResult = Box::new(false);
@@ -655,6 +665,7 @@ impl DbOp for SPopOp {
         let public_key = self.public_key.clone();
         let node_prefix = self.node_prefix.clone();
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             let count = match read_sentinel(tx, &public_key).await {
                 Ok(count) => count,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
@@ -695,7 +706,7 @@ impl DbOp for SPopOp {
                 if remaining == 0 {
                     tx.delete(&public_key)?;
                 } else {
-                    write_sentinel(tx, &public_key, remaining).await?;
+                    write_sentinel(tx, &public_key, remaining, &node_prefix).await?;
                 }
             }
             let result: DbResult = Box::new(member);
@@ -716,6 +727,7 @@ impl DbOp for SRandMemberOp {
         let node_prefix = self.node_prefix.clone();
         let count = self.count;
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             let all = load_set_members(tx, &public_key, &node_prefix).await?;
             let members: Vec<Vec<u8>> = all.into_iter().collect();
 
@@ -772,10 +784,10 @@ impl DbOp for SMoveOp {
                 // presence matters (mirroring Go's early return).
                 let present = match set_count(tx, &src_public_key).await? {
                     None => false,
-                    Some(_) => tx
-                        .get(&internal_member_key(&src_node_prefix, &member))
-                        .await
-                        .is_ok(),
+                    Some(_) => {
+                        let src_prefix = resolve_prefix(tx, &src_public_key, &src_node_prefix).await?;
+                        tx.get(&internal_member_key(&src_prefix, &member)).await.is_ok()
+                    }
                 };
                 let result: DbResult = Box::new(present);
                 return Ok(result);
@@ -785,7 +797,8 @@ impl DbOp for SMoveOp {
                 let result: DbResult = Box::new(false);
                 return Ok(result);
             };
-            let src_internal = internal_member_key(&src_node_prefix, &member);
+            let src_prefix = resolve_prefix(tx, &src_public_key, &src_node_prefix).await?;
+            let src_internal = internal_member_key(&src_prefix, &member);
             if tx.get(&src_internal).await.is_err() {
                 let result: DbResult = Box::new(false);
                 return Ok(result);
@@ -796,10 +809,11 @@ impl DbOp for SMoveOp {
             if src_remaining == 0 {
                 tx.delete(&src_public_key)?;
             } else {
-                write_sentinel(tx, &src_public_key, src_remaining).await?;
+                write_sentinel(tx, &src_public_key, src_remaining, &src_prefix).await?;
             }
 
-            let dst_internal = internal_member_key(&dst_node_prefix, &member);
+            let dst_prefix = resolve_prefix(tx, &dst_public_key, &dst_node_prefix).await?;
+            let dst_internal = internal_member_key(&dst_prefix, &member);
             match tx.get(&dst_internal).await {
                 Ok(_) => {}
                 Err(KvError::KeyNotFound) => {
@@ -808,7 +822,7 @@ impl DbOp for SMoveOp {
                         None => 1,
                         Some(dst_count) => dst_count + 1,
                     };
-                    write_sentinel(tx, &dst_public_key, dst_count).await?;
+                    write_sentinel(tx, &dst_public_key, dst_count, &dst_prefix).await?;
                 }
                 Err(e) => return Err(e.into()),
             }
@@ -1061,6 +1075,7 @@ impl DbOp for SScanOp {
         let count = self.count.max(1);
         let pattern = self.pattern.clone();
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             // Verify key exists and is a set.
             match set_count(tx, &public_key).await {
                 Ok(None) => {
@@ -1285,6 +1300,119 @@ mod tests {
         let bytes: Vec<Bytes> = members.iter().map(|m| Bytes::copy_from_slice(m)).collect();
         let replies = exec(session, sadd(session, key, &bytes)).await;
         assert!(matches!(replies, RespValue::Integer(_)));
+    }
+
+    // --- namespaced layout (RFC 0001) ---
+
+    const NS_A: &[u8] = b"+0:ns-set-000a";
+    const NS_B: &[u8] = b"+0:ns-set-000b";
+    const NS_D: &[u8] = b"+0:ns-set-000d";
+
+    fn bs(parts: &[&str]) -> Vec<Bytes> {
+        parts.iter().map(|p| Bytes::copy_from_slice(p.as_bytes())).collect()
+    }
+
+    /// Unordered replies (SMEMBERS, SUNION, ...) are compared sorted.
+    fn sorted_reply(reply: RespValue) -> RespValue {
+        match reply {
+            RespValue::Array(Some(mut items)) => {
+                items.sort_by_key(|i| format!("{i:?}"));
+                RespValue::Array(Some(items))
+            }
+            other => other,
+        }
+    }
+
+    /// Runs the op on a legacy twin and on the namespaced one; replies must match.
+    async fn both(legacy: &Session, namespaced: &Session, build: impl Fn(&Session) -> QueuedOp) -> RespValue {
+        let a = sorted_reply(crate::testutil::exec(legacy, build(legacy)).await);
+        let b = sorted_reply(crate::testutil::exec(namespaced, build(namespaced)).await);
+        assert_eq!(a, b, "a namespaced set must answer exactly like a legacy one");
+        a
+    }
+
+    #[tokio::test]
+    async fn namespaced_sets_behave_like_legacy_ones() {
+        let (legacy, ns) = (test_session(), test_session());
+        for s in [&legacy, &ns] {
+            crate::testutil::exec(s, sadd(s, b"a", &bs(&["1", "2", "3"]))).await;
+            crate::testutil::exec(s, sadd(s, b"b", &bs(&["2", "3", "4"]))).await;
+            crate::testutil::exec(s, sadd(s, b"c", &bs(&["9"]))).await; // stays legacy in both
+            crate::testutil::exec(s, sadd(s, b"d", &bs(&["x", "y"]))).await;
+        }
+        crate::testutil::namespace_key(&ns, b"a", NS_A).await;
+        crate::testutil::namespace_key(&ns, b"b", NS_B).await;
+        crate::testutil::namespace_key(&ns, b"d", NS_D).await;
+
+        // Single-set reads.
+        both(&legacy, &ns, |s| scard(s, b"a")).await;
+        both(&legacy, &ns, |s| smembers(s, b"a")).await;
+        both(&legacy, &ns, |s| sismember(s, b"a", b"2")).await;
+        both(&legacy, &ns, |s| sismember(s, b"a", b"nope")).await;
+
+        // Multi-set reads mixing namespaced and legacy operands.
+        both(&legacy, &ns, |s| sinter(s, &bs(&["a", "b"]))).await;
+        both(&legacy, &ns, |s| sunion(s, &bs(&["a", "b", "c"]))).await;
+        both(&legacy, &ns, |s| sdiff(s, &bs(&["a", "b"]))).await;
+        both(&legacy, &ns, |s| sdiff(s, &bs(&["c", "a"]))).await;
+
+        // Writes.
+        both(&legacy, &ns, |s| sadd(s, b"a", &bs(&["3", "4", "5"]))).await;
+        both(&legacy, &ns, |s| srem(s, b"a", &bs(&["1", "zzz"]))).await;
+        both(&legacy, &ns, |s| smove(s, b"a", b"c", b"2")).await; // namespaced -> legacy
+        both(&legacy, &ns, |s| smove(s, b"c", b"b", b"9")).await; // legacy -> namespaced
+        both(&legacy, &ns, |s| smove(s, b"a", b"a", b"3")).await; // same set
+        both(&legacy, &ns, |s| smove(s, b"a", b"b", b"missing")).await;
+        for k in [&b"a"[..], b"b", b"c"] {
+            both(&legacy, &ns, |s| smembers(s, k)).await;
+        }
+
+        // A *STORE command replaces a namespaced destination: its old elements
+        // are gone and the result is a new set.
+        both(&legacy, &ns, |s| sunionstore(s, b"d", &bs(&["a", "b"]))).await;
+        both(&legacy, &ns, |s| smembers(s, b"d")).await;
+        assert_eq!(crate::testutil::entries_under(&ns, NS_D).await, 0, "the old destination's elements must be cleared");
+        both(&legacy, &ns, |s| sinterstore(s, b"d", &bs(&["a", "c"]))).await;
+        both(&legacy, &ns, |s| sdiffstore(s, b"d", &bs(&["b", "a"]))).await;
+        both(&legacy, &ns, |s| smembers(s, b"d")).await;
+
+        // SPOP is random; the namespaced set must lose exactly one member.
+        let before = both(&legacy, &ns, |s| scard(s, b"b")).await;
+        crate::testutil::exec(&ns, spop(&ns, b"b")).await;
+        crate::testutil::exec(&legacy, spop(&legacy, b"b")).await;
+        let (RespValue::Integer(before), RespValue::Integer(after)) = (before, crate::testutil::exec(&ns, scard(&ns, b"b")).await) else {
+            panic!("SCARD must reply integers")
+        };
+        assert_eq!(after, before - 1);
+
+        // Nothing under the name-derived prefixes of namespaced sets; sentinel still flagged.
+        for k in [&b"a"[..], b"b"] {
+            assert_eq!(crate::testutil::entries_under(&ns, &ns.private_key(k)).await, 0);
+            let meta = crate::testutil::stored_type_byte(&ns, &ns.public_key(k)).await.unwrap();
+            assert_eq!(meta, TYPE_SET | crate::common::namespace::NAMESPACE_FLAG);
+        }
+
+        // Emptying a namespaced set removes the sentinel and every member.
+        let rest = both(&legacy, &ns, |s| smembers(s, b"a")).await;
+        let RespValue::Array(Some(rest)) = rest else { panic!("SMEMBERS must reply an array") };
+        let rest: Vec<Bytes> = rest
+            .into_iter()
+            .map(|m| match m { RespValue::BulkString(Some(b)) => b, other => panic!("{other:?}") })
+            .collect();
+        both(&legacy, &ns, |s| srem(s, b"a", &rest)).await;
+        assert_eq!(crate::testutil::stored_type_byte(&ns, &ns.public_key(b"a")).await, None);
+        assert_eq!(crate::testutil::entries_under(&ns, NS_A).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_namespaced_set_keeps_its_ttl() {
+        let s = test_session();
+        crate::testutil::exec(&s, sadd(&s, b"a", &bs(&["1"]))).await;
+        crate::testutil::exec(&s, crate::keys::expire(&s, b"a", 100)).await;
+        crate::testutil::namespace_key(&s, b"a", NS_A).await;
+        crate::testutil::exec(&s, sadd(&s, b"a", &bs(&["2"]))).await;
+        let ttl = crate::testutil::exec(&s, crate::keys::ttl(&s, b"a")).await;
+        assert!(matches!(ttl, RespValue::Integer(n) if (90..=100).contains(&n)), "ttl was {ttl:?}");
     }
 
     #[tokio::test]

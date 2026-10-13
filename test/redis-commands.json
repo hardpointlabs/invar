@@ -342,12 +342,12 @@
   },
   {
     "name": "MOVE",
-    "command": ["MOVE", "movekey", "1"],
+    "command": ["MOVE", "movekey", "0"],
     "expected": 1,
     "type": "integer",
     "version": "1.0.0",
-    "description": "Move key to another database",
-    "setup": [["SET", "movekey", "value"]]
+    "description": "Move key to another database (run from db 1, where the preceding SELECT left the client)",
+    "setup": [["SELECT", "0"], ["DEL", "movekey"], ["SELECT", "1"], ["DEL", "movekey"], ["SET", "movekey", "value"]]
   },
   {
     "name": "CLIENT ID",
@@ -3988,5 +3988,228 @@
     "type": "error",
     "version": "1.0.0",
     "description": "KEYS takes exactly one argument"
+  },
+  {
+    "name": "RENAME keeps the elements of a list",
+    "command": ["LRANGE", "rn_list_new", "0", "-1"],
+    "expected": ["a", "b", "c"],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "a renamed list still has its elements, in order",
+    "setup": [
+      ["DEL", "rn_list_old", "rn_list_new"],
+      ["RPUSH", "rn_list_old", "a", "b", "c"],
+      ["RENAME", "rn_list_old", "rn_list_new"]
+    ]
+  },
+  {
+    "name": "RENAME leaves nothing under the old list name",
+    "command": ["LRANGE", "rn_list_gone_old", "0", "-1"],
+    "expected": [],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "the old name of a renamed list is empty",
+    "setup": [
+      ["DEL", "rn_list_gone_old", "rn_list_gone_new"],
+      ["RPUSH", "rn_list_gone_old", "a", "b"],
+      ["RENAME", "rn_list_gone_old", "rn_list_gone_new"]
+    ]
+  },
+  {
+    "name": "RENAME keeps the length of a list",
+    "command": ["LLEN", "rn_listlen_new"],
+    "expected": 4,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "LLEN of a renamed list matches what LRANGE returns",
+    "setup": [
+      ["DEL", "rn_listlen_old", "rn_listlen_new"],
+      ["RPUSH", "rn_listlen_old", "a", "b", "c", "d"],
+      ["RENAME", "rn_listlen_old", "rn_listlen_new"]
+    ]
+  },
+  {
+    "name": "RENAME keeps the fields of a hash",
+    "command": ["HGETALL", "rn_hash_new"],
+    "expected": ["f", "v", "g", "w"],
+    "type": "array",
+    "version": "2.0.0",
+    "description": "a renamed hash still has its fields",
+    "setup": [
+      ["DEL", "rn_hash_old", "rn_hash_new"],
+      ["HSET", "rn_hash_old", "f", "v", "g", "w"],
+      ["RENAME", "rn_hash_old", "rn_hash_new"]
+    ]
+  },
+  {
+    "name": "RENAME keeps the members of a set",
+    "command": ["SMEMBERS", "rn_set_new"],
+    "expected": ["x", "y", "z"],
+    "type": "set",
+    "version": "1.0.0",
+    "description": "a renamed set still has its members",
+    "setup": [
+      ["DEL", "rn_set_old", "rn_set_new"],
+      ["SADD", "rn_set_old", "x", "y", "z"],
+      ["RENAME", "rn_set_old", "rn_set_new"]
+    ]
+  },
+  {
+    "name": "RENAME keeps the members and scores of a sorted set",
+    "command": ["ZRANGE", "rn_zset_new", "0", "-1", "WITHSCORES"],
+    "expected": ["a", "1", "b", "2"],
+    "type": "array",
+    "version": "1.2.0",
+    "description": "a renamed sorted set still has its members and scores",
+    "setup": [
+      ["DEL", "rn_zset_old", "rn_zset_new"],
+      ["ZADD", "rn_zset_old", "1", "a", "2", "b"],
+      ["RENAME", "rn_zset_old", "rn_zset_new"]
+    ]
+  },
+  {
+    "name": "RENAME keeps the entries of a stream",
+    "command": ["XRANGE", "rn_stream_new", "-", "+"],
+    "expected": [["1-1", ["f", "v"]]],
+    "type": "array",
+    "version": "5.0.0",
+    "description": "a renamed stream still has its entries",
+    "setup": [
+      ["DEL", "rn_stream_old", "rn_stream_new"],
+      ["XADD", "rn_stream_old", "1-1", "f", "v"],
+      ["RENAME", "rn_stream_old", "rn_stream_new"]
+    ]
+  },
+  {
+    "name": "RENAME keeps the items of a bloom filter",
+    "command": ["BF.EXISTS", "rn_bloom_new", "item"],
+    "expected": 1,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "a renamed bloom filter still contains its items",
+    "setup": [
+      ["DEL", "rn_bloom_old", "rn_bloom_new"],
+      ["BF.ADD", "rn_bloom_old", "item"],
+      ["RENAME", "rn_bloom_old", "rn_bloom_new"]
+    ]
+  },
+  {
+    "name": "RENAME carries the TTL of a hash",
+    "command": ["TTL", "rn_ttl_new"],
+    "expected": "> 0",
+    "type": "integer_gt",
+    "version": "2.0.0",
+    "description": "the TTL of the source moves to the new name",
+    "setup": [
+      ["DEL", "rn_ttl_old", "rn_ttl_new"],
+      ["HSET", "rn_ttl_old", "f", "v"],
+      ["EXPIRE", "rn_ttl_old", "100"],
+      ["RENAME", "rn_ttl_old", "rn_ttl_new"]
+    ]
+  },
+  {
+    "name": "RENAME over a hash replaces it instead of merging",
+    "command": ["HGETALL", "rn_over_dst"],
+    "expected": ["f", "v"],
+    "type": "array",
+    "version": "2.0.0",
+    "description": "the old fields of an overwritten destination do not survive",
+    "setup": [
+      ["DEL", "rn_over_src", "rn_over_dst"],
+      ["HSET", "rn_over_dst", "stale", "x"],
+      ["HSET", "rn_over_src", "f", "v"],
+      ["RENAME", "rn_over_src", "rn_over_dst"]
+    ]
+  },
+  {
+    "name": "RENAME to the same key keeps a hash",
+    "command": ["HGETALL", "rn_same_hash"],
+    "expected": ["f", "v"],
+    "type": "array",
+    "version": "2.0.0",
+    "description": "renaming a key to itself is a no-op",
+    "setup": [
+      ["DEL", "rn_same_hash"],
+      ["HSET", "rn_same_hash", "f", "v"],
+      ["RENAME", "rn_same_hash", "rn_same_hash"]
+    ]
+  },
+  {
+    "name": "RENAMENX moves a list when the target is free",
+    "command": ["LRANGE", "rnnx_list_new", "0", "-1"],
+    "expected": ["a", "b"],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "RENAMENX carries the elements too",
+    "setup": [
+      ["DEL", "rnnx_list_old", "rnnx_list_new"],
+      ["RPUSH", "rnnx_list_old", "a", "b"],
+      ["RENAMENX", "rnnx_list_old", "rnnx_list_new"]
+    ]
+  },
+  {
+    "name": "MOVE does not overwrite a key that exists in the target DB",
+    "command": ["MOVE", "mv_exists_key", "1"],
+    "expected": 0,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "MOVE returns 0 and changes nothing when the key already exists in the target DB",
+    "setup": [
+      ["DEL", "mv_exists_key"],
+      ["SET", "mv_exists_key", "source"],
+      ["SELECT", "1"],
+      ["SET", "mv_exists_key", "target"],
+      ["SELECT", "0"]
+    ]
+  },
+  {
+    "name": "MOVE keeps the source when the target exists",
+    "command": ["GET", "mv_exists_key2"],
+    "expected": "source",
+    "type": "bulk_string",
+    "version": "1.0.0",
+    "description": "a refused MOVE leaves the source key alone",
+    "setup": [
+      ["DEL", "mv_exists_key2"],
+      ["SET", "mv_exists_key2", "source"],
+      ["SELECT", "1"],
+      ["SET", "mv_exists_key2", "target"],
+      ["SELECT", "0"],
+      ["MOVE", "mv_exists_key2", "1"]
+    ]
+  },
+  {
+    "name": "MOVE to the current DB is an error",
+    "command": ["MOVE", "mv_same_key", "0"],
+    "expected": {"error": true},
+    "type": "error",
+    "version": "1.0.0",
+    "description": "source and destination objects are the same",
+    "setup": [
+      ["SET", "mv_same_key", "v"]
+    ]
+  },
+  {
+    "name": "MOVE to the current DB does not delete the key",
+    "command": ["GET", "mv_same_key2"],
+    "expected": "v",
+    "type": "bulk_string",
+    "version": "1.0.0",
+    "description": "a refused MOVE must not delete the key",
+    "setup": [
+      ["SET", "mv_same_key2", "v"],
+      ["MOVE", "mv_same_key2", "0"]
+    ]
+  },
+  {
+    "name": "MOVE of a missing key returns 0",
+    "command": ["MOVE", "mv_missing_key", "1"],
+    "expected": 0,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "nothing to move",
+    "setup": [
+      ["DEL", "mv_missing_key"]
+    ]
   }
 ]

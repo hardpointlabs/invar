@@ -24,7 +24,7 @@ use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use crate::common::session::Session;
-use crate::common::set_keeping_ttl;
+use crate::common::namespace::{self, base_type, resolve_prefix, ElementPrefix};
 use crate::common::ValueType;
 use crate::resp::RespValue;
 
@@ -76,24 +76,26 @@ fn no_op_result() -> Result<DbResult, DbError> {
 /// `Err(DbError::WrongType)`.
 async fn read_sentinel(tx: &dyn Tx, public_key: &[u8]) -> Result<u32, DbError> {
     let item = tx.get(public_key).await?;
-    if item.metadata() != TYPE_HASH {
+    if base_type(item.metadata()) != TYPE_HASH {
         return Err(DbError::WrongType);
     }
-    let val = item.value();
+    let val = namespace::payload(&item)?;
     if val.len() < 4 {
         return Err(DbError::Kv(KvError::KeyNotFound));
     }
     Ok(u32::from_be_bytes(val[0..4].try_into().expect("slice in range")))
 }
 
-/// Writes the hash sentinel entry with hash metadata.
-async fn write_sentinel(tx: &dyn Tx, public_key: &[u8], count: u32) -> Result<(), DbError> {
-    set_keeping_ttl(
-        tx,
-        Entry::new(public_key.to_vec(), count.to_be_bytes().to_vec()).metadata(TYPE_HASH),
-    )
-    .await?;
-    Ok(())
+/// Writes the hash sentinel entry with hash metadata. `prefix` is the prefix
+/// the hash's fields are stored under; the sentinel records it when it is a
+/// namespace and keeps the key's TTL.
+async fn write_sentinel(
+    tx: &dyn Tx,
+    public_key: &[u8],
+    count: u32,
+    prefix: &ElementPrefix,
+) -> Result<(), DbError> {
+    namespace::write_sentinel(tx, public_key, count.to_be_bytes().to_vec(), TYPE_HASH, prefix).await
 }
 
 /// Formats a float the way Go's `redis/common.FormatFloat` does.
@@ -177,6 +179,7 @@ pub fn hsetnx(session: &Session, key: &[u8], field: &[u8], value: &[u8]) -> Queu
 pub fn hget(session: &Session, key: &[u8], field: &[u8]) -> QueuedOp {
     QueuedOp {
         db_op: Box::new(HGetOp {
+            public_key: session.public_key(key),
             node_prefix: session.private_key(key),
             field: field.to_vec(),
         }),
@@ -193,6 +196,7 @@ pub fn hget(session: &Session, key: &[u8], field: &[u8]) -> QueuedOp {
 pub fn hmget(session: &Session, key: &[u8], fields: &[Bytes]) -> QueuedOp {
     QueuedOp {
         db_op: Box::new(HMGetOp {
+            public_key: session.public_key(key),
             node_prefix: session.private_key(key),
             fields: fields.iter().map(|b| b.to_vec()).collect(),
         }),
@@ -225,6 +229,7 @@ pub fn hdel(session: &Session, key: &[u8], fields: &[Bytes]) -> QueuedOp {
 pub fn hexists(session: &Session, key: &[u8], field: &[u8]) -> QueuedOp {
     QueuedOp {
         db_op: Box::new(HExistsOp {
+            public_key: session.public_key(key),
             node_prefix: session.private_key(key),
             field: field.to_vec(),
         }),
@@ -371,6 +376,7 @@ pub fn hrandfield(session: &Session, key: &[u8], count: i64, with_values: bool) 
 pub fn hstrlen(session: &Session, key: &[u8], field: &[u8]) -> QueuedOp {
     QueuedOp {
         db_op: Box::new(HStrLenOp {
+            public_key: session.public_key(key),
             node_prefix: session.private_key(key),
             field: field.to_vec(),
         }),
@@ -421,6 +427,7 @@ impl DbOp for HSetOp {
         let node_prefix = self.node_prefix.clone();
         let field_values = self.field_values.clone();
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             let mut count = match read_sentinel(tx, &public_key).await {
                 Ok(c) => c,
                 Err(DbError::Kv(KvError::KeyNotFound)) => 0,
@@ -445,7 +452,7 @@ impl DbOp for HSetOp {
                 i += 2;
             }
 
-            write_sentinel(tx, &public_key, count).await?;
+            write_sentinel(tx, &public_key, count, &node_prefix).await?;
             let result: DbResult = Box::new(added);
             Ok(result)
         })
@@ -466,6 +473,7 @@ impl DbOp for HSetNxOp {
         let field = self.field.clone();
         let value = self.value.clone();
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             let fk = field_key(&node_prefix, &field);
             match tx.get(&fk).await {
                 Ok(_) => {
@@ -485,7 +493,7 @@ impl DbOp for HSetNxOp {
                 Err(e) => return Err(e),
             };
             count += 1;
-            write_sentinel(tx, &public_key, count).await?;
+            write_sentinel(tx, &public_key, count, &node_prefix).await?;
 
             let result: DbResult = Box::new(1i64);
             Ok(result)
@@ -494,15 +502,18 @@ impl DbOp for HSetNxOp {
 }
 
 struct HGetOp {
+    public_key: Vec<u8>,
     node_prefix: Vec<u8>,
     field: Vec<u8>,
 }
 
 impl DbOp for HGetOp {
     fn run<'a>(&'a self, tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
+        let public_key = self.public_key.clone();
         let node_prefix = self.node_prefix.clone();
         let field = self.field.clone();
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             let fk = field_key(&node_prefix, &field);
             match tx.get(&fk).await {
                 Ok(item) => {
@@ -520,15 +531,18 @@ impl DbOp for HGetOp {
 }
 
 struct HMGetOp {
+    public_key: Vec<u8>,
     node_prefix: Vec<u8>,
     fields: Vec<Vec<u8>>,
 }
 
 impl DbOp for HMGetOp {
     fn run<'a>(&'a self, tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
+        let public_key = self.public_key.clone();
         let node_prefix = self.node_prefix.clone();
         let fields = self.fields.clone();
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             let mut results: Vec<Option<Vec<u8>>> = Vec::with_capacity(fields.len());
             for field in &fields {
                 let fk = field_key(&node_prefix, field);
@@ -556,6 +570,7 @@ impl DbOp for HDelOp {
         let node_prefix = self.node_prefix.clone();
         let fields = self.fields.clone();
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             let mut count = match read_sentinel(tx, &public_key).await {
                 Ok(c) => c,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
@@ -582,7 +597,7 @@ impl DbOp for HDelOp {
             if count == 0 {
                 tx.delete(&public_key)?;
             } else {
-                write_sentinel(tx, &public_key, count).await?;
+                write_sentinel(tx, &public_key, count, &node_prefix).await?;
             }
 
             let result: DbResult = Box::new(removed);
@@ -592,15 +607,18 @@ impl DbOp for HDelOp {
 }
 
 struct HExistsOp {
+    public_key: Vec<u8>,
     node_prefix: Vec<u8>,
     field: Vec<u8>,
 }
 
 impl DbOp for HExistsOp {
     fn run<'a>(&'a self, tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
+        let public_key = self.public_key.clone();
         let node_prefix = self.node_prefix.clone();
         let field = self.field.clone();
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             let fk = field_key(&node_prefix, &field);
             let exists = tx.get(&fk).await.is_ok();
             let result: DbResult = Box::new(if exists { 1i64 } else { 0i64 });
@@ -638,6 +656,7 @@ impl DbOp for HKeysOp {
         let public_key = self.public_key.clone();
         let node_prefix = self.node_prefix.clone();
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             match tx.get(&public_key).await {
                 Ok(_) => {}
                 Err(KvError::KeyNotFound) => {
@@ -676,6 +695,7 @@ impl DbOp for HValsOp {
         let public_key = self.public_key.clone();
         let node_prefix = self.node_prefix.clone();
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             match tx.get(&public_key).await {
                 Ok(_) => {}
                 Err(KvError::KeyNotFound) => {
@@ -714,6 +734,7 @@ impl DbOp for HGetAllOp {
         let public_key = self.public_key.clone();
         let node_prefix = self.node_prefix.clone();
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             match tx.get(&public_key).await {
                 Ok(_) => {}
                 Err(KvError::KeyNotFound) => {
@@ -757,6 +778,7 @@ impl DbOp for HIncrByOp {
         let field = self.field.clone();
         let amount = self.amount;
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             let fk = field_key(&node_prefix, &field);
             let (current, field_existed) = match tx.get(&fk).await {
                 Ok(item) => {
@@ -785,7 +807,7 @@ impl DbOp for HIncrByOp {
                     Err(e) => return Err(e),
                 };
                 count += 1;
-                write_sentinel(tx, &public_key, count).await?;
+                write_sentinel(tx, &public_key, count, &node_prefix).await?;
             }
 
             let result: DbResult = Box::new(new_val);
@@ -808,6 +830,7 @@ impl DbOp for HIncrByFloatOp {
         let field = self.field.clone();
         let amount = self.amount;
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             if amount.is_nan() {
                 return Err(DbError::Redis("value is not a valid float".to_string()));
             }
@@ -841,7 +864,7 @@ impl DbOp for HIncrByFloatOp {
                     Err(e) => return Err(e),
                 };
                 count += 1;
-                write_sentinel(tx, &public_key, count).await?;
+                write_sentinel(tx, &public_key, count, &node_prefix).await?;
             }
 
             let result: DbResult = Box::new(Some(new_str.into_bytes()));
@@ -864,6 +887,7 @@ impl DbOp for HRandFieldOp {
         let count = self.count;
         let with_values = self.with_values;
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             match tx.get(&public_key).await {
                 Ok(_) => {}
                 Err(KvError::KeyNotFound) => {
@@ -947,15 +971,18 @@ impl DbOp for HRandFieldOp {
 }
 
 struct HStrLenOp {
+    public_key: Vec<u8>,
     node_prefix: Vec<u8>,
     field: Vec<u8>,
 }
 
 impl DbOp for HStrLenOp {
     fn run<'a>(&'a self, tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
+        let public_key = self.public_key.clone();
         let node_prefix = self.node_prefix.clone();
         let field = self.field.clone();
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             let fk = field_key(&node_prefix, &field);
             match tx.get(&fk).await {
                 Ok(item) => {
@@ -993,6 +1020,7 @@ impl DbOp for HScanOp {
         let cursor = self.cursor.clone();
         let count = self.count.max(0) as usize;
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             match tx.get(&public_key).await {
                 Ok(_) => {}
                 Err(KvError::KeyNotFound) => {
@@ -1284,6 +1312,97 @@ mod tests {
                 .collect(),
             other => panic!("expected array, got {other:?}"),
         }
+    }
+
+    // --- namespaced layout (RFC 0001) ---
+
+    const NS: &[u8] = b"+0:ns-hash-0001";
+
+    /// Runs the same op on a legacy hash and on its namespaced twin and
+    /// demands identical replies.
+    async fn both(legacy: &Session, namespaced: &Session, build: impl Fn(&Session) -> QueuedOp) -> RespValue {
+        let a = crate::testutil::exec(legacy, build(legacy)).await;
+        let b = crate::testutil::exec(namespaced, build(namespaced)).await;
+        assert_eq!(a, b, "a namespaced hash must answer exactly like a legacy one");
+        a
+    }
+
+    fn bs(parts: &[&str]) -> Vec<Bytes> {
+        parts.iter().map(|p| Bytes::copy_from_slice(p.as_bytes())).collect()
+    }
+
+    #[tokio::test]
+    async fn a_namespaced_hash_behaves_like_a_legacy_one() {
+        let (legacy, namespaced) = (test_session(), test_session());
+        for s in [&legacy, &namespaced] {
+            exec(s, hset(s, b"h", &bs(&["a", "1", "b", "2", "c", "3"]))).await;
+        }
+        crate::testutil::namespace_key(&namespaced, b"h", NS).await;
+
+        // Reads.
+        both(&legacy, &namespaced, |s| hget(s, b"h", b"b")).await;
+        both(&legacy, &namespaced, |s| hget(s, b"h", b"missing")).await;
+        both(&legacy, &namespaced, |s| hmget(s, b"h", &bs(&["a", "x", "c"]))).await;
+        both(&legacy, &namespaced, |s| hexists(s, b"h", b"a")).await;
+        both(&legacy, &namespaced, |s| hlen(s, b"h")).await;
+        both(&legacy, &namespaced, |s| hkeys(s, b"h")).await;
+        both(&legacy, &namespaced, |s| hvals(s, b"h")).await;
+        both(&legacy, &namespaced, |s| hgetall(s, b"h")).await;
+        both(&legacy, &namespaced, |s| hstrlen(s, b"h", b"a")).await;
+
+        // Writes, each followed by a read of everything.
+        both(&legacy, &namespaced, |s| hset(s, b"h", &bs(&["d", "4", "a", "10"]))).await;
+        both(&legacy, &namespaced, |s| hsetnx(s, b"h", b"e", b"5")).await;
+        both(&legacy, &namespaced, |s| hsetnx(s, b"h", b"e", b"ignored")).await;
+        both(&legacy, &namespaced, |s| hincrby(s, b"h", b"n", 7)).await;
+        both(&legacy, &namespaced, |s| hincrbyfloat(s, b"h", b"f", 1.5)).await;
+        both(&legacy, &namespaced, |s| hdel(s, b"h", &bs(&["b", "nope"]))).await;
+        both(&legacy, &namespaced, |s| hgetall(s, b"h")).await;
+        both(&legacy, &namespaced, |s| hlen(s, b"h")).await;
+
+        // Nothing may have been written under the name-derived prefix, the
+        // sentinel must still record the namespace, and the elements live there.
+        assert_eq!(crate::testutil::entries_under(&namespaced, &namespaced.private_key(b"h")).await, 0);
+        assert!(crate::testutil::entries_under(&namespaced, NS).await > 0);
+        let meta = crate::testutil::stored_type_byte(&namespaced, &namespaced.public_key(b"h")).await.unwrap();
+        assert_eq!(meta, TYPE_HASH | crate::common::namespace::NAMESPACE_FLAG);
+
+        // Emptying it removes the sentinel and every element.
+        let all = bs(&["a", "d", "e", "n", "f", "c"]);
+        both(&legacy, &namespaced, |s| hdel(s, b"h", &all)).await;
+        both(&legacy, &namespaced, |s| hlen(s, b"h")).await;
+        assert_eq!(crate::testutil::stored_type_byte(&namespaced, &namespaced.public_key(b"h")).await, None);
+        assert_eq!(crate::testutil::entries_under(&namespaced, NS).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_namespaced_hash_keeps_its_ttl_and_rejects_other_types() {
+        let s = test_session();
+        exec(&s, hset(&s, b"h", &bs(&["a", "1"]))).await;
+        exec(&s, crate::keys::expire(&s, b"h", 100)).await;
+        crate::testutil::namespace_key(&s, b"h", NS).await;
+
+        exec(&s, hset(&s, b"h", &bs(&["b", "2"]))).await; // rewrites the sentinel
+        let ttl = crate::testutil::exec(&s, crate::keys::ttl(&s, b"h")).await;
+        assert!(matches!(ttl, RespValue::Integer(n) if (90..=100).contains(&n)), "ttl was {ttl:?}");
+
+        // A string command on a namespaced hash is a WRONGTYPE, as for a legacy one.
+        let reply = crate::testutil::exec(&s, crate::strings::append(&s, b"h", b"x")).await;
+        assert!(matches!(&reply, RespValue::Error(e) if e.starts_with(b"WRONGTYPE")), "got {reply:?}");
+        assert_eq!(expect_int(&exec(&s, hlen(&s, b"h")).await), 2);
+    }
+
+    #[tokio::test]
+    async fn rewriting_a_namespaced_sentinel_without_its_namespace_is_refused() {
+        use crate::common::namespace::ElementPrefix;
+        let s = test_session();
+        exec(&s, hset(&s, b"h", &bs(&["a", "1"]))).await;
+        crate::testutil::namespace_key(&s, b"h", NS).await;
+
+        let store = s.store();
+        let tx = store.begin(true, kv::kv::TxIsolation::Snapshot).await.unwrap();
+        let err = write_sentinel(&*tx, &s.public_key(b"h"), 9, &ElementPrefix::legacy(s.private_key(b"h"))).await;
+        assert!(err.is_err(), "dropping a namespace would strand the elements");
     }
 
     #[tokio::test]
