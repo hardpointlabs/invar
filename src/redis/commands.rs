@@ -1553,6 +1553,12 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
             }
             keys::del(session, &args[1..])
         }
+        b"keys" => {
+            if args.len() != 2 {
+                return error_op(session, "ERR wrong number of arguments for 'keys' command");
+            }
+            keys::keys(session, &args[1])
+        }
         b"scan" => {
             if args.len() < 2 {
                 return error_op(session, "ERR wrong number of arguments for 'scan' command");
