@@ -254,6 +254,81 @@ pub fn scan(
     }
 }
 
+/// `KEYS pattern` — every key of the current DB whose name matches the glob
+/// `pattern`, in no particular order (here, byte order).
+///
+/// Like Redis, this walks the whole keyspace of the DB, so its cost is
+/// proportional to the number of keys; it is meant for tests, debugging and
+/// tools, not for hot paths (use `SCAN`). Only public keys are listed, so a
+/// compound value appears once under its name and its internal entries
+/// (`-`-prefixed) never do. Expired keys that have not been reaped yet are
+/// skipped.
+pub fn keys(session: &Session, pattern: &[u8]) -> QueuedOp {
+    QueuedOp {
+        db_op: Box::new(KeysOp {
+            prefix: session.prefix(),
+            pattern: pattern.to_vec(),
+        }),
+        wire_op: Box::new(KeysWire),
+        is_mutating: false,
+        allowed_in_tx: true,
+        abort_in_tx: false,
+        keys: None,
+    }
+}
+
+struct KeysOp {
+    prefix: Vec<u8>,
+    pattern: Vec<u8>,
+}
+
+impl DbOp for KeysOp {
+    fn run<'a>(&'a self, tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
+        Box::pin(async move {
+            let match_all = self.pattern == b"*";
+            let mut it = tx.new_prefix_iterator(&self.prefix).await?;
+            let mut names: Vec<Vec<u8>> = Vec::new();
+            while it.next().await {
+                let Some(item) = it.item() else { break };
+                if item.is_expired() {
+                    continue;
+                }
+                let name = &item.key()[self.prefix.len()..];
+                if match_all || redis_glob_match(&self.pattern, name, false) {
+                    names.push(name.to_vec());
+                }
+            }
+            let err = it.err().cloned();
+            it.close().await?;
+            if let Some(e) = err {
+                return Err(DbError::Kv(e));
+            }
+            let result: DbResult = Box::new(names);
+            Ok(result)
+        })
+    }
+}
+
+/// Replies an array of bulk strings from a `Vec<Vec<u8>>`.
+struct KeysWire;
+
+impl WireOp for KeysWire {
+    fn reply(&self, result: Result<DbResult, DbError>) -> RespValue {
+        match result {
+            Ok(res) => match res.downcast::<Vec<Vec<u8>>>() {
+                Ok(names) => RespValue::Array(Some(
+                    names
+                        .iter()
+                        .map(|n| RespValue::BulkString(Some(Bytes::copy_from_slice(n))))
+                        .collect(),
+                )),
+                Err(_) => RespValue::Error(Bytes::from_static(b"ERR internal error: bad keys result")),
+            },
+            Err(e) => err_resp(&e),
+        }
+    }
+}
+
 struct NullWire;
 
 impl WireOp for NullWire {
@@ -719,7 +794,9 @@ impl DbOp for ScanOp {
                 let name = &full[prefix.len()..];
                 last_seen = name.to_vec();
                 if let Some(pattern) = &pattern {
-                    if !redis_glob_match(pattern, name, false) {
+                    // As in Redis, a lone `*` selects everything (even the
+                    // empty key name, which the glob matcher would reject).
+                    if pattern.as_slice() != b"*" && !redis_glob_match(pattern, name, false) {
                         continue;
                     }
                 }
@@ -1175,6 +1252,57 @@ mod tests {
         let s = list_of(&["a"]).await;
         exec(&s, crate::list::rpoplpush(&s, b"l", b"dst")).await;
         assert_eq!(internal_entry_count(&s).await, 1, "RPOPLPUSH source emptied");
+    }
+
+    /// The names in a `KEYS` reply, sorted.
+    async fn key_names(session: &Session, pattern: &[u8]) -> Vec<String> {
+        match exec(session, keys(session, pattern)).await {
+            RespValue::Array(Some(items)) => {
+                let mut names: Vec<String> = items
+                    .into_iter()
+                    .map(|v| match v {
+                        RespValue::BulkString(Some(b)) => String::from_utf8_lossy(&b).into_owned(),
+                        other => panic!("unexpected KEYS item {other:?}"),
+                    })
+                    .collect();
+                names.sort();
+                names
+            }
+            other => panic!("unexpected KEYS reply {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn keys_star_lists_every_key_including_the_empty_name() {
+        let session = test_session();
+        for name in ["", "a", "b"] {
+            seed_string(&session, name.as_bytes(), b"v").await;
+        }
+        assert_eq!(key_names(&session, b"*").await, ["", "a", "b"]);
+        // Any other pattern goes through the glob matcher, which (as in Redis)
+        // never matches the empty name.
+        assert_eq!(key_names(&session, b"**").await, ["a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn keys_skips_expired_keys() {
+        let session = test_session();
+        seed_string(&session, b"live", b"v").await;
+        seed_string(&session, b"gone", b"v").await;
+        exec(&session, pexpire(&session, b"gone", 5)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        assert_eq!(key_names(&session, b"*").await, ["live"]);
+    }
+
+    #[tokio::test]
+    async fn keys_only_sees_the_current_db() {
+        let mut session = test_session();
+        seed_string(&session, b"zero", b"v").await;
+        session.switch_db(1);
+        seed_string(&session, b"one", b"v").await;
+        assert_eq!(key_names(&session, b"*").await, ["one"]);
+        session.switch_db(0);
+        assert_eq!(key_names(&session, b"*").await, ["zero"]);
     }
 
     #[tokio::test]
