@@ -80,3 +80,19 @@ pub(crate) async fn stored_type_byte(session: &Session, public_key: &[u8]) -> Op
     let tx = store.begin(false, TxIsolation::Snapshot).await.expect("tx");
     tx.get(public_key).await.ok().map(|item| item.metadata())
 }
+
+/// Every `(key, value)` stored under `prefix`, in key order.
+pub(crate) async fn entries_snapshot(session: &Session, prefix: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    use kv::kv::TxIsolation;
+    let store = session.store();
+    let tx = store.begin(false, TxIsolation::Snapshot).await.expect("tx");
+    let mut it = tx.new_prefix_iterator(prefix).await.expect("iterator");
+    let mut entries = Vec::new();
+    while it.next().await {
+        if let Some(item) = it.item() {
+            entries.push((item.key().to_vec(), item.value().to_vec()));
+        }
+    }
+    it.close().await.expect("close");
+    entries
+}

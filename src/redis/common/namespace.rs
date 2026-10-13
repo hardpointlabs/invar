@@ -113,6 +113,22 @@ pub(crate) fn prefix_of(item: &Item, legacy: &[u8]) -> Result<ElementPrefix, DbE
     }
 }
 
+/// The same prefix with its db number replaced: prefixes have the form
+/// `<kind><db>:<rest>` (`-0:name` for name-derived ones, `+0:<id>` for
+/// namespaces). `None` if `prefix` is not of that form.
+pub(crate) fn with_db(prefix: &[u8], db: i32) -> Option<Vec<u8>> {
+    let kind = *prefix.first()?;
+    let colon = prefix.iter().position(|&b| b == b':')?;
+    let digits = &prefix[1..colon];
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let mut out = vec![kind];
+    out.extend_from_slice(db.to_string().as_bytes());
+    out.extend_from_slice(&prefix[colon..]);
+    Some(out)
+}
+
 /// Reads the sentinel at `public_key` and returns the prefix of its elements.
 /// A missing (or expired) key has no namespace yet, so `legacy` is returned.
 pub(crate) async fn resolve_prefix(
@@ -187,6 +203,16 @@ mod tests {
         let legacy = ElementPrefix::legacy(b"-0:name".to_vec());
         assert_eq!(encode_sentinel(vec![1, 2], 4, &legacy), (vec![1, 2], 4));
         assert!(!is_namespaced(4));
+    }
+
+    #[test]
+    fn with_db_swaps_the_db_number_of_both_prefix_kinds() {
+        assert_eq!(with_db(b"+0:abc", 12), Some(b"+12:abc".to_vec()));
+        assert_eq!(with_db(b"-3:my:key", 0), Some(b"-0:my:key".to_vec()));
+        assert_eq!(with_db(b"abc", 1), None);
+        assert_eq!(with_db(b"-x:abc", 1), None);
+        assert_eq!(with_db(b"-:abc", 1), None);
+        assert_eq!(with_db(b"", 1), None);
     }
 
     #[test]

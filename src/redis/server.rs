@@ -205,6 +205,8 @@ struct FlushDbOp {
     store: Arc<dyn RedisStore>,
     prefix: Bytes,
     private_prefix: Bytes,
+    /// Elements of values that record a namespace live under `+<db>:`.
+    namespace_prefix: Bytes,
 }
 
 impl DbOp for FlushDbOp {
@@ -212,6 +214,7 @@ impl DbOp for FlushDbOp {
         Box::pin(async move {
             self.store.drop_prefix(self.prefix.as_ref()).await?;
             self.store.drop_prefix(self.private_prefix.as_ref()).await?;
+            self.store.drop_prefix(self.namespace_prefix.as_ref()).await?;
             Ok(Box::new(()) as DbResult)
         })
     }
@@ -223,6 +226,7 @@ pub fn flushdb(session: &Session) -> QueuedOp {
             store: session.store(),
             prefix: Bytes::from(session.prefix()),
             private_prefix: Bytes::from(session.private_prefix()),
+            namespace_prefix: Bytes::from([b"+".as_slice(), &session.prefix()].concat()),
         }),
         wire_op: Box::new(DefaultWire),
         is_mutating: false,
