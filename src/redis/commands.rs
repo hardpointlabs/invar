@@ -2747,7 +2747,7 @@ mod tests {
         async fn commit(self: Box<Self>) -> Result<Option<kv::kv::WriteHandle>, kv::kv::Error> {
             use std::sync::atomic::Ordering::SeqCst;
             self.commit_attempts.fetch_add(1, SeqCst);
-            if self.failures.fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1)).is_ok() {
+            if self.failures.try_update(SeqCst, SeqCst, |n| n.checked_sub(1)).is_ok() {
                 self.inner.discard();
                 return Err(kv::kv::Error::Conflict);
             }
