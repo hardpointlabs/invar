@@ -3475,5 +3475,317 @@
       ["DEL", "del_bloom_recreate"],
       ["BF.ADD", "del_bloom_recreate", "other"]
     ]
+  },
+  {
+    "name": "ZRANGE REV",
+    "command": ["ZRANGE", "zint_zrange_opt_rev", "0", "-1", "REV"],
+    "expected": ["e", "d", "c", "b", "a"],
+    "type": "array",
+    "version": "6.2.0",
+    "description": "REV returns members from highest to lowest rank",
+    "setup": [
+      ["DEL", "zint_zrange_opt_rev"],
+      ["ZADD", "zint_zrange_opt_rev", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"]
+    ]
+  },
+  {
+    "name": "ZRANGE REV WITHSCORES",
+    "command": ["ZRANGE", "zint_zrange_opt_rev_ws", "0", "-1", "REV", "WITHSCORES"],
+    "expected": ["e", "5", "d", "4", "c", "3", "b", "2", "a", "1"],
+    "type": "array",
+    "version": "6.2.0",
+    "description": "REV WITHSCORES keeps each member next to its score",
+    "setup": [
+      ["DEL", "zint_zrange_opt_rev_ws"],
+      ["ZADD", "zint_zrange_opt_rev_ws", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"]
+    ]
+  },
+  {
+    "name": "ZRANGE WITHSCORES REV (option order)",
+    "command": ["ZRANGE", "zint_zrange_opt_rev_ws2", "0", "1", "WITHSCORES", "REV"],
+    "expected": ["e", "5", "d", "4"],
+    "type": "array",
+    "version": "6.2.0",
+    "description": "options may appear in any order",
+    "setup": [
+      ["DEL", "zint_zrange_opt_rev_ws2"],
+      ["ZADD", "zint_zrange_opt_rev_ws2", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"]
+    ]
+  },
+  {
+    "name": "ZRANGE REV partial rank range",
+    "command": ["ZRANGE", "zint_zrange_opt_rev_rank", "1", "2", "REV"],
+    "expected": ["d", "c"],
+    "type": "array",
+    "version": "6.2.0",
+    "description": "with REV, rank 0 is the highest-scored member",
+    "setup": [
+      ["DEL", "zint_zrange_opt_rev_rank"],
+      ["ZADD", "zint_zrange_opt_rev_rank", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"]
+    ]
+  },
+  {
+    "name": "ZRANGE BYSCORE",
+    "command": ["ZRANGE", "zint_zrange_opt_bs", "2", "4", "BYSCORE"],
+    "expected": ["b", "c", "d"],
+    "type": "array",
+    "version": "6.2.0",
+    "description": "BYSCORE selects members whose score is in [min, max]",
+    "setup": [
+      ["DEL", "zint_zrange_opt_bs"],
+      ["ZADD", "zint_zrange_opt_bs", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"]
+    ]
+  },
+  {
+    "name": "ZRANGE BYSCORE exclusive bounds",
+    "command": ["ZRANGE", "zint_zrange_opt_bs_excl", "(1", "(5", "BYSCORE"],
+    "expected": ["b", "c", "d"],
+    "type": "array",
+    "version": "6.2.0",
+    "description": "a leading ( makes a score bound exclusive",
+    "setup": [
+      ["DEL", "zint_zrange_opt_bs_excl"],
+      ["ZADD", "zint_zrange_opt_bs_excl", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"]
+    ]
+  },
+  {
+    "name": "ZRANGE BYSCORE infinities",
+    "command": ["ZRANGE", "zint_zrange_opt_bs_inf", "-inf", "+inf", "BYSCORE"],
+    "expected": ["a", "b", "c", "d", "e"],
+    "type": "array",
+    "version": "6.2.0",
+    "description": "-inf and +inf are unbounded",
+    "setup": [
+      ["DEL", "zint_zrange_opt_bs_inf"],
+      ["ZADD", "zint_zrange_opt_bs_inf", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"]
+    ]
+  },
+  {
+    "name": "ZRANGE BYSCORE WITHSCORES",
+    "command": ["ZRANGE", "zint_zrange_opt_bs_ws", "2", "3", "BYSCORE", "WITHSCORES"],
+    "expected": ["b", "2", "c", "3"],
+    "type": "array",
+    "version": "6.2.0",
+    "description": "BYSCORE WITHSCORES returns member and score",
+    "setup": [
+      ["DEL", "zint_zrange_opt_bs_ws"],
+      ["ZADD", "zint_zrange_opt_bs_ws", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"]
+    ]
+  },
+  {
+    "name": "ZRANGE BYSCORE LIMIT",
+    "command": ["ZRANGE", "zint_zrange_opt_bs_limit", "-inf", "+inf", "BYSCORE", "LIMIT", "1", "2"],
+    "expected": ["b", "c"],
+    "type": "array",
+    "version": "6.2.0",
+    "description": "LIMIT offset count skips and caps the result",
+    "setup": [
+      ["DEL", "zint_zrange_opt_bs_limit"],
+      ["ZADD", "zint_zrange_opt_bs_limit", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"]
+    ]
+  },
+  {
+    "name": "ZRANGE BYSCORE LIMIT negative count",
+    "command": ["ZRANGE", "zint_zrange_opt_bs_limit_all", "-inf", "+inf", "BYSCORE", "LIMIT", "3", "-1"],
+    "expected": ["d", "e"],
+    "type": "array",
+    "version": "6.2.0",
+    "description": "a negative LIMIT count means all remaining members",
+    "setup": [
+      ["DEL", "zint_zrange_opt_bs_limit_all"],
+      ["ZADD", "zint_zrange_opt_bs_limit_all", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"]
+    ]
+  },
+  {
+    "name": "ZRANGE BYSCORE REV (max then min)",
+    "command": ["ZRANGE", "zint_zrange_opt_bs_rev", "4", "2", "BYSCORE", "REV"],
+    "expected": ["d", "c", "b"],
+    "type": "array",
+    "version": "6.2.0",
+    "description": "with REV the bounds are given as max then min",
+    "setup": [
+      ["DEL", "zint_zrange_opt_bs_rev"],
+      ["ZADD", "zint_zrange_opt_bs_rev", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"]
+    ]
+  },
+  {
+    "name": "ZRANGE BYSCORE REV WITHSCORES LIMIT",
+    "command": ["ZRANGE", "zint_zrange_opt_bs_rev_ws_l", "+inf", "-inf", "BYSCORE", "REV", "WITHSCORES", "LIMIT", "0", "2"],
+    "expected": ["e", "5", "d", "4"],
+    "type": "array",
+    "version": "6.2.0",
+    "description": "REV, WITHSCORES and LIMIT combine",
+    "setup": [
+      ["DEL", "zint_zrange_opt_bs_rev_ws_l"],
+      ["ZADD", "zint_zrange_opt_bs_rev_ws_l", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"]
+    ]
+  },
+  {
+    "name": "ZRANGE BYSCORE REV with min/max not swapped",
+    "command": ["ZRANGE", "zint_zrange_opt_bs_empty", "2", "4", "BYSCORE", "REV"],
+    "expected": [],
+    "type": "array",
+    "version": "6.2.0",
+    "description": "REV with the bounds in ascending order selects nothing (they are max then min)",
+    "setup": [
+      ["DEL", "zint_zrange_opt_bs_empty"],
+      ["ZADD", "zint_zrange_opt_bs_empty", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"]
+    ]
+  },
+  {
+    "name": "ZRANGE BYLEX",
+    "command": ["ZRANGE", "zint_zrange_opt_bl", "[b", "[d", "BYLEX"],
+    "expected": ["b", "c", "d"],
+    "type": "array",
+    "version": "6.2.0",
+    "description": "BYLEX selects members within the lexicographic range",
+    "setup": [
+      ["DEL", "zint_zrange_opt_bl"],
+      ["ZADD", "zint_zrange_opt_bl", "0", "a", "0", "b", "0", "c", "0", "d", "0", "e"]
+    ]
+  },
+  {
+    "name": "ZRANGE BYLEX exclusive bounds",
+    "command": ["ZRANGE", "zint_zrange_opt_bl_excl", "(a", "(e", "BYLEX"],
+    "expected": ["b", "c", "d"],
+    "type": "array",
+    "version": "6.2.0",
+    "description": "a leading ( makes a lex bound exclusive",
+    "setup": [
+      ["DEL", "zint_zrange_opt_bl_excl"],
+      ["ZADD", "zint_zrange_opt_bl_excl", "0", "a", "0", "b", "0", "c", "0", "d", "0", "e"]
+    ]
+  },
+  {
+    "name": "ZRANGE BYLEX unbounded",
+    "command": ["ZRANGE", "zint_zrange_opt_bl_all", "-", "+", "BYLEX"],
+    "expected": ["a", "b", "c", "d", "e"],
+    "type": "array",
+    "version": "6.2.0",
+    "description": "- and + are unbounded",
+    "setup": [
+      ["DEL", "zint_zrange_opt_bl_all"],
+      ["ZADD", "zint_zrange_opt_bl_all", "0", "a", "0", "b", "0", "c", "0", "d", "0", "e"]
+    ]
+  },
+  {
+    "name": "ZRANGE BYLEX LIMIT",
+    "command": ["ZRANGE", "zint_zrange_opt_bl_limit", "-", "+", "BYLEX", "LIMIT", "1", "3"],
+    "expected": ["b", "c", "d"],
+    "type": "array",
+    "version": "6.2.0",
+    "description": "LIMIT works with BYLEX",
+    "setup": [
+      ["DEL", "zint_zrange_opt_bl_limit"],
+      ["ZADD", "zint_zrange_opt_bl_limit", "0", "a", "0", "b", "0", "c", "0", "d", "0", "e"]
+    ]
+  },
+  {
+    "name": "ZRANGE BYLEX REV (max then min)",
+    "command": ["ZRANGE", "zint_zrange_opt_bl_rev", "[d", "[b", "BYLEX", "REV"],
+    "expected": ["d", "c", "b"],
+    "type": "array",
+    "version": "6.2.0",
+    "description": "with REV the bounds are given as max then min",
+    "setup": [
+      ["DEL", "zint_zrange_opt_bl_rev"],
+      ["ZADD", "zint_zrange_opt_bl_rev", "0", "a", "0", "b", "0", "c", "0", "d", "0", "e"]
+    ]
+  },
+  {
+    "name": "ZRANGE LIMIT without BYSCORE/BYLEX",
+    "command": ["ZRANGE", "zint_zrange_opt_e_limit_rank", "0", "-1", "LIMIT", "0", "1"],
+    "expected": {"error": true},
+    "type": "error",
+    "version": "6.2.0",
+    "description": "LIMIT is only valid together with BYSCORE or BYLEX",
+    "setup": [
+      ["DEL", "zint_zrange_opt_e_limit_rank"],
+      ["ZADD", "zint_zrange_opt_e_limit_rank", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"]
+    ]
+  },
+  {
+    "name": "ZRANGE BYLEX WITHSCORES",
+    "command": ["ZRANGE", "zint_zrange_opt_e_ws_lex", "-", "+", "BYLEX", "WITHSCORES"],
+    "expected": {"error": true},
+    "type": "error",
+    "version": "6.2.0",
+    "description": "WITHSCORES is not valid with BYLEX",
+    "setup": [
+      ["DEL", "zint_zrange_opt_e_ws_lex"],
+      ["ZADD", "zint_zrange_opt_e_ws_lex", "0", "a", "0", "b", "0", "c", "0", "d", "0", "e"]
+    ]
+  },
+  {
+    "name": "ZRANGE BYSCORE and BYLEX together",
+    "command": ["ZRANGE", "zint_zrange_opt_e_both", "0", "1", "BYSCORE", "BYLEX"],
+    "expected": {"error": true},
+    "type": "error",
+    "version": "6.2.0",
+    "description": "BYSCORE and BYLEX are mutually exclusive",
+    "setup": [
+      ["DEL", "zint_zrange_opt_e_both"],
+      ["ZADD", "zint_zrange_opt_e_both", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"]
+    ]
+  },
+  {
+    "name": "ZRANGE unknown option",
+    "command": ["ZRANGE", "zint_zrange_opt_e_unknown", "0", "-1", "BOGUS"],
+    "expected": {"error": true},
+    "type": "error",
+    "version": "6.2.0",
+    "description": "an unknown option is a syntax error",
+    "setup": [
+      ["DEL", "zint_zrange_opt_e_unknown"],
+      ["ZADD", "zint_zrange_opt_e_unknown", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"]
+    ]
+  },
+  {
+    "name": "ZRANGE LIMIT missing count",
+    "command": ["ZRANGE", "zint_zrange_opt_e_limit_arity", "0", "-1", "BYSCORE", "LIMIT", "1"],
+    "expected": {"error": true},
+    "type": "error",
+    "version": "6.2.0",
+    "description": "LIMIT needs both an offset and a count",
+    "setup": [
+      ["DEL", "zint_zrange_opt_e_limit_arity"],
+      ["ZADD", "zint_zrange_opt_e_limit_arity", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"]
+    ]
+  },
+  {
+    "name": "ZRANGE BYSCORE LIMIT negative offset",
+    "command": ["ZRANGE", "zint_zrange_opt_neg_off", "-inf", "+inf", "BYSCORE", "LIMIT", "-1", "2"],
+    "expected": [],
+    "type": "array",
+    "version": "6.2.0",
+    "description": "a negative LIMIT offset selects nothing",
+    "setup": [
+      ["DEL", "zint_zrange_opt_neg_off"],
+      ["ZADD", "zint_zrange_opt_neg_off", "1", "a", "2", "b", "3", "c"]
+    ]
+  },
+  {
+    "name": "ZRANGEBYSCORE LIMIT negative offset",
+    "command": ["ZRANGEBYSCORE", "zint_zrange_opt_neg_off2", "-inf", "+inf", "LIMIT", "-1", "2"],
+    "expected": [],
+    "type": "array",
+    "version": "6.2.0",
+    "description": "a negative LIMIT offset selects nothing",
+    "setup": [
+      ["DEL", "zint_zrange_opt_neg_off2"],
+      ["ZADD", "zint_zrange_opt_neg_off2", "1", "a", "2", "b", "3", "c"]
+    ]
+  },
+  {
+    "name": "ZRANGE BYLEX LIMIT negative offset",
+    "command": ["ZRANGE", "zint_zrange_opt_neg_off3", "-", "+", "BYLEX", "LIMIT", "-1", "2"],
+    "expected": [],
+    "type": "array",
+    "version": "6.2.0",
+    "description": "a negative LIMIT offset selects nothing",
+    "setup": [
+      ["DEL", "zint_zrange_opt_neg_off3"],
+      ["ZADD", "zint_zrange_opt_neg_off3", "0", "a", "0", "b", "0", "c"]
+    ]
   }
 ]
