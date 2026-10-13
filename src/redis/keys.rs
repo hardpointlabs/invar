@@ -14,11 +14,12 @@
 use std::ops::Bound;
 
 use bytes::Bytes;
-use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
+use kv::kv::{BoxFuture, Entry, Error as KvError, Item, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, NoOp, QueuedOp, WireOp};
 use smallvec::smallvec;
 use crate::common::session::Session;
+use crate::common::namespace::{base_type, prefix_of};
 use crate::common::ValueType;
 use crate::list;
 use crate::pubsub::redis_glob_match;
@@ -424,6 +425,38 @@ impl DbOp for MoveOp {
     }
 }
 
+/// Moves the key `old` (already read as `item`) to `new` for `RENAME`:
+/// the destination's own elements are cleared, the elements follow if they
+/// are addressed by the old name, and the public entry moves with its
+/// remaining TTL. `RENAME k k` is a no-op.
+///
+/// A value whose sentinel records a namespace needs nothing but its sentinel
+/// copied, so renaming it is O(1). A legacy value's elements are addressed by
+/// its name (`-<db>:<name>...`), so they are re-keyed: O(size of the value).
+async fn rename_entry(tx: &dyn Tx, old: &[u8], new: &[u8], item: &Item) -> Result<(), DbError> {
+    if old == new {
+        return Ok(());
+    }
+    let legacy = |public: &[u8]| [b"-".as_slice(), public].concat();
+
+    match tx.get(new).await {
+        Ok(existing) => {
+            let prefix = prefix_of(&existing, &legacy(new))?;
+            clear_compound_entries(tx, new, &prefix, existing.metadata()).await?;
+        }
+        Err(KvError::KeyNotFound) => {}
+        Err(e) => return Err(e.into()),
+    }
+
+    let source = prefix_of(item, &legacy(old))?;
+    if !source.is_explicit() {
+        move_elements(tx, old, base_type(item.metadata()), &source, &legacy(new)).await?;
+    }
+    tx.set(Entry::new(new.to_vec(), item.value().to_vec()).metadata(item.metadata()).keep_ttl_of(item))?;
+    tx.delete(old)?;
+    Ok(())
+}
+
 struct RenameOp {
     old: Vec<u8>,
     new: Vec<u8>,
@@ -442,8 +475,7 @@ impl DbOp for RenameOp {
                 }
                 Err(e) => return Err(e.into()),
             };
-            tx.set(Entry::new(new, item.value().to_vec()).metadata(item.metadata()))?;
-            tx.delete(&old)?;
+            rename_entry(tx, &old, &new, &item).await?;
             let result: DbResult = Box::new(Some(()));
             Ok(result)
         })
@@ -476,8 +508,7 @@ impl DbOp for RenameNXOp {
                 }
                 Err(e) => return Err(e.into()),
             };
-            tx.set(Entry::new(new, item.value().to_vec()).metadata(item.metadata()))?;
-            tx.delete(&old)?;
+            rename_entry(tx, &old, &new, &item).await?;
             let result: DbResult = Box::new(Some(1i64));
             Ok(result)
         })
@@ -641,7 +672,7 @@ impl DbOp for TypeOp {
         let key = self.key.clone();
         Box::pin(async move {
             let name = match tx.get(&key).await {
-                Ok(item) => type_name(item.metadata()).to_string(),
+                Ok(item) => type_name(base_type(item.metadata())).to_string(),
                 Err(KvError::KeyNotFound) => "none".to_string(),
                 Err(e) => return Err(e.into()),
             };
@@ -660,13 +691,14 @@ impl DbOp for DelOp {
         let keys = self.keys.clone();
         Box::pin(async move {
             let mut count = 0i64;
-            for (public_key, node_prefix) in &keys {
+            for (public_key, legacy_prefix) in &keys {
                 let item = match tx.get(public_key).await {
                     Err(KvError::KeyNotFound) => continue,
                     Err(e) => return Err(e.into()),
                     Ok(item) => item,
                 };
-                clear_compound_entries(tx, public_key, node_prefix, item.metadata()).await?;
+                let prefix = prefix_of(&item, legacy_prefix)?;
+                clear_compound_entries(tx, public_key, &prefix, item.metadata()).await?;
                 tx.delete(public_key)?;
                 count += 1;
             }
@@ -674,6 +706,67 @@ impl DbOp for DelOp {
             Ok(result)
         })
     }
+}
+
+/// The prefixes, under a value's element prefix, that its element entries
+/// live under, for the types that keep the elements as one family of keys.
+/// Lists are not covered: their nodes are found by walking the chain.
+fn element_prefixes(base_type: u8, prefix: &[u8]) -> Vec<Vec<u8>> {
+    if base_type == ValueType::Set as u8
+        || base_type == ValueType::Hash as u8
+        || base_type == ValueType::Stream as u8
+        || base_type == ValueType::Bloom as u8
+    {
+        vec![[prefix, b"\0"].concat()]
+    } else if base_type == ValueType::SortedSet as u8 {
+        vec![[prefix, b":score:"].concat(), [prefix, b":member:"].concat()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Re-keys every entry under `from` to live under `to` instead (keeping the
+/// part of the key after the prefix, the value and the metadata byte).
+async fn move_prefix(tx: &dyn Tx, from: &[u8], to: &[u8]) -> Result<(), DbError> {
+    let mut it = tx.new_prefix_iterator(from).await?;
+    let mut moved = Vec::new();
+    while it.next().await {
+        if let Some(item) = it.item() {
+            moved.push((item.key().to_vec(), item.value().to_vec(), item.metadata()));
+        }
+    }
+    let err = it.err().cloned();
+    if let Some(e) = err {
+        it.close().await?;
+        return Err(DbError::Kv(e));
+    }
+    it.close().await?;
+    for (key, value, metadata) in moved {
+        let mut new_key = to.to_vec();
+        new_key.extend_from_slice(&key[from.len()..]);
+        tx.set(Entry::new(new_key, value).metadata(metadata))?;
+        tx.delete(&key)?;
+    }
+    Ok(())
+}
+
+/// Moves the elements of the compound value whose sentinel is at
+/// `public_key` from element prefix `from` to element prefix `to`. O(size of
+/// the value). Does nothing for types that keep no elements.
+pub(crate) async fn move_elements(
+    tx: &dyn Tx,
+    public_key: &[u8],
+    base_type: u8,
+    from: &[u8],
+    to: &[u8],
+) -> Result<(), DbError> {
+    if base_type == ValueType::List as u8 {
+        return list::move_nodes(tx, public_key, from, to).await;
+    }
+    for (from, to) in element_prefixes(base_type, from).into_iter().zip(element_prefixes(base_type, to)) {
+        move_prefix(tx, &from, &to).await?;
+    }
+    Ok(())
 }
 
 /// Deletes the internal entry keys owned by a compound value so that
@@ -694,25 +787,11 @@ async fn clear_compound_entries(
     node_prefix: &[u8],
     metadata: u8,
 ) -> Result<(), DbError> {
-    let mut prefixes: Vec<Vec<u8>> = Vec::new();
+    let metadata = base_type(metadata);
     if metadata == ValueType::List as u8 {
         return list::delete_nodes(tx, public_key, node_prefix).await;
     }
-    if metadata == ValueType::Set as u8
-        || metadata == ValueType::Hash as u8
-        || metadata == ValueType::Stream as u8
-        || metadata == ValueType::Bloom as u8
-    {
-        let mut prefix = node_prefix.to_vec();
-        prefix.push(0);
-        prefixes.push(prefix);
-    } else if metadata == ValueType::SortedSet as u8 {
-        prefixes.push([node_prefix, b":score:"].concat());
-        prefixes.push([node_prefix, b":member:"].concat());
-    } else {
-        return Ok(());
-    }
-    for prefix in prefixes {
+    for prefix in element_prefixes(metadata, node_prefix) {
         let mut it = tx.new_prefix_iterator(&prefix).await?;
         let mut keys = Vec::new();
         while it.next().await {
@@ -801,7 +880,7 @@ impl DbOp for ScanOp {
                     }
                 }
                 if let Some(want) = type_filter {
-                    if item.metadata() != want {
+                    if base_type(item.metadata()) != want {
                         continue;
                     }
                 }

@@ -432,6 +432,39 @@ fn node_key(node_prefix: &[u8], node_key: &[u8]) -> Vec<u8> {
     key
 }
 
+/// Re-keys every node of the list whose sentinel lives at `public_key` from
+/// `from_prefix` to `to_prefix` (both the prefix of the node keys, without the
+/// `:<node key>` suffix). Nodes are found by walking the chain from the
+/// sentinel's head, because a prefix scan would also match the entries of
+/// unrelated keys such as `<name>:other`. Links store only the 16-byte node
+/// key, so node contents are copied unchanged.
+pub(crate) async fn move_nodes(
+    tx: &dyn Tx,
+    public_key: &[u8],
+    from_prefix: &[u8],
+    to_prefix: &[u8],
+) -> Result<(), DbError> {
+    let (size, head, _tail) = read_sentinel(tx, public_key).await?;
+    let mut current = head;
+    for _ in 0..size {
+        if current == [0u8; KEY_LENGTH] {
+            break;
+        }
+        let from = node_key(from_prefix, &current);
+        let item = tx.get(&from).await?;
+        let value = item.value();
+        if value.len() < 2 * KEY_LENGTH {
+            return Err(DbError::Kv(KvError::KeyNotFound));
+        }
+        let mut next = [0u8; KEY_LENGTH];
+        next.copy_from_slice(&value[value.len() - KEY_LENGTH..]);
+        tx.set(Entry::new(node_key(to_prefix, &current), value.to_vec()).metadata(item.metadata()))?;
+        tx.delete(&from)?;
+        current = next;
+    }
+    Ok(())
+}
+
 /// Deletes every node of the list whose sentinel lives at `public_key`, for
 /// `DEL`. Nodes are found by walking the chain from the sentinel's head,
 /// because a prefix scan on `-<db>:<name>:` would also match the entries of
