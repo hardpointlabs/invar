@@ -41,6 +41,7 @@ use tokio_stream::StreamExt as TokioStreamExt;
 use tokio_util::codec::Framed;
 
 use crate::commands::enqueue_command;
+use crate::common::session::DEFAULT_CONFLICT_RETRY_COUNT;
 use crate::common::{RedisStore, Session, WatchRegistry};
 use crate::pubsub::{
     message_resp, pmessage_resp, psubscribe_resp, punsubscribe_resp, ssubscribe_resp,
@@ -153,6 +154,7 @@ pub struct RedisListener {
     store: Arc<dyn RedisStore>,
     registry: Arc<WatchRegistry>,
     pubsub: Arc<PubSubRegistry>,
+    conflict_retry_count: usize,
 }
 
 impl RedisListener {
@@ -162,7 +164,15 @@ impl RedisListener {
             store,
             registry: Arc::new(WatchRegistry::new()),
             pubsub: Arc::new(PubSubRegistry::new()),
+            conflict_retry_count: DEFAULT_CONFLICT_RETRY_COUNT,
         }
+    }
+
+    /// Sets how many times a connection retries a batch that lost a write
+    /// conflict before replying with an error.
+    pub fn with_conflict_retry_count(mut self, count: usize) -> Self {
+        self.conflict_retry_count = count;
+        self
     }
 
     /// Binds and accepts connections forever. Each connection is handled on
@@ -197,8 +207,9 @@ impl RedisListener {
         let store = self.store.clone();
         let registry = self.registry.clone();
         let pubsub = self.pubsub.clone();
+        let conflict_retry_count = self.conflict_retry_count;
         tokio::spawn(async move {
-            let result = handle_connection(socket, store, registry, pubsub).await;
+            let result = handle_connection(socket, store, registry, pubsub, conflict_retry_count).await;
             crate::server::conn_closed();
             if let Err(e) = result {
                 tracing::error!("invar: connection error: {e}");
@@ -244,8 +255,10 @@ async fn handle_connection<S: ClientStream>(
     store: Arc<dyn RedisStore>,
     registry: Arc<WatchRegistry>,
     pubsub: Arc<PubSubRegistry>,
+    conflict_retry_count: usize,
 ) -> Result<(), RespError> {
     let mut session = Session::new_with_pubsub(store, registry, pubsub.clone());
+    session.set_conflict_retry_count(conflict_retry_count);
     if let Some(peer) = socket.peer() {
         session.set_peer_addr(peer);
     }
