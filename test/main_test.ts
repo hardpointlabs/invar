@@ -181,12 +181,9 @@ async function executeCommand(client: RedisClientType, cmd: string[]): Promise<u
         const expireResult = await client.expire(args[0], parseInt(args[1]));
         return expireResult ? 1 : 0;
       case "move":
-        try {
-          await client.sendCommand(["MOVE", ...args]);
-          return 1;
-        } catch {
-          return 0;
-        }
+        // Return the server's own reply (1 moved, 0 not moved); an error reply
+        // surfaces through the catch below like any other command's.
+        return await client.sendCommand(["MOVE", ...args]);
       case "client":
         return await client.sendCommand(["CLIENT", ...args]);
       case "bgsave":
