@@ -33,7 +33,7 @@ use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use smallvec::smallvec;
 use crate::common::session::Session;
-use crate::common::set_keeping_ttl;
+use crate::common::namespace::{self, base_type, resolve_prefix, ElementPrefix};
 use crate::common::ValueType;
 use crate::resp::RespValue;
 
@@ -503,10 +503,10 @@ async fn read_sentinel(
     public_key: &[u8],
 ) -> Result<(u32, [u8; KEY_LENGTH], [u8; KEY_LENGTH]), DbError> {
     let item = tx.get(public_key).await?;
-    if item.metadata() != TYPE_LIST {
+    if base_type(item.metadata()) != TYPE_LIST {
         return Err(DbError::WrongType);
     }
-    let val = item.value();
+    let val = namespace::payload(&item)?;
     if val.len() < SENTINEL_LENGTH {
         return Err(DbError::Kv(KvError::KeyNotFound));
     }
@@ -518,13 +518,16 @@ async fn read_sentinel(
     Ok((size, head, tail))
 }
 
-/// Writes the list sentinel entry with list metadata.
+/// Writes the list sentinel entry with list metadata. `prefix` is the prefix
+/// the list's nodes are stored under; the sentinel records it when it is a
+/// namespace and keeps the key's TTL.
 async fn write_sentinel(
     tx: &dyn Tx,
     public_key: &[u8],
     head: Option<[u8; KEY_LENGTH]>,
     tail: Option<[u8; KEY_LENGTH]>,
     size: u32,
+    prefix: &ElementPrefix,
 ) -> Result<(), DbError> {
     let mut buf = [0u8; SENTINEL_LENGTH];
     buf[0..4].copy_from_slice(&size.to_be_bytes());
@@ -534,9 +537,7 @@ async fn write_sentinel(
     if let Some(t) = tail {
         buf[20..36].copy_from_slice(&t);
     }
-    set_keeping_ttl(tx, Entry::new(public_key.to_vec(), buf.to_vec()).metadata(TYPE_LIST))
-        .await
-        .map_err(DbError::from)
+    namespace::write_sentinel(tx, public_key, buf.to_vec(), TYPE_LIST, prefix).await
 }
 
 /// Loads a list from the store, mirroring Go's `loadList`: traverse from the
@@ -597,10 +598,10 @@ async fn load_list(tx: &dyn Tx, public_key: &[u8], node_prefix: &[u8]) -> Result
 async fn persist_list(
     tx: &dyn Tx,
     public_key: &[u8],
-    node_prefix: &[u8],
+    node_prefix: &ElementPrefix,
     ll: &Linked,
 ) -> Result<(), DbError> {
-    write_sentinel(tx, public_key, ll.head, ll.tail, ll.size).await?;
+    write_sentinel(tx, public_key, ll.head, ll.tail, ll.size, node_prefix).await?;
     ll.delete_removed_nodes(tx, node_prefix)?;
     for node in ll.nodes.values() {
         let mut buf = Vec::with_capacity(node.value.len() + 2 * KEY_LENGTH);
@@ -902,6 +903,7 @@ impl DbOp for PushOp {
         let at_tail = self.at_tail;
         let only_if_exists = self.only_if_exists;
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             let mut ll = match load_list(tx, &public_key, &node_prefix).await {
                 Ok(ll) => ll,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
@@ -939,6 +941,7 @@ impl DbOp for PopOp {
         let node_prefix = self.node_prefix.clone();
         let from_tail = self.from_tail;
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             let mut ll = match load_list(tx, &public_key, &node_prefix).await {
                 Ok(ll) => ll,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
@@ -1001,6 +1004,7 @@ impl DbOp for LRangeOp {
         let start = self.start;
         let stop = self.stop;
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             let ll = match load_list(tx, &public_key, &node_prefix).await {
                 Ok(ll) => ll,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
@@ -1057,6 +1061,7 @@ impl DbOp for LIndexOp {
         let node_prefix = self.node_prefix.clone();
         let index = self.index;
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             let ll = match load_list(tx, &public_key, &node_prefix).await {
                 Ok(ll) => ll,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
@@ -1105,6 +1110,7 @@ impl DbOp for LSetOp {
         let index = self.index;
         let value = self.value.clone();
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             let mut ll = match load_list(tx, &public_key, &node_prefix).await {
                 Ok(ll) => ll,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
@@ -1152,6 +1158,7 @@ impl DbOp for LRemOp {
         let count = self.count;
         let value = self.value.clone();
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             let mut ll = match load_list(tx, &public_key, &node_prefix).await {
                 Ok(ll) => ll,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
@@ -1191,6 +1198,7 @@ impl DbOp for LTrimOp {
         let start = self.start;
         let stop = self.stop;
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             let mut ll = match load_list(tx, &public_key, &node_prefix).await {
                 Ok(ll) => ll,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
@@ -1244,6 +1252,7 @@ impl DbOp for LInsertOp {
         let pivot = self.pivot.clone();
         let value = self.value.clone();
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             let mut ll = match load_list(tx, &public_key, &node_prefix).await {
                 Ok(ll) => ll,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
@@ -1277,6 +1286,7 @@ impl DbOp for RPopLPushOp {
         let dst_public = self.dst_public.clone();
         let dst_prefix = self.dst_node_prefix.clone();
         Box::pin(async move {
+            let src_prefix = resolve_prefix(tx, &src_public, &src_prefix).await?;
             // Pop tail of source.
             let mut src_ll = match load_list(tx, &src_public, &src_prefix).await {
                 Ok(ll) => ll,
@@ -1300,7 +1310,9 @@ impl DbOp for RPopLPushOp {
             } else {
                 persist_list(tx, &src_public, &src_prefix, &src_ll).await?;
             }
-            // Push to head of destination.
+            // Push to head of destination. Resolved only now: it may be the
+            // source list, whose sentinel was just rewritten or deleted.
+            let dst_prefix = resolve_prefix(tx, &dst_public, &dst_prefix).await?;
             let mut dst_ll = match load_list(tx, &dst_public, &dst_prefix).await {
                 Ok(ll) => ll,
                 Err(DbError::Kv(KvError::KeyNotFound)) => Linked::new_empty(),
@@ -1326,9 +1338,10 @@ impl DbOp for LPosOp {
         let node_prefix = self.node_prefix.clone();
         let element = self.element.clone();
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             // Check key type first (WRONGTYPE on non-list).
             if let Ok(item) = tx.get(&public_key).await {
-                if item.metadata() != TYPE_LIST {
+                if base_type(item.metadata()) != TYPE_LIST {
                     return Err(DbError::WrongType);
                 }
             }
@@ -1618,6 +1631,91 @@ mod tests {
             assert!(!is_zero_key(&key));
             assert!(seen.insert(key), "duplicate key");
         }
+    }
+
+    // --- namespaced layout (RFC 0001) ---
+
+    const NS_L: &[u8] = b"+0:ns-list-000l";
+    const NS_M: &[u8] = b"+0:ns-list-000m";
+
+    fn bs(parts: &[&str]) -> Vec<Bytes> {
+        parts.iter().map(|p| Bytes::copy_from_slice(p.as_bytes())).collect()
+    }
+
+    /// Runs the op on a legacy twin and on the namespaced one; replies must match.
+    async fn both(legacy: &Session, ns: &Session, build: impl Fn(&Session) -> QueuedOp) -> RespValue {
+        let a = crate::testutil::exec(legacy, build(legacy)).await;
+        let b = crate::testutil::exec(ns, build(ns)).await;
+        assert_eq!(a, b, "a namespaced list must answer exactly like a legacy one");
+        a
+    }
+
+    #[tokio::test]
+    async fn namespaced_lists_behave_like_legacy_ones() {
+        let (legacy, ns) = (test_session(), test_session());
+        for s in [&legacy, &ns] {
+            crate::testutil::exec(s, rpush(s, b"l", &bs(&["a", "b", "c", "d", "e"]))).await;
+            crate::testutil::exec(s, rpush(s, b"m", &bs(&["x"]))).await;
+        }
+        crate::testutil::namespace_key(&ns, b"l", NS_L).await;
+        crate::testutil::namespace_key(&ns, b"m", NS_M).await;
+
+        // Reads.
+        both(&legacy, &ns, |s| llen(s, b"l")).await;
+        both(&legacy, &ns, |s| lrange(s, b"l", 0, -1)).await;
+        both(&legacy, &ns, |s| lrange(s, b"l", 1, 2)).await;
+        both(&legacy, &ns, |s| lindex(s, b"l", -2)).await;
+        both(&legacy, &ns, |s| lindex(s, b"l", 99)).await;
+        both(&legacy, &ns, |s| lpos(s, b"l", b"d")).await;
+
+        // Writes, each followed by the whole list.
+        both(&legacy, &ns, |s| rpush(s, b"l", &bs(&["f", "g"]))).await;
+        both(&legacy, &ns, |s| lpush(s, b"l", &bs(&["z"]))).await;
+        both(&legacy, &ns, |s| lpushx(s, b"l", b"y")).await;
+        both(&legacy, &ns, |s| rpushx(s, b"l", b"h")).await;
+        both(&legacy, &ns, |s| lset(s, b"l", 2, b"B")).await;
+        both(&legacy, &ns, |s| linsert(s, b"l", true, b"c", b"between")).await;
+        both(&legacy, &ns, |s| lrem(s, b"l", 1, b"d")).await;
+        both(&legacy, &ns, |s| lpop(s, b"l")).await;
+        both(&legacy, &ns, |s| rpop(s, b"l")).await;
+        both(&legacy, &ns, |s| lrange(s, b"l", 0, -1)).await;
+        both(&legacy, &ns, |s| rpoplpush(s, b"l", b"m")).await; // namespaced -> namespaced
+        both(&legacy, &ns, |s| rpoplpush(s, b"m", b"fresh")).await; // namespaced -> missing (legacy, new)
+        both(&legacy, &ns, |s| rpoplpush(s, b"l", b"l")).await; // rotate in place
+        both(&legacy, &ns, |s| ltrim(s, b"l", 1, 3)).await;
+        for k in [&b"l"[..], b"m", b"fresh"] {
+            both(&legacy, &ns, |s| lrange(s, k, 0, -1)).await;
+        }
+
+        // The namespaced lists never wrote anything under their name-derived prefix
+        // and their sentinels still record the namespace; removed nodes are deleted.
+        for k in [&b"l"[..], b"m"] {
+            assert_eq!(crate::testutil::entries_under(&ns, &ns.private_key(k)).await, 0, "{}", String::from_utf8_lossy(k));
+            let meta = crate::testutil::stored_type_byte(&ns, &ns.public_key(k)).await.unwrap();
+            assert_eq!(meta, TYPE_LIST | crate::common::namespace::NAMESPACE_FLAG);
+        }
+        let live_l = match crate::testutil::exec(&ns, llen(&ns, b"l")).await { RespValue::Integer(n) => n as usize, o => panic!("{o:?}") };
+        let live_m = match crate::testutil::exec(&ns, llen(&ns, b"m")).await { RespValue::Integer(n) => n as usize, o => panic!("{o:?}") };
+        assert_eq!(crate::testutil::entries_under(&ns, NS_L).await, live_l);
+        assert_eq!(crate::testutil::entries_under(&ns, NS_M).await, live_m);
+
+        // Emptying a namespaced list removes its sentinel and every node.
+        for _ in 0..live_l {
+            both(&legacy, &ns, |s| lpop(s, b"l")).await;
+        }
+        assert_eq!(crate::testutil::stored_type_byte(&ns, &ns.public_key(b"l")).await, None);
+        assert_eq!(crate::testutil::entries_under(&ns, NS_L).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_namespaced_list_keeps_its_ttl() {
+        let s = test_session();
+        crate::testutil::exec(&s, rpush(&s, b"l", &bs(&["a"]))).await;
+        crate::testutil::exec(&s, crate::keys::expire(&s, b"l", 100)).await;
+        crate::testutil::namespace_key(&s, b"l", NS_L).await;
+        crate::testutil::exec(&s, rpush(&s, b"l", &bs(&["b"]))).await;
+        let ttl = crate::testutil::exec(&s, crate::keys::ttl(&s, b"l")).await;
+        assert!(matches!(ttl, RespValue::Integer(n) if (90..=100).contains(&n)), "ttl was {ttl:?}");
     }
 
     #[tokio::test]
