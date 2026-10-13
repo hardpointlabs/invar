@@ -3787,5 +3787,206 @@
       ["DEL", "zint_zrange_opt_neg_off3"],
       ["ZADD", "zint_zrange_opt_neg_off3", "0", "a", "0", "b", "0", "c"]
     ]
+  },
+  {
+    "name": "KEYS exact name",
+    "command": ["KEYS", "keys_t_exact"],
+    "expected": ["keys_t_exact"],
+    "type": "set",
+    "version": "1.0.0",
+    "description": "a pattern with no glob characters matches only that key",
+    "setup": [
+      ["SET", "keys_t_exact", "v"],
+      ["SET", "keys_t_exact2", "v"]
+    ]
+  },
+  {
+    "name": "KEYS trailing star",
+    "command": ["KEYS", "keys_t_star:*"],
+    "expected": ["keys_t_star:a", "keys_t_star:b", "keys_t_star:c"],
+    "type": "set",
+    "version": "1.0.0",
+    "description": "* matches any run of characters, including none",
+    "setup": [
+      ["SET", "keys_t_star:a", "1"],
+      ["SET", "keys_t_star:b", "2"],
+      ["SET", "keys_t_star:c", "3"],
+      ["SET", "keys_t_starx:z", "4"]
+    ]
+  },
+  {
+    "name": "KEYS star in the middle",
+    "command": ["KEYS", "keys_t_mid:*:end"],
+    "expected": ["keys_t_mid:a:end", "keys_t_mid::end"],
+    "type": "set",
+    "version": "1.0.0",
+    "description": "a star between literals matches only keys with both ends",
+    "setup": [
+      ["SET", "keys_t_mid:a:end", "1"],
+      ["SET", "keys_t_mid::end", "2"],
+      ["SET", "keys_t_mid:a:other", "3"]
+    ]
+  },
+  {
+    "name": "KEYS question mark",
+    "command": ["KEYS", "keys_t_q:?"],
+    "expected": ["keys_t_q:1"],
+    "type": "set",
+    "version": "1.0.0",
+    "description": "? matches exactly one character",
+    "setup": [
+      ["SET", "keys_t_q:1", "v"],
+      ["SET", "keys_t_q:22", "v"],
+      ["SET", "keys_t_q:", "v"]
+    ]
+  },
+  {
+    "name": "KEYS character class",
+    "command": ["KEYS", "keys_t_cc:[ab]"],
+    "expected": ["keys_t_cc:a", "keys_t_cc:b"],
+    "type": "set",
+    "version": "1.0.0",
+    "description": "[ab] matches one of the listed characters",
+    "setup": [
+      ["SET", "keys_t_cc:a", "v"],
+      ["SET", "keys_t_cc:b", "v"],
+      ["SET", "keys_t_cc:c", "v"]
+    ]
+  },
+  {
+    "name": "KEYS negated class",
+    "command": ["KEYS", "keys_t_neg:[^a]"],
+    "expected": ["keys_t_neg:b", "keys_t_neg:c"],
+    "type": "set",
+    "version": "1.0.0",
+    "description": "[^a] matches any character except a",
+    "setup": [
+      ["SET", "keys_t_neg:a", "v"],
+      ["SET", "keys_t_neg:b", "v"],
+      ["SET", "keys_t_neg:c", "v"]
+    ]
+  },
+  {
+    "name": "KEYS character range",
+    "command": ["KEYS", "keys_t_rg:[a-c]"],
+    "expected": ["keys_t_rg:a", "keys_t_rg:c"],
+    "type": "set",
+    "version": "1.0.0",
+    "description": "[a-c] matches a character in the range",
+    "setup": [
+      ["SET", "keys_t_rg:a", "v"],
+      ["SET", "keys_t_rg:c", "v"],
+      ["SET", "keys_t_rg:d", "v"]
+    ]
+  },
+  {
+    "name": "KEYS escaped star",
+    "command": ["KEYS", "keys_t_esc:\\*"],
+    "expected": ["keys_t_esc:*"],
+    "type": "set",
+    "version": "1.0.0",
+    "description": "a backslash makes the next pattern character literal",
+    "setup": [
+      ["SET", "keys_t_esc:*", "v"],
+      ["SET", "keys_t_esc:x", "v"]
+    ]
+  },
+  {
+    "name": "KEYS is case sensitive",
+    "command": ["KEYS", "keys_t_cs:a*"],
+    "expected": ["keys_t_cs:abc"],
+    "type": "set",
+    "version": "1.0.0",
+    "description": "matching is case sensitive",
+    "setup": [
+      ["SET", "keys_t_cs:abc", "v"],
+      ["SET", "keys_t_cs:ABC", "v"]
+    ]
+  },
+  {
+    "name": "KEYS no match",
+    "command": ["KEYS", "keys_t_nomatch:*"],
+    "expected": [],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "a pattern that matches nothing returns an empty array",
+    "setup": [
+      ["SET", "keys_t_other:a", "v"]
+    ]
+  },
+  {
+    "name": "KEYS returns each compound key once",
+    "command": ["KEYS", "keys_t_cmp:*"],
+    "expected": ["keys_t_cmp:h", "keys_t_cmp:l", "keys_t_cmp:s", "keys_t_cmp:z", "keys_t_cmp:x", "keys_t_cmp:b", "keys_t_cmp:str"],
+    "type": "set",
+    "version": "1.0.0",
+    "description": "hashes, lists, sets, sorted sets, streams, bloom filters and strings each appear once and no internal entries are listed",
+    "setup": [
+      ["DEL", "keys_t_cmp:h", "keys_t_cmp:l", "keys_t_cmp:s", "keys_t_cmp:z", "keys_t_cmp:x", "keys_t_cmp:b", "keys_t_cmp:str"],
+      ["HSET", "keys_t_cmp:h", "f", "v", "g", "w"],
+      ["RPUSH", "keys_t_cmp:l", "a", "b", "c"],
+      ["SADD", "keys_t_cmp:s", "x", "y"],
+      ["ZADD", "keys_t_cmp:z", "1", "a", "2", "b"],
+      ["XADD", "keys_t_cmp:x", "1-1", "f", "v"],
+      ["BF.ADD", "keys_t_cmp:b", "item"],
+      ["SET", "keys_t_cmp:str", "v"]
+    ]
+  },
+  {
+    "name": "KEYS omits deleted keys",
+    "command": ["KEYS", "keys_t_del:*"],
+    "expected": ["keys_t_del:b"],
+    "type": "set",
+    "version": "1.0.0",
+    "description": "a deleted key is not listed",
+    "setup": [
+      ["SET", "keys_t_del:a", "v"],
+      ["SET", "keys_t_del:b", "v"],
+      ["DEL", "keys_t_del:a"]
+    ]
+  },
+  {
+    "name": "KEYS omits deleted compound keys",
+    "command": ["KEYS", "keys_t_delc:*"],
+    "expected": ["keys_t_delc:keep"],
+    "type": "set",
+    "version": "1.0.0",
+    "description": "deleting a compound key leaves nothing of it to list",
+    "setup": [
+      ["HSET", "keys_t_delc:h", "f", "v"],
+      ["RPUSH", "keys_t_delc:l", "a"],
+      ["HSET", "keys_t_delc:keep", "f", "v"],
+      ["DEL", "keys_t_delc:h", "keys_t_delc:l"]
+    ]
+  },
+  {
+    "name": "KEYS only lists the current database",
+    "command": ["KEYS", "keys_t_db:*"],
+    "expected": ["keys_t_db:zero"],
+    "type": "set",
+    "version": "1.0.0",
+    "description": "KEYS sees only keys in the selected database",
+    "setup": [
+      ["SELECT", "1"],
+      ["SET", "keys_t_db:one", "v"],
+      ["SELECT", "0"],
+      ["SET", "keys_t_db:zero", "v"]
+    ]
+  },
+  {
+    "name": "KEYS without a pattern",
+    "command": ["KEYS"],
+    "expected": {"error": true},
+    "type": "error",
+    "version": "1.0.0",
+    "description": "KEYS requires a pattern"
+  },
+  {
+    "name": "KEYS with extra arguments",
+    "command": ["KEYS", "a", "b"],
+    "expected": {"error": true},
+    "type": "error",
+    "version": "1.0.0",
+    "description": "KEYS takes exactly one argument"
   }
 ]
