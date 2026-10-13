@@ -1,3 +1,15 @@
+# [1.2.0](https://github.com/hardpointlabs/invar/compare/v1.1.0...v1.2.0) (2026-10-13)
+
+
+### Bug Fixes
+
+* make redis_glob_match a faithful port of Redis's stringmatchlen ([cdcbf02](https://github.com/hardpointlabs/invar/commit/cdcbf0207e99611bcbe62dee0d7d290be43f2fdf))
+
+
+### Features
+
+* add the KEYS command ([5d8f86f](https://github.com/hardpointlabs/invar/commit/5d8f86ff4104a718dd94367ad3e83c5cd8f8b089))
+
 # [1.1.0](https://github.com/hardpointlabs/invar/compare/v1.0.36...v1.1.0) (2026-10-13)
 
 
