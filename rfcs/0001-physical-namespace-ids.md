@@ -1,6 +1,6 @@
 # Physical namespace ids for compound values
 
-Status: Draft
+Status: Approved
 
 Authors:
 
