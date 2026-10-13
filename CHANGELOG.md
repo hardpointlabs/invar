@@ -1,3 +1,10 @@
+# [1.1.0](https://github.com/hardpointlabs/invar/compare/v1.0.36...v1.1.0) (2026-10-13)
+
+
+### Features
+
+* make the write-conflict retry count configurable (--conflict-retry-count) ([8cbaf28](https://github.com/hardpointlabs/invar/commit/8cbaf282229181534f92e4dded7f658bab1b8445))
+
 ## [1.0.36](https://github.com/hardpointlabs/invar/compare/v1.0.35...v1.0.36) (2026-10-13)
 
 
