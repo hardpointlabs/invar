@@ -1,3 +1,11 @@
+## [1.0.35](https://github.com/hardpointlabs/invar/compare/v1.0.34...v1.0.35) (2026-10-13)
+
+
+### Bug Fixes
+
+* delete list nodes when elements are removed from a list ([1873b0f](https://github.com/hardpointlabs/invar/commit/1873b0f952d236a086ca0fe1fe8f9ee0d51704ea))
+* make DEL remove the internal entries of lists, streams and bloom filters ([684cfa1](https://github.com/hardpointlabs/invar/commit/684cfa1c5a1a91559fbbe9f65a42179aab1936cd))
+
 ## [1.0.34](https://github.com/hardpointlabs/invar/compare/v1.0.33...v1.0.34) (2026-10-12)
 
 
