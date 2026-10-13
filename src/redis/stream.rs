@@ -24,7 +24,7 @@ use kv::kv::{TxIsolation, BoxFuture, Entry, Error as KvError, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use crate::common::session::Session;
-use crate::common::set_keeping_ttl;
+use crate::common::namespace::{self, base_type, resolve_prefix, ElementPrefix};
 use crate::common::{BlockResult, BlockingSignal, Claim, RedisStore, StreamResult, ValueType, WatchRegistry};
 use crate::resp::RespValue;
 
@@ -229,15 +229,22 @@ fn range_end_bound(
 
 async fn read_sentinel(tx: &dyn Tx, public_key: &[u8]) -> Result<StreamMeta, DbError> {
     let item = tx.get(public_key).await?;
-    if item.metadata() != TYPE_STREAM {
+    if base_type(item.metadata()) != TYPE_STREAM {
         return Err(DbError::WrongType);
     }
-    StreamMeta::decode(item.value()).ok_or(DbError::Kv(KvError::KeyNotFound))
+    StreamMeta::decode(namespace::payload(&item)?).ok_or(DbError::Kv(KvError::KeyNotFound))
 }
 
-async fn write_sentinel(tx: &dyn Tx, public_key: &[u8], meta: &StreamMeta) -> Result<(), DbError> {
-    set_keeping_ttl(tx, Entry::new(public_key.to_vec(), meta.encode()).metadata(TYPE_STREAM)).await?;
-    Ok(())
+/// Writes the stream sentinel. `prefix` is the prefix the stream's entries are
+/// stored under; the sentinel records it when it is a namespace and keeps the
+/// key's TTL.
+async fn write_sentinel(
+    tx: &dyn Tx,
+    public_key: &[u8],
+    meta: &StreamMeta,
+    prefix: &ElementPrefix,
+) -> Result<(), DbError> {
+    namespace::write_sentinel(tx, public_key, meta.encode(), TYPE_STREAM, prefix).await
 }
 
 // ---------------------------------------------------------------------------
@@ -553,6 +560,7 @@ pub fn xsetid(
     QueuedOp {
         db_op: Box::new(XSetIdOp {
             public_key: session.public_key(key),
+            node_prefix: session.private_key(key),
             last_id,
         }),
         wire_op: Box::new(OkWire),
@@ -623,6 +631,7 @@ impl DbOp for XAddOp {
         let field_values = self.field_values.clone();
         let registry = self.registry.clone();
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             let mut meta = match read_sentinel(tx, &public_key).await {
                 Ok(m) => m,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
@@ -706,12 +715,12 @@ impl DbOp for XAddOp {
             if is_first {
                 meta.first_id = id;
             }
-            write_sentinel(tx, &public_key, &meta).await?;
+            write_sentinel(tx, &public_key, &meta, &node_prefix).await?;
 
             // Trim if requested.
             if max_len.is_some() || min_id.is_some() {
                 do_trim(tx, &public_key, &node_prefix, &mut meta, max_len, min_id).await?;
-                write_sentinel(tx, &public_key, &meta).await?;
+                write_sentinel(tx, &public_key, &meta, &node_prefix).await?;
             }
 
             // A new entry may satisfy a blocked XREAD client parked on this
@@ -791,6 +800,7 @@ impl DbOp for XRangeOp {
         let count = self.count;
         let reverse = self.reverse;
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             let meta = match read_sentinel(tx, &public_key).await {
                 Ok(m) => m,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
@@ -914,9 +924,10 @@ async fn read_streams(
         // scan_entries is inclusive on the start bound, so bump seq by 1 to
         // start from the next possible entry after `id_arg`.
         let scan_start = id_arg.map(bump_seq);
+        let node_prefix = resolve_prefix(tx, &stream.public_key, &stream.node_prefix).await?;
         let entries = scan_entries(
             tx,
-            &stream.node_prefix,
+            &node_prefix,
             meta.version,
             scan_start.as_ref(),
             None,
@@ -1023,6 +1034,7 @@ impl DbOp for XDelOp {
         let node_prefix = self.node_prefix.clone();
         let ids = self.ids.clone();
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             let mut meta = match read_sentinel(tx, &public_key).await {
                 Ok(m) => m,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
@@ -1052,7 +1064,7 @@ impl DbOp for XDelOp {
                 meta.first_id = StreamEntryId::ZERO;
                 meta.last_id = StreamEntryId::ZERO;
             }
-            write_sentinel(tx, &public_key, &meta).await?;
+            write_sentinel(tx, &public_key, &meta, &node_prefix).await?;
             let result: DbResult = Box::new(deleted);
             Ok(result)
         })
@@ -1075,6 +1087,7 @@ impl DbOp for XTrimOp {
         let max_len = self.max_len;
         let min_id = self.min_id;
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             let mut meta = match read_sentinel(tx, &public_key).await {
                 Ok(m) => m,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
@@ -1085,7 +1098,7 @@ impl DbOp for XTrimOp {
             };
             let before = meta.count;
             do_trim(tx, &public_key, &node_prefix, &mut meta, max_len, min_id).await?;
-            write_sentinel(tx, &public_key, &meta).await?;
+            write_sentinel(tx, &public_key, &meta, &node_prefix).await?;
             let result: DbResult = Box::new((before - meta.count) as i64);
             Ok(result)
         })
@@ -1200,21 +1213,25 @@ async fn do_trim(
 
 struct XSetIdOp {
     public_key: Vec<u8>,
+    node_prefix: Vec<u8>,
     last_id: StreamEntryId,
 }
 
 impl DbOp for XSetIdOp {
     fn run<'a>(&'a self, tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
         let public_key = self.public_key.clone();
+        let node_prefix = self.node_prefix.clone();
         let last_id = self.last_id;
         Box::pin(async move {
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
+            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             let mut meta = match read_sentinel(tx, &public_key).await {
                 Ok(m) => m,
                 Err(DbError::Kv(KvError::KeyNotFound)) => StreamMeta::new(),
                 Err(e) => return Err(e),
             };
             meta.last_id = last_id;
-            write_sentinel(tx, &public_key, &meta).await?;
+            write_sentinel(tx, &public_key, &meta, &node_prefix).await?;
             let result: DbResult = Box::new(());
             Ok(result)
         })
@@ -1454,6 +1471,75 @@ mod tests {
     }
 
     // --- XADD ---
+
+    // --- namespaced layout (RFC 0001) ---
+
+    const NS_S: &[u8] = b"+0:ns-stream-00s";
+
+    fn id(s: &str) -> StreamEntryId {
+        parse_stream_id_arg(s.as_bytes()).expect("valid").expect("not $")
+    }
+
+    fn fv(parts: &[&str]) -> Vec<Bytes> {
+        parts.iter().map(|p| Bytes::copy_from_slice(p.as_bytes())).collect()
+    }
+
+    fn add(s: &Session, at: &str, v: &str) -> QueuedOp {
+        xadd(s, b"st", false, None, None, Some(id(at)), &fv(&["f", v]))
+    }
+
+    /// Runs the op on a legacy twin and on the namespaced one; replies must match.
+    async fn both(legacy: &Session, ns: &Session, build: impl Fn(&Session) -> QueuedOp) -> RespValue {
+        let a = crate::testutil::exec(legacy, build(legacy)).await;
+        let b = crate::testutil::exec(ns, build(ns)).await;
+        assert_eq!(a, b, "a namespaced stream must answer exactly like a legacy one");
+        a
+    }
+
+    #[tokio::test]
+    async fn namespaced_streams_behave_like_legacy_ones() {
+        let (legacy, ns) = (test_session(), test_session());
+        for s in [&legacy, &ns] {
+            for (at, v) in [("1-1", "a"), ("2-1", "b"), ("3-1", "c"), ("4-1", "d")] {
+                crate::testutil::exec(s, add(s, at, v)).await;
+            }
+        }
+        crate::testutil::namespace_key(&ns, b"st", NS_S).await;
+
+        // Reads.
+        both(&legacy, &ns, |s| xlen(s, b"st")).await;
+        both(&legacy, &ns, |s| xrange(s, b"st", None, None, 100)).await;
+        both(&legacy, &ns, |s| xrange(s, b"st", Some(id("2-1")), Some(id("3-1")), 100)).await;
+        both(&legacy, &ns, |s| xrevrange(s, b"st", None, None, 2)).await;
+        both(&legacy, &ns, |s| xinfo_stream(s, b"st")).await;
+        both(&legacy, &ns, |s| xread(s, &fv(&["st"]), vec![Some(id("2-1"))], 10, None)).await;
+
+        // Writes.
+        both(&legacy, &ns, |s| add(s, "5-1", "e")).await;
+        both(&legacy, &ns, |s| xdel(s, b"st", &[id("2-1")])).await;
+        both(&legacy, &ns, |s| xsetid(s, b"st", id("99-0"))).await;
+        both(&legacy, &ns, |s| xtrim_maxlen(s, b"st", 3)).await;
+        both(&legacy, &ns, |s| xtrim_minid(s, b"st", id("4-1"))).await;
+        both(&legacy, &ns, |s| xlen(s, b"st")).await;
+        both(&legacy, &ns, |s| xinfo_stream(s, b"st")).await;
+
+        // Nothing under the name-derived prefix; sentinel still records the namespace.
+        assert_eq!(crate::testutil::entries_under(&ns, &ns.private_key(b"st")).await, 0);
+        assert!(crate::testutil::entries_under(&ns, NS_S).await > 0);
+        let meta = crate::testutil::stored_type_byte(&ns, &ns.public_key(b"st")).await.unwrap();
+        assert_eq!(meta, TYPE_STREAM | crate::common::namespace::NAMESPACE_FLAG);
+    }
+
+    #[tokio::test]
+    async fn a_namespaced_stream_keeps_its_ttl() {
+        let s = test_session();
+        crate::testutil::exec(&s, add(&s, "1-1", "a")).await;
+        crate::testutil::exec(&s, crate::keys::expire(&s, b"st", 100)).await;
+        crate::testutil::namespace_key(&s, b"st", NS_S).await;
+        crate::testutil::exec(&s, add(&s, "2-1", "b")).await;
+        let ttl = crate::testutil::exec(&s, crate::keys::ttl(&s, b"st")).await;
+        assert!(matches!(ttl, RespValue::Integer(n) if (90..=100).contains(&n)), "ttl was {ttl:?}");
+    }
 
     #[tokio::test]
     async fn xadd_auto_id() {
