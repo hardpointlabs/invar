@@ -48,6 +48,10 @@ Create a new branch based on latest master for new feature development. Create a
 
 ## Test
 
+As a general rule, prefer the highest level of test abstraction available- this means the repertoire of integration tests
+in various JSON files in `./test`. Where it's not possible to reliably reproduce a bug without direct interaction with the KeyValueStore,
+Tokio or other Invar internals, Rust-based unit tests are OK.
+
 * To run all Rust-based unit tests, run `cargo test --workspace`
 * To run al the unit tests + the integration tests, run `./run-tests.sh` from the project root
 * Ensure `cargo clippy` doesn't emit any warnings caused by your modifications
