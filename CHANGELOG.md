@@ -1,3 +1,10 @@
+## [1.0.36](https://github.com/hardpointlabs/invar/compare/v1.0.35...v1.0.36) (2026-10-13)
+
+
+### Bug Fixes
+
+* support the Redis 6.2 options of ZRANGE (BYSCORE, BYLEX, REV, LIMIT) ([15c99f4](https://github.com/hardpointlabs/invar/commit/15c99f4bf11f2fdcaa0f1047955f20d16e1c6cae))
+
 ## [1.0.35](https://github.com/hardpointlabs/invar/compare/v1.0.34...v1.0.35) (2026-10-13)
 
 
