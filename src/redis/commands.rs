@@ -1607,16 +1607,47 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
             if args.len() < 4 {
                 return error_op(session, "ERR wrong number of arguments for 'zrange' command");
             }
-            let Some(start) = parse_i64(&args[2]) else {
-                return error_op(session, "ERR value is not an integer or out of range");
+            let opts = match parse_zrange_options(&args[4..]) {
+                Ok(opts) => opts,
+                Err(message) => return error_op(session, message),
             };
-            let Some(stop) = parse_i64(&args[3]) else {
-                return error_op(session, "ERR value is not an integer or out of range");
-            };
-            let with_scores = args
-                .get(4)
-                .is_some_and(|a| a.eq_ignore_ascii_case(b"withscores"));
-           zset::zrange(session, &args[1], start, stop, with_scores)
+            match opts.kind {
+                ZRangeKind::Rank => {
+                    let Some(start) = parse_i64(&args[2]) else {
+                        return error_op(session, "ERR value is not an integer or out of range");
+                    };
+                    let Some(stop) = parse_i64(&args[3]) else {
+                        return error_op(session, "ERR value is not an integer or out of range");
+                    };
+                    if opts.reverse {
+                        zset::zrevrange(session, &args[1], start, stop, opts.with_scores)
+                    } else {
+                        zset::zrange(session, &args[1], start, stop, opts.with_scores)
+                    }
+                }
+                // With REV the bounds are given as max then min, the same order
+                // ZREVRANGEBYSCORE and ZREVRANGEBYLEX take them in.
+                ZRangeKind::Score => {
+                    let first = String::from_utf8_lossy(&args[2]).into_owned();
+                    let second = String::from_utf8_lossy(&args[3]).into_owned();
+                    if opts.reverse {
+                        zset::zrevrangebyscore(session, &args[1], &first, &second, opts.with_scores, opts.limit)
+                    } else {
+                        zset::zrangebyscore(session, &args[1], &first, &second, opts.with_scores, opts.limit)
+                    }
+                }
+                ZRangeKind::Lex => {
+                    let first = String::from_utf8_lossy(&args[2]).into_owned();
+                    let second = String::from_utf8_lossy(&args[3]).into_owned();
+                    let (offset, count) = opts.limit.unwrap_or((0, 0));
+                    let has_limit = opts.limit.is_some();
+                    if opts.reverse {
+                        zset::zrevrangebylex(session, &args[1], &first, &second, offset, count, has_limit)
+                    } else {
+                        zset::zrangebylex(session, &args[1], &first, &second, offset, count, has_limit)
+                    }
+                }
+            }
         }
         b"zrangebylex" => {
             if args.len() < 4 {
@@ -2506,6 +2537,65 @@ fn parse_i64(bytes: &[u8]) -> Option<i64> {
 }
 
 /// Parses a base-10 64-bit float, stripping trailing garbage.
+/// How a `ZRANGE` interprets its two range arguments.
+enum ZRangeKind {
+    /// Positions in the sorted order (the default).
+    Rank,
+    /// Score bounds (`BYSCORE`).
+    Score,
+    /// Lexicographic bounds (`BYLEX`).
+    Lex,
+}
+
+/// The options that follow `ZRANGE key min max`.
+struct ZRangeOptions {
+    kind: ZRangeKind,
+    reverse: bool,
+    with_scores: bool,
+    /// `LIMIT offset count`, only valid with `BYSCORE` or `BYLEX`.
+    limit: Option<(i64, i64)>,
+}
+
+/// Parses `[BYSCORE | BYLEX] [REV] [LIMIT offset count] [WITHSCORES]`, which
+/// may appear in any order, following Redis 6.2: each of `BYSCORE`, `BYLEX`
+/// and `REV` is accepted at most once, `BYSCORE` and `BYLEX` are mutually
+/// exclusive, and anything else is a syntax error.
+fn parse_zrange_options(opts: &[Bytes]) -> Result<ZRangeOptions, &'static str> {
+    const SYNTAX: &str = "ERR syntax error";
+    let (mut kind, mut reverse, mut with_scores, mut limit) = (None, false, false, None);
+    let mut i = 0;
+    while i < opts.len() {
+        let opt = &opts[i];
+        let remaining = opts.len() - i - 1;
+        if opt.eq_ignore_ascii_case(b"withscores") {
+            with_scores = true;
+        } else if opt.eq_ignore_ascii_case(b"limit") && remaining >= 2 {
+            let (Some(offset), Some(count)) = (parse_i64(&opts[i + 1]), parse_i64(&opts[i + 2])) else {
+                return Err("ERR value is not an integer or out of range");
+            };
+            limit = Some((offset, count));
+            i += 2;
+        } else if opt.eq_ignore_ascii_case(b"rev") && !reverse {
+            reverse = true;
+        } else if opt.eq_ignore_ascii_case(b"byscore") && kind.is_none() {
+            kind = Some(ZRangeKind::Score);
+        } else if opt.eq_ignore_ascii_case(b"bylex") && kind.is_none() {
+            kind = Some(ZRangeKind::Lex);
+        } else {
+            return Err(SYNTAX);
+        }
+        i += 1;
+    }
+    let kind = kind.unwrap_or(ZRangeKind::Rank);
+    if limit.is_some() && matches!(kind, ZRangeKind::Rank) {
+        return Err("ERR syntax error, LIMIT is only supported in combination with either BYSCORE or BYLEX");
+    }
+    if with_scores && matches!(kind, ZRangeKind::Lex) {
+        return Err("ERR syntax error, WITHSCORES not supported in combination with BYLEX");
+    }
+    Ok(ZRangeOptions { kind, reverse, with_scores, limit })
+}
+
 fn parse_f64(bytes: &[u8]) -> Option<f64> {
     std::str::from_utf8(bytes).ok()?.trim().parse().ok()
 }
@@ -2597,6 +2687,36 @@ mod tests {
             dispatch(&mut session, &["get", "nope"]).await,
             vec![RespValue::BulkString(None)]
         );
+    }
+
+    /// The exact error text clients see for invalid `ZRANGE` option combinations.
+    #[tokio::test]
+    async fn zrange_rejects_invalid_option_combinations_with_redis_messages() {
+        let mut session = test_session();
+        dispatch(&mut session, &["zadd", "z", "1", "a", "2", "b"]).await;
+
+        let error = |reply: Vec<RespValue>| match reply.into_iter().next() {
+            Some(RespValue::Error(e)) => String::from_utf8(e.to_vec()).unwrap(),
+            other => panic!("expected an error, got {other:?}"),
+        };
+
+        for (args, expected) in [
+            (vec!["zrange", "z", "0", "-1", "limit", "0", "1"],
+             "ERR syntax error, LIMIT is only supported in combination with either BYSCORE or BYLEX"),
+            (vec!["zrange", "z", "-", "+", "bylex", "withscores"],
+             "ERR syntax error, WITHSCORES not supported in combination with BYLEX"),
+            (vec!["zrange", "z", "0", "1", "byscore", "bylex"], "ERR syntax error"),
+            (vec!["zrange", "z", "0", "1", "rev", "rev"], "ERR syntax error"),
+            (vec!["zrange", "z", "0", "1", "byscore", "limit", "1"], "ERR syntax error"),
+            (vec!["zrange", "z", "0", "-1", "bogus"], "ERR syntax error"),
+            (vec!["zrange", "z", "0", "1", "byscore", "limit", "a", "b"],
+             "ERR value is not an integer or out of range"),
+            (vec!["zrange", "z", "a", "b"], "ERR value is not an integer or out of range"),
+            (vec!["zrange", "z", "a", "b", "byscore"], "ERR min or max is not a float"),
+            (vec!["zrange", "z", "b", "d", "bylex"], "ERR min or max not valid string range item"),
+        ] {
+            assert_eq!(error(dispatch(&mut session, &args).await), expected, "{args:?}");
+        }
     }
 
     #[tokio::test]

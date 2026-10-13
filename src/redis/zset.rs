@@ -365,12 +365,12 @@ fn parse_float_bound(s: &str) -> Result<(f64, bool), DbError> {
     if let Some(rest) = s.strip_prefix('(') {
         return match rest.parse::<f64>() {
             Ok(val) => Ok((val, true)),
-            Err(_) => Err(DbError::Redis("min or max value is not a float".into())),
+            Err(_) => Err(DbError::Redis("min or max is not a float".into())),
         };
     }
     match s.parse::<f64>() {
         Ok(val) => Ok((val, false)),
-        Err(_) => Err(DbError::Redis("min or max value is not a float".into())),
+        Err(_) => Err(DbError::Redis("min or max is not a float".into())),
     }
 }
 
@@ -386,7 +386,7 @@ fn parse_lex_bound(s: &str) -> Result<(Option<Vec<u8>>, bool), DbError> {
     if let Some(rest) = s.strip_prefix('[') {
         return Ok((Some(rest.as_bytes().to_vec()), false));
     }
-    Err(DbError::Redis("min or max value is not a string".into()))
+    Err(DbError::Redis("min or max not valid string range item".into()))
 }
 
 /// Filters members by the lexicographic range `[min, max]`/`(min, max)`,
@@ -1767,12 +1767,10 @@ impl DbOp for RangeByScoreOp {
             }
 
             if has_limit {
-                let mut offset = limit_offset;
+                let offset = limit_offset;
                 let mut count = limit_count;
-                if offset < 0 {
-                    offset = 0;
-                }
-                if offset >= filtered.len() as i64 {
+                // A negative offset selects nothing, as in Redis.
+                if offset < 0 || offset >= filtered.len() as i64 {
                     let empty: Vec<Vec<u8>> = Vec::new();
                     let result: DbResult = Box::new(empty);
                     return Ok(result);
@@ -1826,12 +1824,10 @@ impl DbOp for RangeByLexOp {
             }
 
             if has_limit {
-                let mut offset = limit_offset;
+                let offset = limit_offset;
                 let mut count = limit_count;
-                if offset < 0 {
-                    offset = 0;
-                }
-                if offset >= result.len() as i64 {
+                // A negative offset selects nothing, as in Redis.
+                if offset < 0 || offset >= result.len() as i64 {
                     let empty: Vec<Vec<u8>> = Vec::new();
                     let result: DbResult = Box::new(empty);
                     return Ok(result);
