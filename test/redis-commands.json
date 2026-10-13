@@ -3449,5 +3449,31 @@
       ["EXPIRE", "ttl_keep_bloom_insert", "100"],
       ["BF.INSERT", "ttl_keep_bloom_insert", "ITEMS", "b"]
     ]
+  },
+  {
+    "name": "DEL stream then recreate does not resurrect old entries",
+    "command": ["XRANGE", "del_stream_recreate", "-", "+"],
+    "expected": [["2-1", ["f", "new"]]],
+    "type": "array",
+    "version": "5.0.0",
+    "description": "Entries of a deleted stream must not reappear when the key is recreated",
+    "setup": [
+      ["XADD", "del_stream_recreate", "1-1", "f", "old"],
+      ["DEL", "del_stream_recreate"],
+      ["XADD", "del_stream_recreate", "2-1", "f", "new"]
+    ]
+  },
+  {
+    "name": "DEL bloom filter then recreate forgets old items",
+    "command": ["BF.EXISTS", "del_bloom_recreate", "old"],
+    "expected": 0,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "Items of a deleted bloom filter must not be present in a filter recreated under the same name",
+    "setup": [
+      ["BF.ADD", "del_bloom_recreate", "old"],
+      ["DEL", "del_bloom_recreate"],
+      ["BF.ADD", "del_bloom_recreate", "other"]
+    ]
   }
 ]
