@@ -7,7 +7,7 @@ use kv::{
     fjall::FjallDb,
     slate::{SlateDb, SlateDbOpts},
 };
-use redis::{ListenAddr, RedisListener, RedisStore};
+use redis::{ListenAddr, RedisListener, RedisStore, DEFAULT_CONFLICT_RETRY_COUNT};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -164,6 +164,11 @@ struct Cli {
     #[arg(long, env = "INVAR_CACHE_MEM_LIMIT", default_value = "16")]
     cache_mem_limit: Option<usize>,
 
+    /// How many times a write is retried after it loses a conflict with a
+    /// concurrent writer before the client gets an error (`0` disables retries)
+    #[arg(long, env = "INVAR_CONFLICT_RETRY_COUNT", default_value_t = DEFAULT_CONFLICT_RETRY_COUNT)]
+    conflict_retry_count: usize,
+
     /// Grace period for closing the store on shutdown (e.g. "10s", "500ms", "1m")
     /// Invar will shut down earlier if graceful shutdown completes sooner
     #[arg(
@@ -232,7 +237,8 @@ async fn main() {
 
     ready.store(true, Ordering::Release);
 
-    let listener = RedisListener::new(cli.redis_addr.clone(), store.clone());
+    let listener = RedisListener::new(cli.redis_addr.clone(), store.clone())
+        .with_conflict_retry_count(cli.conflict_retry_count);
 
     tokio::select! {
             result = listener.serve() => {

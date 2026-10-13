@@ -29,6 +29,7 @@ mod stream;
 #[cfg(test)]
 mod watch_tests;
 
+pub use common::session::DEFAULT_CONFLICT_RETRY_COUNT;
 pub use common::{RedisStore, Session, WatchRegistry};
 pub use listener::{ListenAddr, RedisListener};
 pub use pubsub::PubSubRegistry;

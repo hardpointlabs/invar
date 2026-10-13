@@ -24,6 +24,41 @@ use crate::resp::RespValue;
 
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
+/// How many times a batch is re-run after losing a write conflict to a
+/// concurrent writer, before the client is sent an error, unless configured
+/// otherwise.
+pub const DEFAULT_CONFLICT_RETRY_COUNT: usize = 16;
+
+/// The retry budget of one batch.
+struct ConflictRetries {
+    attempts: usize,
+    max: usize,
+}
+
+impl ConflictRetries {
+    fn new(max: usize) -> Self {
+        Self { attempts: 0, max }
+    }
+
+    /// Spends one retry and returns its 1-based number, or `None` once the
+    /// budget is used up. Counts the retry, or the final failure, in the
+    /// `invar_conflict_*` metrics.
+    fn next(&mut self) -> Option<usize> {
+        if self.attempts >= self.max {
+            metrics::counter!("invar_conflict_failures").increment(1);
+            return None;
+        }
+        self.attempts += 1;
+        metrics::counter!("invar_conflict_retries").increment(1);
+        Some(self.attempts)
+    }
+}
+
+/// The reply for a batch that kept losing write conflicts.
+fn conflict_error() -> RespValue {
+    RespValue::Error(Bytes::from_static(b"ERR Couldn't commit transaction"))
+}
+
 /// Raised by a command when it is about to park waiting for another client's
 /// write (`BZPOPMIN`, `XREAD BLOCK`, ...).
 ///
@@ -110,6 +145,8 @@ pub struct Session {
     registry: Arc<WatchRegistry>,
     pubsub: Arc<PubSubRegistry>,
     blocking: BlockingSignal,
+    /// Retry budget for a batch that loses write conflicts.
+    conflict_retry_count: usize,
 }
 
 fn is_retryable_conflict(outcome: &Result<DbResult, DbError>) -> bool {
@@ -148,7 +185,14 @@ impl Session {
             registry,
             pubsub,
             blocking: BlockingSignal::new(),
+            conflict_retry_count: DEFAULT_CONFLICT_RETRY_COUNT,
         }
+    }
+
+    /// Sets how many times a batch is retried after a write conflict before
+    /// the client gets an error (`0` fails on the first conflict).
+    pub fn set_conflict_retry_count(&mut self, count: usize) {
+        self.conflict_retry_count = count;
     }
 
     /// Handle a blocking command uses to announce it is about to wait, and the
@@ -477,11 +521,9 @@ impl Session {
         // overlapping write sets) make the optimistic store return
         // `Error::Conflict` — addStandardJob and friends must not fail.
         // Re-run the same batch in a fresh transaction until the commit lands.
-        const MAX_CONFLICT_RETRIES: usize = 16;
-
         let mut outcomes: Vec<Result<DbResult, DbError>>;
 
-        let mut conflict_retries = 0usize;
+        let mut conflict_retries = ConflictRetries::new(self.conflict_retry_count);
         'commit: loop {
             // Try to acquire a tx
             let tx = match self.store.begin(mutating, isolation).await {
@@ -548,16 +590,11 @@ impl Session {
                     // built on is stale. Abandon this attempt (batch or not) and retry
                     // the entire queue from a fresh transaction, same as a commit-time
                     // conflict.
-                    conflict_retries += 1;
-                    if conflict_retries >= MAX_CONFLICT_RETRIES {
-                        metrics::counter!("invar_conflict_failures").increment(1);
+                    let Some(attempt) = conflict_retries.next() else {
                         self.queue.clear();
-                        return vec![RespValue::Error(Bytes::from_static(
-                            b"ERR Couldn't commit transaction",
-                        ))];
-                    }
-                    metrics::counter!("invar_conflict_retries").increment(1);
-                    tokio::time::sleep(Duration::from_millis(conflict_retries as u64)).await;
+                        return vec![conflict_error()];
+                    };
+                    tokio::time::sleep(Duration::from_millis(attempt as u64)).await;
                     continue 'commit;
                 }
 
@@ -605,22 +642,19 @@ impl Session {
                     return vec![RespValue::Array(None)];
                 }
                 Err(e) => match e {
-                    KvError::Conflict if conflict_retries < MAX_CONFLICT_RETRIES => {
-                        conflict_retries += 1;
-                        let backoff = Duration::from_millis(5) * 2u32.pow(conflict_retries.min(6) as u32)
-                            + Duration::from_millis(rand::random::<u64>() % 10);
-                        tracing::debug!(ops = outcomes.len(), retries = conflict_retries, "write tx conflict; retrying batch");
-                        metrics::counter!("invar_conflict_retries").increment(1);
-                        tokio::time::sleep(backoff).await;
-                    }
-                    KvError::Conflict => {
-                        release_claims(&self.queue, &outcomes);
-                        self.queue.clear();
-                        metrics::counter!("invar_conflict_failures").increment(1);
-                        return vec![RespValue::Error(Bytes::from_static(
-                            b"ERR Couldn't commit transaction",
-                        ))];
-                    }
+                    KvError::Conflict => match conflict_retries.next() {
+                        Some(attempt) => {
+                            let backoff = Duration::from_millis(5) * 2u32.pow(attempt.min(6) as u32)
+                                + Duration::from_millis(rand::random::<u64>() % 10);
+                            tracing::debug!(ops = outcomes.len(), retries = attempt, "write tx conflict; retrying batch");
+                            tokio::time::sleep(backoff).await;
+                        }
+                        None => {
+                            release_claims(&self.queue, &outcomes);
+                            self.queue.clear();
+                            return vec![conflict_error()];
+                        }
+                    },
                     e => {
                         release_claims(&self.queue, &outcomes);
                         self.queue.clear();
@@ -743,6 +777,17 @@ mod tests {
         // ...and the next command starts from a cleared signal again.
         let rx = signal.arm();
         assert!(!*rx.borrow());
+    }
+
+    #[test]
+    fn conflict_retry_budget_is_spent_one_retry_at_a_time() {
+        let mut retries = ConflictRetries::new(3);
+        assert_eq!((retries.next(), retries.next(), retries.next()), (Some(1), Some(2), Some(3)));
+        assert_eq!(retries.next(), None);
+        assert_eq!(retries.next(), None, "an exhausted budget stays exhausted");
+
+        assert_eq!(ConflictRetries::new(0).next(), None, "0 disables retries");
+        assert_eq!(DEFAULT_CONFLICT_RETRY_COUNT, 16);
     }
 
     #[test]

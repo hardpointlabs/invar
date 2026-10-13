@@ -2719,6 +2719,97 @@ mod tests {
         }
     }
 
+    /// A store whose transactions fail their first `failures` commits with a
+    /// write conflict, the way an optimistic store does when a concurrent
+    /// writer got there first.
+    struct ConflictingStore {
+        inner: std::sync::Arc<dyn crate::common::RedisStore>,
+        failures: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        commit_attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    struct ConflictingTx {
+        inner: Box<dyn kv::kv::Tx>,
+        failures: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        commit_attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl kv::kv::Tx for ConflictingTx {
+        async fn get(&self, key: &[u8]) -> Result<kv::kv::Item, kv::kv::Error> { self.inner.get(key).await }
+        fn set(&self, entry: kv::kv::Entry) -> Result<(), kv::kv::Error> { self.inner.set(entry) }
+        fn delete(&self, key: &[u8]) -> Result<(), kv::kv::Error> { self.inner.delete(key) }
+        async fn new_range_iterator(&self, start: std::ops::Bound<&[u8]>, end: std::ops::Bound<&[u8]>)
+            -> Result<Box<dyn kv::kv::KeyValueIterator>, kv::kv::Error> { self.inner.new_range_iterator(start, end).await }
+        async fn new_prefix_iterator(&self, prefix: &[u8]) -> Result<Box<dyn kv::kv::KeyValueIterator>, kv::kv::Error> {
+            self.inner.new_prefix_iterator(prefix).await
+        }
+        async fn commit(self: Box<Self>) -> Result<Option<kv::kv::WriteHandle>, kv::kv::Error> {
+            use std::sync::atomic::Ordering::SeqCst;
+            self.commit_attempts.fetch_add(1, SeqCst);
+            if self.failures.try_update(SeqCst, SeqCst, |n| n.checked_sub(1)).is_ok() {
+                self.inner.discard();
+                return Err(kv::kv::Error::Conflict);
+            }
+            self.inner.commit().await
+        }
+        fn discard(self: Box<Self>) { self.inner.discard() }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::common::RedisStore for ConflictingStore {
+        async fn begin(&self, mutating: bool, isolation: kv::kv::TxIsolation) -> Result<Box<dyn kv::kv::Tx>, kv::kv::Error> {
+            Ok(Box::new(ConflictingTx {
+                inner: self.inner.begin(mutating, isolation).await?,
+                failures: self.failures.clone(),
+                commit_attempts: self.commit_attempts.clone(),
+            }))
+        }
+        async fn close(&self) -> Result<(), kv::kv::Error> { self.inner.close().await }
+        async fn sync(&self) -> Result<(), kv::kv::Error> { self.inner.sync().await }
+        async fn destroy(&self) -> Result<(), kv::kv::Error> { self.inner.destroy().await }
+        async fn drop_prefix(&self, p: &[u8]) -> Result<(), kv::kv::Error> { self.inner.drop_prefix(p).await }
+        async fn await_until(&self, h: kv::kv::WriteHandle, d: std::time::Duration) -> Result<bool, kv::kv::Error> {
+            self.inner.await_until(h, d).await
+        }
+    }
+
+    /// Runs `SET k v` on a session allowed `retry_count` retries over a store
+    /// that conflicts on its first `failures` commits. Returns the reply and
+    /// how many commits were attempted.
+    async fn set_with_conflicts(retry_count: usize, failures: usize) -> (RespValue, usize) {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let attempts = std::sync::Arc::new(AtomicUsize::new(0));
+        let store = std::sync::Arc::new(ConflictingStore {
+            inner: crate::testutil::test_store(),
+            failures: std::sync::Arc::new(AtomicUsize::new(failures)),
+            commit_attempts: attempts.clone(),
+        });
+        let mut session = Session::new(store, std::sync::Arc::new(crate::common::WatchRegistry::new()));
+        session.set_conflict_retry_count(retry_count);
+        let reply = dispatch(&mut session, &["set", "k", "v"]).await.remove(0);
+        (reply, attempts.load(SeqCst))
+    }
+
+    #[tokio::test]
+    async fn a_conflicting_write_is_retried_up_to_the_configured_count() {
+        let ok = RespValue::SimpleString(Bytes::from_static(b"OK"));
+        let failed = RespValue::Error(Bytes::from_static(b"ERR Couldn't commit transaction"));
+
+        // (retries allowed, conflicts injected, succeeds, commit attempts made)
+        for (retries, conflicts, succeeds, attempts) in [
+            (0, 0, true, 1),
+            (0, 1, false, 1),   // no retries: the first conflict is fatal
+            (2, 2, true, 3),    // exactly enough retries
+            (2, 3, false, 3),   // one conflict too many
+            (5, 3, true, 4),
+        ] {
+            let (reply, made) = set_with_conflicts(retries, conflicts).await;
+            assert_eq!(reply, if succeeds { ok.clone() } else { failed.clone() }, "retries={retries} conflicts={conflicts}");
+            assert_eq!(made, attempts, "commit attempts for retries={retries} conflicts={conflicts}");
+        }
+    }
+
     #[tokio::test]
     async fn wrong_arity_is_an_error() {
         let mut session = test_session();
