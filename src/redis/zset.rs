@@ -44,7 +44,7 @@ use kv::kv::{TxIsolation, BoxFuture, Entry, Error as KvError, Tx};
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use smallvec::{smallvec, SmallVec};
 use crate::common::session::Session;
-use crate::common::set_keeping_ttl;
+use crate::common::namespace::{self, base_type, resolve_prefix, ElementPrefix};
 use crate::common::{BlockResult, BlockingSignal, Claim, PopResult, RedisStore, ValueType, WatchRegistry};
 use crate::resp::RespValue;
 
@@ -116,15 +116,30 @@ fn score_bytes(score: f64) -> Vec<u8> {
 #[derive(Clone)]
 struct NodeRef {
     public_key: Vec<u8>,
-    node_prefix: Vec<u8>,
+    node_prefix: ElementPrefix,
 }
 
 impl NodeRef {
+    /// A handle whose prefix is the one derived from the key's name. Use
+    /// [`NodeRef::resolved`] before touching the index entries of an existing
+    /// sorted set: its sentinel may record a different prefix.
     fn new(session: &Session, key: &[u8]) -> Self {
         Self {
             public_key: session.public_key(key),
-            node_prefix: session.private_key(key),
+            node_prefix: ElementPrefix::legacy(session.private_key(key)),
         }
+    }
+
+    /// The same sorted set with the prefix its sentinel records (or the
+    /// name-derived one when it records none). Idempotent.
+    async fn resolved(&self, tx: &dyn Tx) -> Result<NodeRef, DbError> {
+        if self.node_prefix.is_explicit() {
+            return Ok(self.clone());
+        }
+        Ok(NodeRef {
+            public_key: self.public_key.clone(),
+            node_prefix: resolve_prefix(tx, &self.public_key, &self.node_prefix).await?,
+        })
     }
 
     /// `-<db>:<key>:score:<8B encScore>:<member>` (mirroring Go's
@@ -178,10 +193,10 @@ struct MemberScore {
 /// missing key.
 async fn read_sentinel(tx: &dyn Tx, public_key: &[u8]) -> Result<u32, DbError> {
     let item = tx.get(public_key).await?;
-    if item.metadata() != TYPE_SORTED_SET {
+    if base_type(item.metadata()) != TYPE_SORTED_SET {
         return Err(DbError::WrongType);
     }
-    let val = item.value();
+    let val = namespace::payload(&item)?;
     if val.len() < 4 {
         return Err(DbError::Kv(KvError::KeyNotFound));
     }
@@ -200,20 +215,23 @@ async fn zset_count(tx: &dyn Tx, public_key: &[u8]) -> Result<Option<u32>, DbErr
     }
 }
 
-/// Writes the zset sentinel entry with sorted-set metadata.
-async fn write_sentinel(tx: &dyn Tx, public_key: &[u8], count: u32) -> Result<(), DbError> {
-    set_keeping_ttl(
-        tx,
-        Entry::new(public_key.to_vec(), count.to_be_bytes().to_vec()).metadata(TYPE_SORTED_SET),
-    )
-    .await?;
-    Ok(())
+/// Writes the zset sentinel entry with sorted-set metadata. `prefix` is the
+/// prefix the index entries are stored under; the sentinel records it when it
+/// is a namespace and keeps the key's TTL.
+async fn write_sentinel(
+    tx: &dyn Tx,
+    public_key: &[u8],
+    count: u32,
+    prefix: &ElementPrefix,
+) -> Result<(), DbError> {
+    namespace::write_sentinel(tx, public_key, count.to_be_bytes().to_vec(), TYPE_SORTED_SET, prefix).await
 }
 
 /// Loads every member in score order (ascending, with member bytes as the
 /// tie-break). An absent key yields an empty list; a key holding another
 /// value type is an error.
 async fn load_all_members(tx: &dyn Tx, node: &NodeRef) -> Result<Vec<MemberScore>, DbError> {
+    let node = &node.resolved(tx).await?;
     if zset_count(tx, &node.public_key).await?.is_none() {
         return Ok(Vec::new());
     }
@@ -243,6 +261,7 @@ async fn load_all_members(tx: &dyn Tx, node: &NodeRef) -> Result<Vec<MemberScore
 /// Deletes every score and member index key plus the sentinel (mirroring Go's
 /// `clearInternalKeys`).
 async fn clear_internal_keys(tx: &dyn Tx, node: &NodeRef) -> Result<(), DbError> {
+    let node = &node.resolved(tx).await?;
     let mut score_keys = Vec::new();
     {
         let mut it = tx.new_prefix_iterator(&node.score_prefix()).await?;
@@ -287,6 +306,7 @@ async fn clear_internal_keys(tx: &dyn Tx, node: &NodeRef) -> Result<(), DbError>
 /// empty. The shared primitive used by `ZPOPMIN`, the `BZPOPMIN` claim side
 /// and the `ZADD` wake-up path. Mirrors Go's `popOneMin`.
 async fn pop_one_min(tx: &dyn Tx, node: &NodeRef) -> Result<Option<MemberScore>, DbError> {
+    let node = &node.resolved(tx).await?;
     let entries = load_all_members(tx, node).await?;
     if entries.is_empty() {
         return Ok(None);
@@ -298,7 +318,7 @@ async fn pop_one_min(tx: &dyn Tx, node: &NodeRef) -> Result<Option<MemberScore>,
     if new_count == 0 {
         tx.delete(&node.public_key)?;
     } else {
-        write_sentinel(tx, &node.public_key, new_count).await?;
+        write_sentinel(tx, &node.public_key, new_count, &node.node_prefix).await?;
     }
     Ok(Some(MemberScore {
         member: e.member.clone(),
@@ -309,6 +329,7 @@ async fn pop_one_min(tx: &dyn Tx, node: &NodeRef) -> Result<Option<MemberScore>,
 /// Removes and returns the single element with the highest score, or `None`
 /// if empty. Mirrors Go's `popOneMax`.
 async fn pop_one_max(tx: &dyn Tx, node: &NodeRef) -> Result<Option<MemberScore>, DbError> {
+    let node = &node.resolved(tx).await?;
     let entries = load_all_members(tx, node).await?;
     if entries.is_empty() {
         return Ok(None);
@@ -320,7 +341,7 @@ async fn pop_one_max(tx: &dyn Tx, node: &NodeRef) -> Result<Option<MemberScore>,
     if new_count == 0 {
         tx.delete(&node.public_key)?;
     } else {
-        write_sentinel(tx, &node.public_key, new_count).await?;
+        write_sentinel(tx, &node.public_key, new_count, &node.node_prefix).await?;
     }
     Ok(Some(MemberScore {
         member: e.member.clone(),
@@ -428,6 +449,7 @@ fn filter_lex_range(
 
 /// Loads a zset as a member→score map (mirroring Go's `loadZSetMap`).
 async fn load_zset_map(tx: &dyn Tx, node: &NodeRef) -> Result<HashMap<Vec<u8>, f64>, DbError> {
+    let node = &node.resolved(tx).await?;
     let mut map = HashMap::new();
     for e in load_all_members(tx, node).await? {
         map.insert(e.member, e.score);
@@ -576,7 +598,7 @@ async fn store_zset_result(
         tx.set(Entry::new(dest.score_key(e.score, &e.member), Vec::new()))?;
         tx.set(Entry::new(dest.member_key(&e.member), score_bytes(e.score)))?;
     }
-    write_sentinel(tx, &dest.public_key, members.len() as u32).await?;
+    write_sentinel(tx, &dest.public_key, members.len() as u32, &dest.node_prefix).await?;
     Ok(members.len() as i64)
 }
 
@@ -1227,6 +1249,7 @@ impl DbOp for ZScoreOp {
         let node = self.node.clone();
         let member = self.member.clone();
         Box::pin(async move {
+            let node = node.resolved(tx).await?;
             if zset_count(tx, &node.public_key).await?.is_none() {
                 let result: DbResult = Box::new(None::<f64>);
                 return Ok(result);
@@ -1261,6 +1284,7 @@ impl DbOp for ZRemOp {
         let node = self.node.clone();
         let members = self.members.clone();
         Box::pin(async move {
+            let node = node.resolved(tx).await?;
             let mut count = match zset_count(tx, &node.public_key).await? {
                 Some(count) => count,
                 None => {
@@ -1292,7 +1316,7 @@ impl DbOp for ZRemOp {
             if count == 0 {
                 tx.delete(&node.public_key)?;
             } else {
-                write_sentinel(tx, &node.public_key, count).await?;
+                write_sentinel(tx, &node.public_key, count, &node.node_prefix).await?;
             }
             let result: DbResult = Box::new(removed);
             Ok(result)
@@ -1315,6 +1339,7 @@ impl DbOp for RangeByRankOp {
         let (start, stop, with_scores, reverse) =
             (self.start, self.stop, self.with_scores, self.reverse);
         Box::pin(async move {
+            let node = node.resolved(tx).await?;
             let entries = load_all_members(tx, &node).await?;
             let n = entries.len();
             let Some((lo, hi)) = range_indexes(n, start, stop) else {
@@ -1357,6 +1382,7 @@ impl DbOp for RankOp {
         let member = self.member.clone();
         let reverse = self.reverse;
         Box::pin(async move {
+            let node = node.resolved(tx).await?;
             let entries = load_all_members(tx, &node).await?;
             let mut rank = None;
             for (i, e) in entries.iter().enumerate() {
@@ -1388,6 +1414,7 @@ impl DbOp for ScoreRangeCountOp {
         let min_str = self.min_str.clone();
         let max_str = self.max_str.clone();
         Box::pin(async move {
+            let node = node.resolved(tx).await?;
             let entries = load_all_members(tx, &node).await?;
             let (min_val, min_excl) = parse_float_bound(&min_str)?;
             let (max_val, max_excl) = parse_float_bound(&max_str)?;
@@ -1447,6 +1474,7 @@ impl DbOp for ZAddOp {
         let args = self.args.clone();
         let registry = self.registry.clone();
         Box::pin(async move {
+            let node = node.resolved(tx).await?;
             if args.is_empty() {
                 return Err(DbError::Redis(
                     "wrong number of arguments for 'zadd' command".into(),
@@ -1598,7 +1626,7 @@ impl DbOp for ZAddOp {
             }
 
             if added > 0 || changed > 0 {
-                write_sentinel(tx, &node.public_key, count).await?;
+                write_sentinel(tx, &node.public_key, count, &node.node_prefix).await?;
             }
 
             // After persisting the write, claim the front waiter (if any) and
@@ -1668,6 +1696,7 @@ impl DbOp for ZIncrByOp {
         let increment = self.increment;
         let member = self.member.clone();
         Box::pin(async move {
+            let node = node.resolved(tx).await?;
             let existing_count = zset_count(tx, &node.public_key).await?;
             let member_key = node.member_key(&member);
             let score = match tx.get(&member_key).await {
@@ -1681,7 +1710,7 @@ impl DbOp for ZIncrByOp {
                     tx.set(Entry::new(node.score_key(increment, &member), Vec::new()))?;
                     tx.set(Entry::new(member_key, score_bytes(increment)))?;
                     let new_count = existing_count.map_or(1, |c| c + 1);
-                    write_sentinel(tx, &node.public_key, new_count).await?;
+                    write_sentinel(tx, &node.public_key, new_count, &node.node_prefix).await?;
                     let result: DbResult = Box::new(increment);
                     return Ok(result);
                 }
@@ -1736,6 +1765,7 @@ impl DbOp for RangeByScoreOp {
             self.reverse,
         );
         Box::pin(async move {
+            let node = node.resolved(tx).await?;
             let entries = load_all_members(tx, &node).await?;
             let (min_val, min_excl) = parse_float_bound(&min_str)?;
             let (max_val, max_excl) = parse_float_bound(&max_str)?;
@@ -1813,6 +1843,7 @@ impl DbOp for RangeByLexOp {
             self.reverse,
         );
         Box::pin(async move {
+            let node = node.resolved(tx).await?;
             let entries = load_all_members(tx, &node).await?;
             let members: Vec<Vec<u8>> = entries.iter().map(|e| e.member.clone()).collect();
             let mut result = filter_lex_range(&members, &min_str, &max_str)?;
@@ -1860,6 +1891,7 @@ impl DbOp for LexCountOp {
         let min_str = self.min_str.clone();
         let max_str = self.max_str.clone();
         Box::pin(async move {
+            let node = node.resolved(tx).await?;
             let entries = load_all_members(tx, &node).await?;
             let members: Vec<Vec<u8>> = entries.iter().map(|e| e.member.clone()).collect();
             let result = filter_lex_range(&members, &min_str, &max_str)?;
@@ -1881,6 +1913,7 @@ impl DbOp for RemRangeByRankOp {
         let node = self.node.clone();
         let (start, stop) = (self.start, self.stop);
         Box::pin(async move {
+            let node = node.resolved(tx).await?;
             let entries = load_all_members(tx, &node).await?;
             let n = entries.len();
             let Some((lo, hi)) = range_indexes(n, start, stop) else {
@@ -1897,7 +1930,7 @@ impl DbOp for RemRangeByRankOp {
             if new_count == 0 {
                 tx.delete(&node.public_key)?;
             } else {
-                write_sentinel(tx, &node.public_key, new_count as u32).await?;
+                write_sentinel(tx, &node.public_key, new_count as u32, &node.node_prefix).await?;
             }
             let result: DbResult = Box::new(removed);
             Ok(result)
@@ -1918,6 +1951,7 @@ impl DbOp for RemRangeByScoreOp {
         let min_str = self.min_str.clone();
         let max_str = self.max_str.clone();
         Box::pin(async move {
+            let node = node.resolved(tx).await?;
             let entries = load_all_members(tx, &node).await?;
             let (min_val, min_excl) = parse_float_bound(&min_str)?;
             let (max_val, max_excl) = parse_float_bound(&max_str)?;
@@ -1956,7 +1990,7 @@ impl DbOp for RemRangeByScoreOp {
             if new_count == 0 {
                 tx.delete(&node.public_key)?;
             } else {
-                write_sentinel(tx, &node.public_key, new_count as u32).await?;
+                write_sentinel(tx, &node.public_key, new_count as u32, &node.node_prefix).await?;
             }
             let result: DbResult = Box::new(removed);
             Ok(result)
@@ -1977,6 +2011,7 @@ impl DbOp for RemRangeByLexOp {
         let min_str = self.min_str.clone();
         let max_str = self.max_str.clone();
         Box::pin(async move {
+            let node = node.resolved(tx).await?;
             let entries = load_all_members(tx, &node).await?;
             let members: Vec<Vec<u8>> = entries.iter().map(|e| e.member.clone()).collect();
             let to_remove = filter_lex_range(&members, &min_str, &max_str)?;
@@ -2004,7 +2039,7 @@ impl DbOp for RemRangeByLexOp {
             if new_count == 0 {
                 tx.delete(&node.public_key)?;
             } else {
-                write_sentinel(tx, &node.public_key, new_count as u32).await?;
+                write_sentinel(tx, &node.public_key, new_count as u32, &node.node_prefix).await?;
             }
             let result: DbResult = Box::new(removed);
             Ok(result)
@@ -2025,6 +2060,7 @@ impl DbOp for ZPopOp {
         let count = self.count;
         let want_min = self.want_min;
         Box::pin(async move {
+            let node = node.resolved(tx).await?;
             let entries = load_all_members(tx, &node).await?;
             let mut count = count.min(entries.len());
             if want_min {
@@ -2038,7 +2074,7 @@ impl DbOp for ZPopOp {
                 if new_count == 0 {
                     tx.delete(&node.public_key)?;
                 } else {
-                    write_sentinel(tx, &node.public_key, new_count as u32).await?;
+                    write_sentinel(tx, &node.public_key, new_count as u32, &node.node_prefix).await?;
                 }
                 let result: DbResult = Box::new(
                     popped
@@ -2060,7 +2096,7 @@ impl DbOp for ZPopOp {
                 if new_count == 0 {
                     tx.delete(&node.public_key)?;
                 } else {
-                    write_sentinel(tx, &node.public_key, new_count as u32).await?;
+                    write_sentinel(tx, &node.public_key, new_count as u32, &node.node_prefix).await?;
                 }
                 let result: DbResult = Box::new(
                     popped
@@ -2092,6 +2128,7 @@ impl DbOp for ZMScoreOp {
         let node = self.node.clone();
         let members = self.members.clone();
         Box::pin(async move {
+            let node = node.resolved(tx).await?;
             if zset_count(tx, &node.public_key).await?.is_none() {
                 let result = ZMScoreResult {
                     scores: vec![None; members.len()],
@@ -2133,6 +2170,7 @@ impl DbOp for ZRandMemberOp {
         let node = self.node.clone();
         let count = self.count;
         Box::pin(async move {
+            let node = node.resolved(tx).await?;
             let entries = load_all_members(tx, &node).await?;
             let n = entries.len();
             let mut count = count;
@@ -2676,6 +2714,108 @@ mod tests {
             RespValue::Error(b) => b.to_vec(),
             other => panic!("expected error, got {other:?}"),
         }
+    }
+
+    // --- namespaced layout (RFC 0001) ---
+
+    const NS_A: &[u8] = b"+0:ns-zset-000a";
+    const NS_B: &[u8] = b"+0:ns-zset-000b";
+    const NS_D: &[u8] = b"+0:ns-zset-000d";
+
+    fn bs(parts: &[&str]) -> Vec<Bytes> {
+        parts.iter().map(|p| Bytes::copy_from_slice(p.as_bytes())).collect()
+    }
+
+    /// Runs the op on a legacy twin and on the namespaced one; replies must match.
+    async fn both(legacy: &Session, ns: &Session, build: impl Fn(&Session) -> QueuedOp) -> RespValue {
+        let a = crate::testutil::exec(legacy, build(legacy)).await;
+        let b = crate::testutil::exec(ns, build(ns)).await;
+        assert_eq!(a, b, "a namespaced sorted set must answer exactly like a legacy one");
+        a
+    }
+
+    #[tokio::test]
+    async fn namespaced_sorted_sets_behave_like_legacy_ones() {
+        let (legacy, ns) = (test_session(), test_session());
+        for s in [&legacy, &ns] {
+            crate::testutil::exec(s, zadd(s, b"a", &bs(&["1", "a", "2", "b", "3", "c", "4", "d"]))).await;
+            crate::testutil::exec(s, zadd(s, b"b", &bs(&["10", "b", "20", "c", "30", "x"]))).await;
+            crate::testutil::exec(s, zadd(s, b"d", &bs(&["5", "old"]))).await;
+        }
+        crate::testutil::namespace_key(&ns, b"a", NS_A).await;
+        crate::testutil::namespace_key(&ns, b"b", NS_B).await;
+        crate::testutil::namespace_key(&ns, b"d", NS_D).await;
+
+        // Reads.
+        both(&legacy, &ns, |s| zcard(s, b"a")).await;
+        both(&legacy, &ns, |s| zscore(s, b"a", b"c")).await;
+        both(&legacy, &ns, |s| zscore(s, b"a", b"nope")).await;
+        both(&legacy, &ns, |s| zmscore(s, b"a", &bs(&["a", "x", "d"]))).await;
+        both(&legacy, &ns, |s| zrank(s, b"a", b"c")).await;
+        both(&legacy, &ns, |s| zrevrank(s, b"a", b"c")).await;
+        both(&legacy, &ns, |s| zrange(s, b"a", 0, -1, true)).await;
+        both(&legacy, &ns, |s| zrevrange(s, b"a", 0, 1, true)).await;
+        both(&legacy, &ns, |s| zrangebyscore(s, b"a", "(1", "3", true, None)).await;
+        both(&legacy, &ns, |s| zrevrangebyscore(s, b"a", "+inf", "-inf", false, Some((1, 2)))).await;
+        both(&legacy, &ns, |s| zcount(s, b"a", "2", "4")).await;
+        both(&legacy, &ns, |s| zlexcount(s, b"a", "-", "+")).await;
+        both(&legacy, &ns, |s| zrangebylex(s, b"a", "-", "+", 0, 0, false)).await;
+
+        // Writes.
+        both(&legacy, &ns, |s| zadd(s, b"a", &bs(&["2.5", "bb", "9", "z"]))).await;
+        both(&legacy, &ns, |s| zadd(s, b"a", &bs(&["7", "a"]))).await; // update an existing score
+        both(&legacy, &ns, |s| zincrby(s, b"a", 5.0, b"c")).await;
+        both(&legacy, &ns, |s| zincrby(s, b"a", 1.0, b"brand-new")).await;
+        both(&legacy, &ns, |s| zrem(s, b"a", &bs(&["d", "nope"]))).await;
+        both(&legacy, &ns, |s| zrange(s, b"a", 0, -1, true)).await;
+        both(&legacy, &ns, |s| zpopmin(s, b"a", 1)).await;
+        both(&legacy, &ns, |s| zpopmax(s, b"a", 1)).await;
+        both(&legacy, &ns, |s| zremrangebyscore(s, b"a", "-inf", "3")).await;
+        both(&legacy, &ns, |s| zremrangebyrank(s, b"a", 0, 0)).await;
+        both(&legacy, &ns, |s| zrange(s, b"a", 0, -1, true)).await;
+
+        // Multi-key reads and stores, mixing namespaced and legacy operands.
+        for s in [&legacy, &ns] {
+            crate::testutil::exec(s, zadd(s, b"c", &bs(&["1", "x", "2", "y"]))).await; // stays legacy
+        }
+        both(&legacy, &ns, |s| zunion(s, "SUM", &[], true, &bs(&["a", "b", "c"]))).await;
+        both(&legacy, &ns, |s| zinter(s, "MAX", &[], true, &bs(&["b", "c"]))).await;
+        both(&legacy, &ns, |s| zdiff(s, true, &bs(&["b", "a"]))).await;
+        both(&legacy, &ns, |s| zunionstore(s, b"d", "SUM", &[], &bs(&["b", "c"]))).await; // replaces a namespaced dest
+        both(&legacy, &ns, |s| zrange(s, b"d", 0, -1, true)).await;
+        assert_eq!(crate::testutil::entries_under(&ns, NS_D).await, 0, "the old destination's entries must be cleared");
+        both(&legacy, &ns, |s| zinterstore(s, b"d", "SUM", &[], &bs(&["b", "c"]))).await;
+        both(&legacy, &ns, |s| zdiffstore(s, b"d", &bs(&["b", "c"]))).await;
+        both(&legacy, &ns, |s| zrangestore(s, b"d", b"b", 0, 1)).await;
+        both(&legacy, &ns, |s| zrange(s, b"d", 0, -1, true)).await;
+
+        // Nothing under the name-derived prefixes of namespaced sets; sentinels still flagged.
+        for k in [&b"a"[..], b"b"] {
+            assert_eq!(crate::testutil::entries_under(&ns, &ns.private_key(k)).await, 0, "{}", String::from_utf8_lossy(k));
+            let meta = crate::testutil::stored_type_byte(&ns, &ns.public_key(k)).await.unwrap();
+            assert_eq!(meta, TYPE_SORTED_SET | crate::common::namespace::NAMESPACE_FLAG);
+        }
+
+        // Emptying a namespaced set removes the sentinel and every entry.
+        both(&legacy, &ns, |s| zremrangebyrank(s, b"b", 0, -1)).await;
+        assert_eq!(crate::testutil::stored_type_byte(&ns, &ns.public_key(b"b")).await, None);
+        assert_eq!(crate::testutil::entries_under(&ns, NS_B).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_namespaced_sorted_set_keeps_its_ttl_and_serves_blocked_pops() {
+        let s = test_session();
+        crate::testutil::exec(&s, zadd(&s, b"a", &bs(&["1", "a"]))).await;
+        crate::testutil::exec(&s, crate::keys::expire(&s, b"a", 100)).await;
+        crate::testutil::namespace_key(&s, b"a", NS_A).await;
+        crate::testutil::exec(&s, zadd(&s, b"a", &bs(&["2", "b"]))).await;
+        let ttl = crate::testutil::exec(&s, crate::keys::ttl(&s, b"a")).await;
+        assert!(matches!(ttl, RespValue::Integer(n) if (90..=100).contains(&n)), "ttl was {ttl:?}");
+
+        // BZPOPMIN on a namespaced set pops from it.
+        let reply = crate::testutil::exec(&s, bzpop(&s, &[&b"a"[..]], 1.0, true)).await;
+        assert!(matches!(&reply, RespValue::Array(Some(v)) if v.len() == 3), "got {reply:?}");
+        assert_eq!(crate::testutil::entries_under(&s, NS_A).await, 2, "one member left: a score and a member entry");
     }
 
     #[tokio::test]
