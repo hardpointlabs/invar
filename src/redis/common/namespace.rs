@@ -7,7 +7,7 @@
 //! sentinel (the entry under the public key) may record the prefix its
 //! elements live under, so moving the sentinel moves the value.
 //!
-//! A sentinel that records a namespace has the high bit ([`NAMESPACE_FLAG`])
+//! A sentinel that records a namespace has the high bit (`NAMESPACE_FLAG`)
 //! set in its type byte and ends with a trailer:
 //!
 //! ```text
@@ -19,10 +19,10 @@
 //! predates namespaces fail closed (`WRONGTYPE`) on such a key instead of
 //! silently addressing the wrong prefix.
 //!
-//! Commands never parse the trailer themselves: they ask [`resolve_prefix`]
-//! (or [`prefix_of`] when they already hold the sentinel) for the prefix to
-//! use, decode the sentinel payload with [`payload`], compare types with
-//! [`base_type`], and write the sentinel back with [`write_sentinel`], which
+//! Commands never parse the trailer themselves: they ask `resolve_prefix`
+//! (or `prefix_of` when they already hold the sentinel) for the prefix to
+//! use, decode the sentinel payload with `payload`, compare types with
+//! `base_type`, and write the sentinel back with `write_sentinel`, which
 //! keeps the trailer, the TTL and refuses to drop a namespace by accident.
 
 use std::ops::Deref;
@@ -129,6 +129,50 @@ pub(crate) fn with_db(prefix: &[u8], db: i32) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Number of random bytes that identify a namespace.
+const NAMESPACE_ID_LEN: usize = 16;
+
+/// A fresh namespace for a value that is being created: `+<db>:` followed by
+/// 128 random bits, so it cannot collide with the prefix of any other value,
+/// with a name-derived prefix (those start with `-`) or with a public key
+/// (those start with a digit). `legacy` is the name-derived prefix
+/// (`-<db>:<name>`) of the key being created; it only supplies the db number.
+pub(crate) fn new_namespace(legacy: &[u8]) -> Result<ElementPrefix, DbError> {
+    // `-<db>:...` -> `+<db>:`
+    let colon = legacy.iter().position(|&b| b == b':').ok_or_else(corrupt_prefix)?;
+    let db = legacy.get(1..colon).filter(|d| !d.is_empty() && d.iter().all(u8::is_ascii_digit));
+    let db = db.ok_or_else(corrupt_prefix)?;
+    let mut prefix = Vec::with_capacity(colon + 1 + NAMESPACE_ID_LEN);
+    prefix.push(b'+');
+    prefix.extend_from_slice(db);
+    prefix.push(b':');
+    let mut id = [0u8; NAMESPACE_ID_LEN];
+    rand::rand_core::Rng::fill_bytes(&mut rand::rng(), &mut id);
+    prefix.extend_from_slice(&id);
+    Ok(ElementPrefix::explicit(prefix))
+}
+
+fn corrupt_prefix() -> DbError {
+    DbError::Redis("internal error: malformed element prefix".into())
+}
+
+/// Like `resolve_prefix` for a command that may create the value: a key with
+/// no live sentinel gets a brand new namespace, which the command must then
+/// record by writing the sentinel with it. An expired sentinel counts as
+/// absent, so the elements it left behind can never be mistaken for the new
+/// value's.
+pub(crate) async fn resolve_prefix_for_write(
+    tx: &dyn Tx,
+    public_key: &[u8],
+    legacy: &[u8],
+) -> Result<ElementPrefix, DbError> {
+    match tx.get(public_key).await {
+        Ok(item) => prefix_of(&item, legacy),
+        Err(KvError::KeyNotFound) => new_namespace(legacy),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Reads the sentinel at `public_key` and returns the prefix of its elements.
 /// A missing (or expired) key has no namespace yet, so `legacy` is returned.
 pub(crate) async fn resolve_prefix(
@@ -213,6 +257,20 @@ mod tests {
         assert_eq!(with_db(b"-x:abc", 1), None);
         assert_eq!(with_db(b"-:abc", 1), None);
         assert_eq!(with_db(b"", 1), None);
+    }
+
+    #[test]
+    fn new_namespaces_are_unique_db_scoped_and_distinct_from_name_derived_prefixes() {
+        let a = new_namespace(b"-3:my:key").unwrap();
+        let b = new_namespace(b"-3:my:key").unwrap();
+        assert!(a.is_explicit());
+        assert_ne!(&*a, &*b, "128 random bits must not repeat");
+        assert!(a.starts_with(b"+3:"), "kind '+' and the db of the key");
+        assert_eq!(a.len(), b"+3:".len() + NAMESPACE_ID_LEN);
+        // The name does not leak into the namespace.
+        assert!(!a.windows(6).any(|w| w == b"my:key"));
+        assert!(new_namespace(b"nonsense").is_err());
+        assert!(new_namespace(b"-x:name").is_err());
     }
 
     #[test]

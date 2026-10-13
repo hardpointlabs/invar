@@ -24,6 +24,16 @@
 //! Every command returns a [`QueuedOp`] with a [`DbOp`] half that reads and
 //! mutates the set inside the session-managed transaction and a [`WireOp`]
 //! half that renders the result to RESP.
+//!
+//! # Where the entries live (RFC 0001)
+//!
+//! The `-<db>:<name>` prefix in the layout above is the *legacy* one, derived
+//! from the key's name, which is how values written by earlier releases are
+//! stored. A value created by this release records a **namespace** instead
+//! (see [`crate::common::namespace`]): its sentinel carries the prefix its
+//! entries live under (`+<db>:` and a random id), so the name plays no part in
+//! where the data is stored and the value can be renamed without moving it.
+//! The suffixes appended to the prefix are the same either way.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,7 +45,7 @@ use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use smallvec::{smallvec, SmallVec};
 use crate::common::session::Session;
-use crate::common::namespace::{self, base_type, resolve_prefix, ElementPrefix};
+use crate::common::namespace::{self, base_type, new_namespace, resolve_prefix, resolve_prefix_for_write, ElementPrefix};
 use crate::common::ValueType;
 use crate::resp::RespValue;
 
@@ -217,8 +227,8 @@ async fn store_set_result(
     members: &[Vec<u8>],
 ) -> Result<i64, DbError> {
     clear_set(tx, dest_public_key, dest_node_prefix).await?;
-    // The destination was just cleared, so it is a new set.
-    let dest_prefix = ElementPrefix::legacy(dest_node_prefix.to_vec());
+    // The destination was just cleared, so it is a new set with a namespace of its own.
+    let dest_prefix = new_namespace(dest_node_prefix)?;
     for member in members {
         tx.set(
             Entry::new(
@@ -516,7 +526,7 @@ impl DbOp for SAddOp {
         let node_prefix = self.node_prefix.clone();
         let members = self.members.clone();
         Box::pin(async move {
-            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
+            let node_prefix = resolve_prefix_for_write(tx, &public_key, &node_prefix).await?;
             let mut count = match read_sentinel(tx, &public_key).await {
                 Ok(count) => count,
                 Err(DbError::Kv(KvError::KeyNotFound)) => 0,
@@ -812,7 +822,7 @@ impl DbOp for SMoveOp {
                 write_sentinel(tx, &src_public_key, src_remaining, &src_prefix).await?;
             }
 
-            let dst_prefix = resolve_prefix(tx, &dst_public_key, &dst_node_prefix).await?;
+            let dst_prefix = resolve_prefix_for_write(tx, &dst_public_key, &dst_node_prefix).await?;
             let dst_internal = internal_member_key(&dst_prefix, &member);
             match tx.get(&dst_internal).await {
                 Ok(_) => {}
@@ -1304,10 +1314,6 @@ mod tests {
 
     // --- namespaced layout (RFC 0001) ---
 
-    const NS_A: &[u8] = b"+0:ns-set-000a";
-    const NS_B: &[u8] = b"+0:ns-set-000b";
-    const NS_D: &[u8] = b"+0:ns-set-000d";
-
     fn bs(parts: &[&str]) -> Vec<Bytes> {
         parts.iter().map(|p| Bytes::copy_from_slice(p.as_bytes())).collect()
     }
@@ -1337,12 +1343,19 @@ mod tests {
         for s in [&legacy, &ns] {
             crate::testutil::exec(s, sadd(s, b"a", &bs(&["1", "2", "3"]))).await;
             crate::testutil::exec(s, sadd(s, b"b", &bs(&["2", "3", "4"]))).await;
-            crate::testutil::exec(s, sadd(s, b"c", &bs(&["9"]))).await; // stays legacy in both
+            crate::testutil::exec(s, sadd(s, b"c", &bs(&["9"]))).await;
             crate::testutil::exec(s, sadd(s, b"d", &bs(&["x", "y"]))).await;
         }
-        crate::testutil::namespace_key(&ns, b"a", NS_A).await;
-        crate::testutil::namespace_key(&ns, b"b", NS_B).await;
-        crate::testutil::namespace_key(&ns, b"d", NS_D).await;
+        // New sets are born namespaced. The twin is put back into the layout earlier
+        // releases wrote; `c` is legacy in both, to mix layouts in the multi-set commands.
+        for k in [&b"a"[..], b"b", b"c", b"d"] {
+            crate::testutil::legacy_key(&legacy, k).await;
+        }
+        crate::testutil::legacy_key(&ns, b"c").await;
+        let (ns_a, ns_d) = (
+            crate::testutil::namespace_of(&ns, b"a").await,
+            crate::testutil::namespace_of(&ns, b"d").await,
+        );
 
         // Single-set reads.
         both(&legacy, &ns, |s| scard(s, b"a")).await;
@@ -1368,10 +1381,11 @@ mod tests {
         }
 
         // A *STORE command replaces a namespaced destination: its old elements
-        // are gone and the result is a new set.
+        // are gone and the result is a new set, in a namespace of its own.
         both(&legacy, &ns, |s| sunionstore(s, b"d", &bs(&["a", "b"]))).await;
         both(&legacy, &ns, |s| smembers(s, b"d")).await;
-        assert_eq!(crate::testutil::entries_under(&ns, NS_D).await, 0, "the old destination's elements must be cleared");
+        assert_eq!(crate::testutil::entries_under(&ns, &ns_d).await, 0, "the old destination's elements must be cleared");
+        assert_ne!(crate::testutil::namespace_of(&ns, b"d").await, ns_d, "a stored result is a new set");
         both(&legacy, &ns, |s| sinterstore(s, b"d", &bs(&["a", "c"]))).await;
         both(&legacy, &ns, |s| sdiffstore(s, b"d", &bs(&["b", "a"]))).await;
         both(&legacy, &ns, |s| smembers(s, b"d")).await;
@@ -1386,7 +1400,7 @@ mod tests {
         assert_eq!(after, before - 1);
 
         // Nothing under the name-derived prefixes of namespaced sets; sentinel still flagged.
-        for k in [&b"a"[..], b"b"] {
+        for k in [&b"a"[..], b"b", b"d"] {
             assert_eq!(crate::testutil::entries_under(&ns, &ns.private_key(k)).await, 0);
             let meta = crate::testutil::stored_type_byte(&ns, &ns.public_key(k)).await.unwrap();
             assert_eq!(meta, TYPE_SET | crate::common::namespace::NAMESPACE_FLAG);
@@ -1401,7 +1415,40 @@ mod tests {
             .collect();
         both(&legacy, &ns, |s| srem(s, b"a", &rest)).await;
         assert_eq!(crate::testutil::stored_type_byte(&ns, &ns.public_key(b"a")).await, None);
-        assert_eq!(crate::testutil::entries_under(&ns, NS_A).await, 0);
+        assert_eq!(crate::testutil::entries_under(&ns, &ns_a).await, 0);
+    }
+
+    /// Every command that can create a set gives it a namespace of its own.
+    #[tokio::test]
+    async fn every_command_that_creates_a_set_gives_it_a_namespace() {
+        let s = test_session();
+        crate::testutil::exec(&s, sadd(&s, b"src", &bs(&["1", "2", "3"]))).await;
+        crate::testutil::exec(&s, sadd(&s, b"by_sadd", &bs(&["x"]))).await;
+        crate::testutil::exec(&s, smove(&s, b"src", b"by_smove", b"1")).await;
+        crate::testutil::exec(&s, sunionstore(&s, b"by_union", &bs(&["src", "by_sadd"]))).await;
+        crate::testutil::exec(&s, sinterstore(&s, b"by_inter", &bs(&["src", "src"]))).await;
+        crate::testutil::exec(&s, sdiffstore(&s, b"by_diff", &bs(&["src", "by_sadd"]))).await;
+
+        let mut seen = std::collections::HashSet::new();
+        for key in ["src", "by_sadd", "by_smove", "by_union", "by_inter", "by_diff"] {
+            let ns = crate::testutil::namespace_of(&s, key.as_bytes()).await;
+            assert!(crate::testutil::entries_under(&s, &ns).await > 0, "{key}");
+            assert_eq!(crate::testutil::entries_under(&s, &s.private_key(key.as_bytes())).await, 0, "{key}: nothing under the name");
+            assert!(seen.insert(ns), "{key}: namespaces must be unique");
+        }
+    }
+
+    #[tokio::test]
+    async fn recreating_a_set_does_not_resurrect_old_members() {
+        let s = test_session();
+        crate::testutil::exec(&s, sadd(&s, b"s", &bs(&["old"]))).await;
+        crate::testutil::exec(&s, crate::keys::pexpire(&s, b"s", 5)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        crate::testutil::exec(&s, sadd(&s, b"s", &bs(&["new"]))).await;
+        assert_eq!(
+            crate::testutil::exec(&s, smembers(&s, b"s")).await,
+            RespValue::Array(Some(vec![RespValue::BulkString(Some(Bytes::from_static(b"new")))]))
+        );
     }
 
     #[tokio::test]
@@ -1409,7 +1456,6 @@ mod tests {
         let s = test_session();
         crate::testutil::exec(&s, sadd(&s, b"a", &bs(&["1"]))).await;
         crate::testutil::exec(&s, crate::keys::expire(&s, b"a", 100)).await;
-        crate::testutil::namespace_key(&s, b"a", NS_A).await;
         crate::testutil::exec(&s, sadd(&s, b"a", &bs(&["2"]))).await;
         let ttl = crate::testutil::exec(&s, crate::keys::ttl(&s, b"a")).await;
         assert!(matches!(ttl, RespValue::Integer(n) if (90..=100).contains(&n)), "ttl was {ttl:?}");
