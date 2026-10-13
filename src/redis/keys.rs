@@ -719,7 +719,9 @@ impl DbOp for ScanOp {
                 let name = &full[prefix.len()..];
                 last_seen = name.to_vec();
                 if let Some(pattern) = &pattern {
-                    if !redis_glob_match(pattern, name, false) {
+                    // As in Redis, a lone `*` selects everything (even the
+                    // empty key name, which the glob matcher would reject).
+                    if pattern.as_slice() != b"*" && !redis_glob_match(pattern, name, false) {
                         continue;
                     }
                 }
