@@ -35,7 +35,7 @@ use kv::kv::{TxIsolation, BoxFuture, Entry, Error as KvError, Tx};
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use crate::common::session::Session;
 use crate::common::namespace::{self, base_type, resolve_prefix, resolve_prefix_for_write, ElementPrefix};
-use crate::common::{BlockResult, BlockingSignal, Claim, RedisStore, StreamResult, ValueType, WatchRegistry};
+use crate::common::{BlockingSignal, Claim, RedisStore, ValueType, WatchRegistry};
 use crate::resp::RespValue;
 
 /// Metadata type byte stamped on the sentinel entry.
@@ -601,12 +601,12 @@ pub fn xinfo_stream(session: &Session, key: &[u8]) -> QueuedOp {
 
 // --- XADD ---
 
-/// The result of an `XADD` DbOp: the generated entry ID plus any blocked
-/// `XREAD` waiter claimed on this key, so the wire side can wake it after the
-/// transaction commits.
+/// The result of an `XADD` DbOp: the generated entry ID plus a
+/// notification to wake blocked `XREAD` clients, delivered by the wire side
+/// after the transaction commits.
 struct XAddResult {
     id: String,
-    claim: Option<Claim>,
+    claim: Claim,
 }
 
 struct XAddOp {
@@ -623,9 +623,7 @@ struct XAddOp {
 impl XAddOp {
     fn release_claims_impl(&self, result: &DbResult) {
         if let Some(xadd) = result.downcast_ref::<XAddResult>() {
-            if let Some(claim) = &xadd.claim {
-                self.registry.release_front(claim);
-            }
+            self.registry.release_front(&xadd.claim);
         }
     }
 }
@@ -733,18 +731,9 @@ impl DbOp for XAddOp {
                 write_sentinel(tx, &public_key, &meta, &node_prefix).await?;
             }
 
-            // A new entry may satisfy a blocked XREAD client parked on this
-            // key's queue. Claim the longest-waiting one; the returned claim is
-            // delivered (woken) by the wire side once this transaction commits.
-            let mut claim: Option<Claim> = None;
-            if let Some(mut claim_ref) = registry.try_claim(&public_key) {
-                if claim_ref.is_stream() {
-                    claim_ref.set_result(BlockResult::Stream(StreamResult {
-                        public_key: public_key.clone(),
-                    }));
-                    claim = Some(claim_ref);
-                }
-            }
+            // Every XREAD client parked on this key is woken once this
+            // transaction commits (see `stream_notification`).
+            let claim = registry.stream_notification(&public_key);
 
             let result: DbResult = Box::new(XAddResult {
                 id: id.display(),
@@ -762,9 +751,12 @@ impl DbOp for XAddOp {
     /// strip it out here and hand it to the script for deferred delivery.
     fn defer_claims(&self, result: &mut DbResult, into: &Mutex<Vec<Claim>>) {
         if let Some(xadd) = result.downcast_mut::<XAddResult>() {
-            if let Some(claim) = xadd.claim.take() {
-                into.lock().expect("deferred claims mutex poisoned").push(claim);
-            }
+            // Placeholder left behind; the real claim is delivered by the script.
+            let claim = std::mem::replace(
+                &mut xadd.claim,
+                self.registry.stream_notification(&self.public_key),
+            );
+            into.lock().expect("deferred claims mutex poisoned").push(claim);
         }
     }
 }
@@ -967,9 +959,14 @@ impl DbOp for XReadOp {
         }
 
         // Blocking mode: open our own transaction, resolve `$`, and try a read.
-        // If anything is available, return it. Otherwise register on the watch
-        // registry and wait; once woken, re-read in a fresh transaction (so we
-        // see the entry the writer committed) and return the new entries.
+        // If anything is available, return it. Otherwise wait on the watch
+        // registry; once woken, re-read in a fresh transaction (so we see the
+        // entry the writer committed) and return the new entries.
+        //
+        // The waiter registers *before* each read. A write that commits
+        // between the read and the wait then still wakes us; registering
+        // after the read would leave a window in which that write is missed
+        // and the client sleeps until the next one.
         let store = self.store.clone();
         let registry = self.registry.clone();
         let streams = self.streams.clone();
@@ -978,54 +975,59 @@ impl DbOp for XReadOp {
         let timeout = self.timeout;
         let blocking = self.blocking.clone();
         Box::pin(async move {
-            let own_tx = store.begin(false, TxIsolation::Snapshot).await.map_err(DbError::Kv)?;
-            let resolved = match resolve_read_ids(&*own_tx, &streams, &ids).await {
-                Ok(r) => r,
-                Err(e) => {
-                    own_tx.discard();
-                    return Err(e);
-                }
-            };
-            let first = match read_streams(&*own_tx, &streams, &resolved, count).await {
-                Ok(r) => r,
-                Err(e) => {
-                    own_tx.discard();
-                    return Err(e);
-                }
-            };
-            tracing::debug!(
-                resolved = ?resolved.iter().map(|o| o.map(|i| i.display())).collect::<Vec<_>>(),
-                first_counts = ?first.iter().map(|(_, e)| e.len()).collect::<Vec<_>>(),
-                "xread blocking initial read"
-            );
-            if first.iter().any(|(_, e)| !e.is_empty()) {
-                let result: DbResult = Box::new(first);
-                return Ok(result);
-            }
-            own_tx.discard();
-
             let public_keys: Vec<Vec<u8>> =
                 streams.iter().map(|s| s.public_key.clone()).collect();
-            let duration = if timeout.is_finite() && timeout > 0.0 {
-                Some(Duration::from_secs_f64(timeout))
+            let deadline = if timeout.is_finite() && timeout > 0.0 {
+                Some(tokio::time::Instant::now() + Duration::from_secs_f64(timeout))
             } else {
                 None
             };
-            blocking.entering_block();
-            registry.block_stream(&public_keys, duration).await;
+            let mut resolved: Option<Vec<Option<StreamEntryId>>> = None;
+            let mut announced = false;
+            loop {
+                let registration = registry.register_stream(&public_keys);
+                let own_tx = store.begin(false, TxIsolation::Snapshot).await.map_err(DbError::Kv)?;
+                let ids_now = match &resolved {
+                    Some(r) => r.clone(),
+                    None => match resolve_read_ids(&*own_tx, &streams, &ids).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            own_tx.discard();
+                            return Err(e);
+                        }
+                    },
+                };
+                let read = read_streams(&*own_tx, &streams, &ids_now, count).await;
+                own_tx.discard();
+                let current = read?;
+                tracing::debug!(
+                    resolved = ?ids_now.iter().map(|o| o.map(|i| i.display())).collect::<Vec<_>>(),
+                    counts = ?current.iter().map(|(_, e)| e.len()).collect::<Vec<_>>(),
+                    "xread blocking read"
+                );
+                if current.iter().any(|(_, e)| !e.is_empty()) {
+                    let result: DbResult = Box::new(current);
+                    return Ok(result);
+                }
+                resolved = Some(ids_now);
 
-            // Re-read with a fresh transaction: the wake is delivered only
-            // after the writer's XADD committed, so the entry is visible.
-            let fresh_tx = store.begin(false, TxIsolation::Snapshot).await.map_err(DbError::Kv)?;
-            let results = read_streams(&*fresh_tx, &streams, &resolved, count).await?;
-            tracing::debug!(
-                resolved = ?resolved.iter().map(|o| o.map(|i| i.display())).collect::<Vec<_>>(),
-                post_counts = ?results.iter().map(|(_, e)| e.len()).collect::<Vec<_>>(),
-                post_last = ?results.iter().map(|(_, e)| e.last().map(|(id, _)| id.display())).collect::<Vec<_>>(),
-                "xread blocking after wake"
-            );
-            let result: DbResult = Box::new(results);
-            Ok(result)
+                let remaining = match deadline {
+                    Some(d) => {
+                        let now = tokio::time::Instant::now();
+                        if now >= d {
+                            let result: DbResult = Box::new(current);
+                            return Ok(result);
+                        }
+                        Some(d - now)
+                    }
+                    None => None,
+                };
+                if !announced {
+                    blocking.entering_block();
+                    announced = true;
+                }
+                registration.wait(remaining).await;
+            }
         })
     }
 }
@@ -1302,9 +1304,7 @@ impl WireOp for XAddWire {
         match result {
             Ok(res) => match res.downcast::<XAddResult>() {
                 Ok(xadd) => {
-                    if let Some(claim) = &xadd.claim {
-                        claim.wake();
-                    }
+                    xadd.claim.wake();
                     RespValue::BulkString(Some(Bytes::from(xadd.id.clone())))
                 }
                 Err(_) => internal_error(),
