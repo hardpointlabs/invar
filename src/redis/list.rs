@@ -22,6 +22,16 @@
 //! Every command returns a [`QueuedOp`] with a [`DbOp`] half that loads and
 //! mutates the list inside the session-managed transaction and a [`WireOp`]
 //! half that renders the result to RESP.
+//!
+//! # Where the entries live (RFC 0001)
+//!
+//! The `-<db>:<name>` prefix in the layout above is the *legacy* one, derived
+//! from the key's name, which is how values written by earlier releases are
+//! stored. A value created by this release records a **namespace** instead
+//! (see [`crate::common::namespace`]): its sentinel carries the prefix its
+//! entries live under (`+<db>:` and a random id), so the name plays no part in
+//! where the data is stored and the value can be renamed without moving it.
+//! The suffixes appended to the prefix are the same either way.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -33,7 +43,7 @@ use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use smallvec::smallvec;
 use crate::common::session::Session;
-use crate::common::namespace::{self, base_type, resolve_prefix, ElementPrefix};
+use crate::common::namespace::{self, base_type, resolve_prefix, resolve_prefix_for_write, ElementPrefix};
 use crate::common::ValueType;
 use crate::resp::RespValue;
 
@@ -903,7 +913,7 @@ impl DbOp for PushOp {
         let at_tail = self.at_tail;
         let only_if_exists = self.only_if_exists;
         Box::pin(async move {
-            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
+            let node_prefix = resolve_prefix_for_write(tx, &public_key, &node_prefix).await?;
             let mut ll = match load_list(tx, &public_key, &node_prefix).await {
                 Ok(ll) => ll,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
@@ -1312,7 +1322,7 @@ impl DbOp for RPopLPushOp {
             }
             // Push to head of destination. Resolved only now: it may be the
             // source list, whose sentinel was just rewritten or deleted.
-            let dst_prefix = resolve_prefix(tx, &dst_public, &dst_prefix).await?;
+            let dst_prefix = resolve_prefix_for_write(tx, &dst_public, &dst_prefix).await?;
             let mut dst_ll = match load_list(tx, &dst_public, &dst_prefix).await {
                 Ok(ll) => ll,
                 Err(DbError::Kv(KvError::KeyNotFound)) => Linked::new_empty(),
@@ -1498,7 +1508,9 @@ mod tests {
         let store = session.store();
         let tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
         let public_key = session.public_key(key);
-        let node_prefix = session.private_key(key);
+        let node_prefix = resolve_prefix(&*tx, &public_key, &session.private_key(key))
+            .await
+            .expect("prefix");
         let ll = load_list(&*tx, &public_key, &node_prefix)
             .await
             .expect("load");
@@ -1635,9 +1647,6 @@ mod tests {
 
     // --- namespaced layout (RFC 0001) ---
 
-    const NS_L: &[u8] = b"+0:ns-list-000l";
-    const NS_M: &[u8] = b"+0:ns-list-000m";
-
     fn bs(parts: &[&str]) -> Vec<Bytes> {
         parts.iter().map(|p| Bytes::copy_from_slice(p.as_bytes())).collect()
     }
@@ -1657,8 +1666,13 @@ mod tests {
             crate::testutil::exec(s, rpush(s, b"l", &bs(&["a", "b", "c", "d", "e"]))).await;
             crate::testutil::exec(s, rpush(s, b"m", &bs(&["x"]))).await;
         }
-        crate::testutil::namespace_key(&ns, b"l", NS_L).await;
-        crate::testutil::namespace_key(&ns, b"m", NS_M).await;
+        // New lists are born namespaced; the twin is put back into the layout earlier releases wrote.
+        crate::testutil::legacy_key(&legacy, b"l").await;
+        crate::testutil::legacy_key(&legacy, b"m").await;
+        let (ns_l, ns_m) = (
+            crate::testutil::namespace_of(&ns, b"l").await,
+            crate::testutil::namespace_of(&ns, b"m").await,
+        );
 
         // Reads.
         both(&legacy, &ns, |s| llen(s, b"l")).await;
@@ -1696,15 +1710,47 @@ mod tests {
         }
         let live_l = match crate::testutil::exec(&ns, llen(&ns, b"l")).await { RespValue::Integer(n) => n as usize, o => panic!("{o:?}") };
         let live_m = match crate::testutil::exec(&ns, llen(&ns, b"m")).await { RespValue::Integer(n) => n as usize, o => panic!("{o:?}") };
-        assert_eq!(crate::testutil::entries_under(&ns, NS_L).await, live_l);
-        assert_eq!(crate::testutil::entries_under(&ns, NS_M).await, live_m);
+        assert_eq!(crate::testutil::entries_under(&ns, &ns_l).await, live_l);
+        assert_eq!(crate::testutil::entries_under(&ns, &ns_m).await, live_m);
 
         // Emptying a namespaced list removes its sentinel and every node.
         for _ in 0..live_l {
             both(&legacy, &ns, |s| lpop(s, b"l")).await;
         }
         assert_eq!(crate::testutil::stored_type_byte(&ns, &ns.public_key(b"l")).await, None);
-        assert_eq!(crate::testutil::entries_under(&ns, NS_L).await, 0);
+        assert_eq!(crate::testutil::entries_under(&ns, &ns_l).await, 0);
+    }
+
+    /// Every command that can create a list gives it a namespace of its own.
+    #[tokio::test]
+    async fn every_command_that_creates_a_list_gives_it_a_namespace() {
+        let s = test_session();
+        crate::testutil::exec(&s, rpush(&s, b"src", &bs(&["1", "2"]))).await;
+        crate::testutil::exec(&s, lpush(&s, b"by_lpush", &bs(&["a"]))).await;
+        crate::testutil::exec(&s, rpush(&s, b"by_rpush", &bs(&["a", "b"]))).await;
+        crate::testutil::exec(&s, rpoplpush(&s, b"src", b"by_rpoplpush")).await;
+        // The *X variants only push onto an existing list, so they create nothing.
+        crate::testutil::exec(&s, lpushx(&s, b"never_created", b"a")).await;
+        assert_eq!(crate::testutil::stored_type_byte(&s, &s.public_key(b"never_created")).await, None);
+
+        let mut seen = std::collections::HashSet::new();
+        for key in ["src", "by_lpush", "by_rpush", "by_rpoplpush"] {
+            let ns = crate::testutil::namespace_of(&s, key.as_bytes()).await;
+            assert!(crate::testutil::entries_under(&s, &ns).await > 0, "{key}");
+            assert_eq!(crate::testutil::entries_under(&s, &s.private_key(key.as_bytes())).await, 0, "{key}: nothing under the name");
+            assert!(seen.insert(ns), "{key}: namespaces must be unique");
+        }
+    }
+
+    #[tokio::test]
+    async fn emptying_and_recreating_a_list_uses_a_new_namespace() {
+        let s = test_session();
+        crate::testutil::exec(&s, rpush(&s, b"l", &bs(&["a"]))).await;
+        let first = crate::testutil::namespace_of(&s, b"l").await;
+        crate::testutil::exec(&s, lpop(&s, b"l")).await;
+        crate::testutil::exec(&s, rpush(&s, b"l", &bs(&["b"]))).await;
+        assert_ne!(crate::testutil::namespace_of(&s, b"l").await, first);
+        assert_eq!(crate::testutil::entries_under(&s, &first).await, 0, "the emptied list left nothing behind");
     }
 
     #[tokio::test]
@@ -1712,7 +1758,6 @@ mod tests {
         let s = test_session();
         crate::testutil::exec(&s, rpush(&s, b"l", &bs(&["a"]))).await;
         crate::testutil::exec(&s, crate::keys::expire(&s, b"l", 100)).await;
-        crate::testutil::namespace_key(&s, b"l", NS_L).await;
         crate::testutil::exec(&s, rpush(&s, b"l", &bs(&["b"]))).await;
         let ttl = crate::testutil::exec(&s, crate::keys::ttl(&s, b"l")).await;
         assert!(matches!(ttl, RespValue::Integer(n) if (90..=100).contains(&n)), "ttl was {ttl:?}");
@@ -2164,13 +2209,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sentinel_layout_matches_go() {
-        // A single pushed element yields the expected on-disk sentinel bytes
-        // (size 1, head key == tail key) and a node entry under the derived
-        // private key.
+    async fn legacy_sentinel_layout_matches_go() {
+        // A list in the layout earlier releases wrote: the sentinel has the
+        // expected bytes (size 1, head key == tail key) and the node sits under
+        // the private key derived from the name.
         let session = test_session();
         let key = b"mylist";
         exec(&session, rpush(&session, key, &[Bytes::from_static(b"v")])).await;
+        crate::testutil::legacy_key(&session, key).await;
 
         let store = session.store();
         let tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
@@ -2190,6 +2236,33 @@ mod tests {
         let node_item = tx.get(&node_storage_key).await.expect("node");
         assert_eq!(node_item.metadata(), TYPE_LIST);
         assert_eq!(&node_item.value()[..1], b"v");
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn new_lists_record_their_namespace_in_the_sentinel() {
+        // A new list's sentinel has the same 36 payload bytes as before, then
+        // the namespace trailer, and the node lives under that namespace.
+        let session = test_session();
+        let key = b"mylist";
+        exec(&session, rpush(&session, key, &[Bytes::from_static(b"v")])).await;
+
+        let store = session.store();
+        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
+        let item = tx.get(&session.public_key(key)).await.expect("sentinel");
+        assert_eq!(item.metadata(), TYPE_LIST | namespace::NAMESPACE_FLAG);
+        let payload = namespace::payload(&item).expect("payload");
+        assert_eq!(payload.len(), SENTINEL_LENGTH);
+        assert_eq!(u32::from_be_bytes(payload[0..4].try_into().unwrap()), 1);
+        let head_key = &payload[4..20];
+        assert_eq!(head_key, &payload[20..36]);
+
+        let ns = namespace::prefix_of(&item, &session.private_key(key)).expect("trailer");
+        assert!(ns.is_explicit() && ns.starts_with(b"+0:"));
+        let node_item = tx.get(&node_key(&ns, head_key)).await.expect("node under the namespace");
+        assert_eq!(node_item.metadata(), TYPE_LIST);
+        assert_eq!(&node_item.value()[..1], b"v");
+        assert!(tx.get(&node_key(&session.private_key(key), head_key)).await.is_err(), "no node under the name-derived prefix");
         drop(tx);
     }
 }

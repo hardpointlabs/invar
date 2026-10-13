@@ -33,32 +33,6 @@ pub(crate) async fn exec(session: &Session, op: crate::common::QueuedOp) -> crat
     op.wire_op.reply(outcome)
 }
 
-/// Converts the compound key `key`, built the normal (legacy) way, to the
-/// namespaced layout: its elements move under `namespace` and its sentinel
-/// records it. Everything that reads or writes the key afterwards must find
-/// the elements there.
-pub(crate) async fn namespace_key(session: &Session, key: &[u8], namespace: &[u8]) {
-    use crate::common::namespace::{base_type, encode_sentinel, is_namespaced, ElementPrefix};
-    use kv::kv::{Entry, TxIsolation};
-
-    let public = session.public_key(key);
-    let store = session.store();
-    let tx = store.begin(true, TxIsolation::Snapshot).await.expect("tx");
-    let item = tx.get(&public).await.expect("key exists");
-    assert!(!is_namespaced(item.metadata()), "key is already namespaced");
-
-    crate::keys::move_elements(&*tx, &public, base_type(item.metadata()), &session.private_key(key), namespace)
-        .await
-        .expect("move elements");
-    let (value, metadata) = encode_sentinel(
-        item.value().to_vec(),
-        item.metadata(),
-        &ElementPrefix::explicit(namespace.to_vec()),
-    );
-    tx.set(Entry::new(public, value).metadata(metadata).keep_ttl_of(&item)).expect("set");
-    tx.commit().await.expect("commit");
-}
-
 /// How many entries are stored under `prefix`.
 pub(crate) async fn entries_under(session: &Session, prefix: &[u8]) -> usize {
     use kv::kv::TxIsolation;
@@ -95,4 +69,42 @@ pub(crate) async fn entries_snapshot(session: &Session, prefix: &[u8]) -> Vec<(V
     }
     it.close().await.expect("close");
     entries
+}
+
+/// The namespace the compound key `key` was created with. Panics if the key
+/// is a legacy (name-addressed) one.
+pub(crate) async fn namespace_of(session: &Session, key: &[u8]) -> Vec<u8> {
+    use crate::common::namespace::{is_namespaced, prefix_of};
+    use kv::kv::TxIsolation;
+
+    let public = session.public_key(key);
+    let store = session.store();
+    let tx = store.begin(false, TxIsolation::Snapshot).await.expect("tx");
+    let item = tx.get(&public).await.expect("key exists");
+    assert!(is_namespaced(item.metadata()), "key has no namespace");
+    prefix_of(&item, &session.private_key(key)).expect("trailer").to_vec()
+}
+
+/// Converts the compound key `key` from the namespaced layout to the legacy
+/// one: its elements move under the prefix derived from its name and its
+/// sentinel stops recording a namespace. For tests that need data laid out the
+/// way earlier releases wrote it.
+pub(crate) async fn legacy_key(session: &Session, key: &[u8]) {
+    use crate::common::namespace::{base_type, is_namespaced, payload, prefix_of};
+    use kv::kv::{Entry, TxIsolation};
+
+    let public = session.public_key(key);
+    let legacy = session.private_key(key);
+    let store = session.store();
+    let tx = store.begin(true, TxIsolation::Snapshot).await.expect("tx");
+    let item = tx.get(&public).await.expect("key exists");
+    assert!(is_namespaced(item.metadata()), "key is already in the legacy layout");
+
+    let from = prefix_of(&item, &legacy).expect("trailer");
+    crate::keys::move_elements(&*tx, &public, base_type(item.metadata()), &from, &legacy)
+        .await
+        .expect("move elements");
+    let value = payload(&item).expect("payload").to_vec();
+    tx.set(Entry::new(public, value).metadata(base_type(item.metadata())).keep_ttl_of(&item)).expect("set");
+    tx.commit().await.expect("commit");
 }

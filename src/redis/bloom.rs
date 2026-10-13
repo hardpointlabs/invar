@@ -20,6 +20,16 @@
 //! Every command returns a [`QueuedOp`] with a [`DbOp`] half that performs the
 //! KV reads/writes inside the session-managed transaction and a [`WireOp`]
 //! half that renders the result to RESP.
+//!
+//! # Where the entries live (RFC 0001)
+//!
+//! The `-<db>:<name>` prefix in the layout above is the *legacy* one, derived
+//! from the key's name, which is how values written by earlier releases are
+//! stored. A value created by this release records a **namespace** instead
+//! (see [`crate::common::namespace`]): its sentinel carries the prefix its
+//! entries live under (`+<db>:` and a random id), so the name plays no part in
+//! where the data is stored and the value can be renamed without moving it.
+//! The suffixes appended to the prefix are the same either way.
 
 use std::collections::HashMap;
 
@@ -28,7 +38,7 @@ use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use crate::common::session::Session;
-use crate::common::namespace::{self, resolve_prefix, ElementPrefix};
+use crate::common::namespace::{self, new_namespace, resolve_prefix, resolve_prefix_for_write, ElementPrefix};
 use crate::common::ValueType;
 use crate::resp::RespValue;
 
@@ -664,8 +674,8 @@ impl DbOp for ReserveOp {
                         non_scaling,
                         filters: vec![filter],
                     };
-                    // A new filter: its pages live under the name-derived prefix.
-                    write_meta(tx, &meta_key, &meta, &ElementPrefix::legacy(page_prefix)).await?;
+                    // A new filter gets a namespace of its own.
+                    write_meta(tx, &meta_key, &meta, &new_namespace(&page_prefix)?).await?;
                     let result: DbResult = Box::new(());
                     Ok(result)
                 }
@@ -687,7 +697,7 @@ impl DbOp for AddOp {
         let page_prefix = self.page_prefix.clone();
         let item = self.item.clone();
         Box::pin(async move {
-            let page_prefix = resolve_prefix(tx, &meta_key, &page_prefix).await?;
+            let page_prefix = resolve_prefix_for_write(tx, &meta_key, &page_prefix).await?;
             let added = add_one(tx, &meta_key, &page_prefix, &item).await?;
             let result: DbResult = Box::new(added);
             Ok(result)
@@ -727,7 +737,7 @@ impl DbOp for MAddOp {
         let page_prefix = self.page_prefix.clone();
         let items = self.items.clone();
         Box::pin(async move {
-            let page_prefix = resolve_prefix(tx, &meta_key, &page_prefix).await?;
+            let page_prefix = resolve_prefix_for_write(tx, &meta_key, &page_prefix).await?;
             let mut results = Vec::with_capacity(items.len());
             for item in &items {
                 results.push(add_one(tx, &meta_key, &page_prefix, item).await?);
@@ -781,7 +791,7 @@ impl DbOp for InsertOp {
             items: self.info.items.clone(),
         };
         Box::pin(async move {
-            let page_prefix = resolve_prefix(tx, &meta_key, &page_prefix).await?;
+            let page_prefix = resolve_prefix_for_write(tx, &meta_key, &page_prefix).await?;
             match read_meta_or_nil(tx, &meta_key).await? {
                 Some(_) => {}
                 None => {
@@ -1011,7 +1021,10 @@ mod tests {
 
     // --- namespaced layout (RFC 0001) ---
 
-    const NS_B: &[u8] = b"+0:ns-bloom-00b";
+    /// The prefix a command would use for the filter at `meta_key`.
+    async fn prefix_for(tx: &dyn Tx, meta_key: &[u8], page_prefix: &[u8]) -> ElementPrefix {
+        resolve_prefix_for_write(tx, meta_key, page_prefix).await.expect("prefix")
+    }
 
     fn items(range: std::ops::Range<u32>) -> Vec<Bytes> {
         range.map(|i| Bytes::from(format!("item-{i}"))).collect()
@@ -1031,7 +1044,9 @@ mod tests {
         for s in [&legacy, &ns] {
             crate::testutil::exec(s, madd(s, b"bf", &items(0..200))).await;
         }
-        crate::testutil::namespace_key(&ns, b"bf", NS_B).await;
+        // New filters are born namespaced; the twin is put back into the layout earlier releases wrote.
+        crate::testutil::legacy_key(&legacy, b"bf").await;
+        let ns_b = crate::testutil::namespace_of(&ns, b"bf").await;
 
         // Reads: items that were added and items that were not.
         both(&legacy, &ns, |s| exists(s, b"bf", b"item-7")).await;
@@ -1057,9 +1072,30 @@ mod tests {
         // The pages live under the namespace, none under the name-derived prefix,
         // and the meta entry still records it.
         assert_eq!(crate::testutil::entries_under(&ns, &ns.private_key(b"bf")).await, 0);
-        assert!(crate::testutil::entries_under(&ns, NS_B).await > 0);
+        assert!(crate::testutil::entries_under(&ns, &ns_b).await > 0);
         let meta = crate::testutil::stored_type_byte(&ns, &ns.public_key(b"bf")).await.unwrap();
         assert_eq!(meta, TYPE_BLOOM | crate::common::namespace::NAMESPACE_FLAG);
+    }
+
+    /// Every command that can create a filter gives it a namespace of its own.
+    #[tokio::test]
+    async fn every_command_that_creates_a_bloom_filter_gives_it_a_namespace() {
+        let s = test_session();
+        crate::testutil::exec(&s, add(&s, b"by_add", b"a")).await;
+        crate::testutil::exec(&s, madd(&s, b"by_madd", &items(0..3))).await;
+        crate::testutil::exec(&s, reserve(&s, b"by_reserve", 0.01, 100, 2, false)).await;
+        crate::testutil::exec(&s, insert(&s, b"by_insert", InsertInfo {
+            capacity: 0, error: 0.0, expansion: 0, no_create: false, non_scaling: false, items: items(0..3),
+        })).await;
+        let mut seen = std::collections::HashSet::new();
+        for key in ["by_add", "by_madd", "by_reserve", "by_insert"] {
+            let ns = crate::testutil::namespace_of(&s, key.as_bytes()).await;
+            assert!(seen.insert(ns.clone()), "{key}: namespaces must be unique");
+            assert_eq!(crate::testutil::entries_under(&s, &s.private_key(key.as_bytes())).await, 0, "{key}: nothing under the name");
+            if key != "by_reserve" {
+                assert!(crate::testutil::entries_under(&s, &ns).await > 0, "{key}: pages live in the namespace");
+            }
+        }
     }
 
     #[tokio::test]
@@ -1067,7 +1103,6 @@ mod tests {
         let s = test_session();
         crate::testutil::exec(&s, add(&s, b"bf", b"a")).await;
         crate::testutil::exec(&s, crate::keys::expire(&s, b"bf", 100)).await;
-        crate::testutil::namespace_key(&s, b"bf", NS_B).await;
         crate::testutil::exec(&s, add(&s, b"bf", b"b")).await;
         let ttl = crate::testutil::exec(&s, crate::keys::ttl(&s, b"bf")).await;
         assert!(matches!(ttl, RespValue::Integer(n) if (90..=100).contains(&n)), "ttl was {ttl:?}");
@@ -1320,7 +1355,7 @@ mod tests {
         let meta_key = session.public_key(b"bf");
         let page_prefix = session.private_key(b"bf");
         for i in 0u8..20 {
-            add_one(&*tx, &meta_key, &ElementPrefix::legacy(page_prefix.clone()), &[i])
+            add_one(&*tx, &meta_key, &prefix_for(&*tx, &meta_key, &page_prefix).await, &[i])
                 .await
                 .expect("add");
         }
@@ -1339,7 +1374,7 @@ mod tests {
                 let page_prefix = session.private_key(b"bf");
                 let item = [i];
                 Box::pin(async move {
-                    exists_one(tx, &meta_key, &page_prefix, &item)
+                    exists_one(tx, &meta_key, &prefix_for(tx, &meta_key, &page_prefix).await, &item)
                         .await
                         .expect("exists")
                 })
@@ -1359,7 +1394,7 @@ mod tests {
         let meta_key = session.public_key(b"bf");
         let page_prefix = session.private_key(b"bf");
         for i in 0u8..100 {
-            add_one(&*tx, &meta_key, &ElementPrefix::legacy(page_prefix.clone()), &[i])
+            add_one(&*tx, &meta_key, &prefix_for(&*tx, &meta_key, &page_prefix).await, &[i])
                 .await
                 .expect("add");
         }
@@ -1531,13 +1566,13 @@ mod tests {
         // First add per item is new (1); a repeat in the same session must be a
         // no-op (0) — mirroring Go's duplicate property.
         for (i, item) in items.iter().enumerate() {
-            let r = add_one(&*tx, &meta_key, &ElementPrefix::legacy(page_prefix.clone()), item)
+            let r = add_one(&*tx, &meta_key, &prefix_for(&*tx, &meta_key, &page_prefix).await, item)
                 .await
                 .expect("add");
             assert_eq!(r, 1, "first add of item {i} must be new");
         }
         for item in &items {
-            let r = add_one(&*tx, &meta_key, &ElementPrefix::legacy(page_prefix.clone()), item)
+            let r = add_one(&*tx, &meta_key, &prefix_for(&*tx, &meta_key, &page_prefix).await, item)
                 .await
                 .expect("add");
             assert_eq!(r, 0, "repeat add must be a no-op");
@@ -1546,7 +1581,7 @@ mod tests {
 
         let read_tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
         for item in &items {
-            let present = exists_one(&*read_tx, &meta_key, &page_prefix, item)
+            let present = exists_one(&*read_tx, &meta_key, &prefix_for(&*read_tx, &meta_key, &page_prefix).await, item)
                 .await
                 .expect("exists");
             assert!(present, "false negative for {item:?}");
@@ -1571,7 +1606,7 @@ mod tests {
         {
             let tx = store.begin(true, TxIsolation::Snapshot).await.expect("write tx");
             for i in 0..n {
-                add_one(&*tx, &meta_key, &ElementPrefix::legacy(page_prefix.clone()), &item(i))
+                add_one(&*tx, &meta_key, &prefix_for(&*tx, &meta_key, &page_prefix).await, &item(i))
                     .await
                     .expect("add");
             }
@@ -1581,7 +1616,7 @@ mod tests {
         let tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
         let mut false_positives = 0usize;
         for i in n..n * 2 {
-            if exists_one(&*tx, &meta_key, &page_prefix, &item(i))
+            if exists_one(&*tx, &meta_key, &prefix_for(&*tx, &meta_key, &page_prefix).await, &item(i))
                 .await
                 .expect("exists")
             {
@@ -1590,7 +1625,7 @@ mod tests {
         }
         let mut missed = 0usize;
         for i in 0..n {
-            if !exists_one(&*tx, &meta_key, &page_prefix, &item(i))
+            if !exists_one(&*tx, &meta_key, &prefix_for(&*tx, &meta_key, &page_prefix).await, &item(i))
                 .await
                 .expect("exists")
             {

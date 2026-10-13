@@ -32,6 +32,16 @@
 //! Redis semantics.  Writers that add to a sorted set (`ZADD`) claim and serve
 //! the longest-waiting blocked
 //! client inside their DbOp, exactly like Go, via the [`WatchRegistry`].
+//!
+//! # Where the entries live (RFC 0001)
+//!
+//! The `-<db>:<name>` prefix in the layout above is the *legacy* one, derived
+//! from the key's name, which is how values written by earlier releases are
+//! stored. A value created by this release records a **namespace** instead
+//! (see [`crate::common::namespace`]): its sentinel carries the prefix its
+//! entries live under (`+<db>:` and a random id), so the name plays no part in
+//! where the data is stored and the value can be renamed without moving it.
+//! The suffixes appended to the prefix are the same either way.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -44,7 +54,7 @@ use kv::kv::{TxIsolation, BoxFuture, Entry, Error as KvError, Tx};
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use smallvec::{smallvec, SmallVec};
 use crate::common::session::Session;
-use crate::common::namespace::{self, base_type, resolve_prefix, ElementPrefix};
+use crate::common::namespace::{self, base_type, new_namespace, resolve_prefix, resolve_prefix_for_write, ElementPrefix};
 use crate::common::{BlockResult, BlockingSignal, Claim, PopResult, RedisStore, ValueType, WatchRegistry};
 use crate::resp::RespValue;
 
@@ -139,6 +149,19 @@ impl NodeRef {
         Ok(NodeRef {
             public_key: self.public_key.clone(),
             node_prefix: resolve_prefix(tx, &self.public_key, &self.node_prefix).await?,
+        })
+    }
+
+    /// Like [`NodeRef::resolved`] for a command that may create the sorted
+    /// set: a key with no live sentinel gets a new namespace, which the
+    /// command must record by writing the sentinel with it.
+    async fn resolved_for_write(&self, tx: &dyn Tx) -> Result<NodeRef, DbError> {
+        if self.node_prefix.is_explicit() {
+            return Ok(self.clone());
+        }
+        Ok(NodeRef {
+            public_key: self.public_key.clone(),
+            node_prefix: resolve_prefix_for_write(tx, &self.public_key, &self.node_prefix).await?,
         })
     }
 
@@ -594,6 +617,11 @@ async fn store_zset_result(
     members: &[MemberScore],
 ) -> Result<i64, DbError> {
     clear_internal_keys(tx, dest).await?;
+    // The destination was just cleared, so it is a new sorted set with a namespace of its own.
+    let dest = &NodeRef {
+        public_key: dest.public_key.clone(),
+        node_prefix: new_namespace(&dest.node_prefix)?,
+    };
     for e in members {
         tx.set(Entry::new(dest.score_key(e.score, &e.member), Vec::new()))?;
         tx.set(Entry::new(dest.member_key(&e.member), score_bytes(e.score)))?;
@@ -1474,7 +1502,7 @@ impl DbOp for ZAddOp {
         let args = self.args.clone();
         let registry = self.registry.clone();
         Box::pin(async move {
-            let node = node.resolved(tx).await?;
+            let node = node.resolved_for_write(tx).await?;
             if args.is_empty() {
                 return Err(DbError::Redis(
                     "wrong number of arguments for 'zadd' command".into(),
@@ -1696,7 +1724,7 @@ impl DbOp for ZIncrByOp {
         let increment = self.increment;
         let member = self.member.clone();
         Box::pin(async move {
-            let node = node.resolved(tx).await?;
+            let node = node.resolved_for_write(tx).await?;
             let existing_count = zset_count(tx, &node.public_key).await?;
             let member_key = node.member_key(&member);
             let score = match tx.get(&member_key).await {
@@ -2718,10 +2746,6 @@ mod tests {
 
     // --- namespaced layout (RFC 0001) ---
 
-    const NS_A: &[u8] = b"+0:ns-zset-000a";
-    const NS_B: &[u8] = b"+0:ns-zset-000b";
-    const NS_D: &[u8] = b"+0:ns-zset-000d";
-
     fn bs(parts: &[&str]) -> Vec<Bytes> {
         parts.iter().map(|p| Bytes::copy_from_slice(p.as_bytes())).collect()
     }
@@ -2742,9 +2766,14 @@ mod tests {
             crate::testutil::exec(s, zadd(s, b"b", &bs(&["10", "b", "20", "c", "30", "x"]))).await;
             crate::testutil::exec(s, zadd(s, b"d", &bs(&["5", "old"]))).await;
         }
-        crate::testutil::namespace_key(&ns, b"a", NS_A).await;
-        crate::testutil::namespace_key(&ns, b"b", NS_B).await;
-        crate::testutil::namespace_key(&ns, b"d", NS_D).await;
+        // New sorted sets are born namespaced; the twin is put back into the layout earlier releases wrote.
+        for k in [&b"a"[..], b"b", b"d"] {
+            crate::testutil::legacy_key(&legacy, k).await;
+        }
+        let (ns_b, ns_d) = (
+            crate::testutil::namespace_of(&ns, b"b").await,
+            crate::testutil::namespace_of(&ns, b"d").await,
+        );
 
         // Reads.
         both(&legacy, &ns, |s| zcard(s, b"a")).await;
@@ -2783,7 +2812,8 @@ mod tests {
         both(&legacy, &ns, |s| zdiff(s, true, &bs(&["b", "a"]))).await;
         both(&legacy, &ns, |s| zunionstore(s, b"d", "SUM", &[], &bs(&["b", "c"]))).await; // replaces a namespaced dest
         both(&legacy, &ns, |s| zrange(s, b"d", 0, -1, true)).await;
-        assert_eq!(crate::testutil::entries_under(&ns, NS_D).await, 0, "the old destination's entries must be cleared");
+        assert_eq!(crate::testutil::entries_under(&ns, &ns_d).await, 0, "the old destination's entries must be cleared");
+        assert_ne!(crate::testutil::namespace_of(&ns, b"d").await, ns_d, "a stored result is a new sorted set");
         both(&legacy, &ns, |s| zinterstore(s, b"d", "SUM", &[], &bs(&["b", "c"]))).await;
         both(&legacy, &ns, |s| zdiffstore(s, b"d", &bs(&["b", "c"]))).await;
         both(&legacy, &ns, |s| zrangestore(s, b"d", b"b", 0, 1)).await;
@@ -2799,7 +2829,40 @@ mod tests {
         // Emptying a namespaced set removes the sentinel and every entry.
         both(&legacy, &ns, |s| zremrangebyrank(s, b"b", 0, -1)).await;
         assert_eq!(crate::testutil::stored_type_byte(&ns, &ns.public_key(b"b")).await, None);
-        assert_eq!(crate::testutil::entries_under(&ns, NS_B).await, 0);
+        assert_eq!(crate::testutil::entries_under(&ns, &ns_b).await, 0);
+    }
+
+    /// Every command that can create a sorted set gives it a namespace of its own.
+    #[tokio::test]
+    async fn every_command_that_creates_a_sorted_set_gives_it_a_namespace() {
+        let s = test_session();
+        crate::testutil::exec(&s, zadd(&s, b"src", &bs(&["1", "a", "2", "b"]))).await;
+        crate::testutil::exec(&s, zincrby(&s, b"by_zincrby", 2.0, b"m")).await;
+        crate::testutil::exec(&s, zunionstore(&s, b"by_union", "SUM", &[], &bs(&["src"]))).await;
+        crate::testutil::exec(&s, zinterstore(&s, b"by_inter", "SUM", &[], &bs(&["src"]))).await;
+        crate::testutil::exec(&s, zdiffstore(&s, b"by_diff", &bs(&["src"]))).await;
+        crate::testutil::exec(&s, zrangestore(&s, b"by_rangestore", b"src", 0, -1)).await;
+
+        let mut seen = std::collections::HashSet::new();
+        for key in ["src", "by_zincrby", "by_union", "by_inter", "by_diff", "by_rangestore"] {
+            let ns = crate::testutil::namespace_of(&s, key.as_bytes()).await;
+            assert!(crate::testutil::entries_under(&s, &ns).await > 0, "{key}");
+            assert_eq!(crate::testutil::entries_under(&s, &s.private_key(key.as_bytes())).await, 0, "{key}: nothing under the name");
+            assert!(seen.insert(ns), "{key}: namespaces must be unique");
+        }
+    }
+
+    #[tokio::test]
+    async fn recreating_a_sorted_set_does_not_resurrect_old_members() {
+        let s = test_session();
+        crate::testutil::exec(&s, zadd(&s, b"z", &bs(&["1", "old"]))).await;
+        crate::testutil::exec(&s, crate::keys::pexpire(&s, b"z", 5)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        crate::testutil::exec(&s, zadd(&s, b"z", &bs(&["2", "new"]))).await;
+        assert_eq!(
+            crate::testutil::exec(&s, zrange(&s, b"z", 0, -1, false)).await,
+            RespValue::Array(Some(vec![RespValue::BulkString(Some(Bytes::from_static(b"new")))]))
+        );
     }
 
     #[tokio::test]
@@ -2807,7 +2870,7 @@ mod tests {
         let s = test_session();
         crate::testutil::exec(&s, zadd(&s, b"a", &bs(&["1", "a"]))).await;
         crate::testutil::exec(&s, crate::keys::expire(&s, b"a", 100)).await;
-        crate::testutil::namespace_key(&s, b"a", NS_A).await;
+        let ns_a = crate::testutil::namespace_of(&s, b"a").await;
         crate::testutil::exec(&s, zadd(&s, b"a", &bs(&["2", "b"]))).await;
         let ttl = crate::testutil::exec(&s, crate::keys::ttl(&s, b"a")).await;
         assert!(matches!(ttl, RespValue::Integer(n) if (90..=100).contains(&n)), "ttl was {ttl:?}");
@@ -2815,7 +2878,7 @@ mod tests {
         // BZPOPMIN on a namespaced set pops from it.
         let reply = crate::testutil::exec(&s, bzpop(&s, &[&b"a"[..]], 1.0, true)).await;
         assert!(matches!(&reply, RespValue::Array(Some(v)) if v.len() == 3), "got {reply:?}");
-        assert_eq!(crate::testutil::entries_under(&s, NS_A).await, 2, "one member left: a score and a member entry");
+        assert_eq!(crate::testutil::entries_under(&s, &ns_a).await, 2, "one member left: a score and a member entry");
     }
 
     #[tokio::test]

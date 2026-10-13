@@ -14,6 +14,16 @@
 //!   entries for LSM compaction), and `ms`/`seq` are 20-digit zero-padded
 //!   decimals so lexicographic ordering matches numeric ordering. The stored
 //!   value is the serialized field-value pairs (see [`encode_entry_value`]).
+//!
+//! # Where the entries live (RFC 0001)
+//!
+//! The `-<db>:<name>` prefix in the layout above is the *legacy* one, derived
+//! from the key's name, which is how values written by earlier releases are
+//! stored. A value created by this release records a **namespace** instead
+//! (see [`crate::common::namespace`]): its sentinel carries the prefix its
+//! entries live under (`+<db>:` and a random id), so the name plays no part in
+//! where the data is stored and the value can be renamed without moving it.
+//! The suffixes appended to the prefix are the same either way.
 
 use std::ops::Bound;
 use std::sync::{Arc, Mutex};
@@ -24,7 +34,7 @@ use kv::kv::{TxIsolation, BoxFuture, Entry, Error as KvError, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use crate::common::session::Session;
-use crate::common::namespace::{self, base_type, resolve_prefix, ElementPrefix};
+use crate::common::namespace::{self, base_type, resolve_prefix, resolve_prefix_for_write, ElementPrefix};
 use crate::common::{BlockResult, BlockingSignal, Claim, RedisStore, StreamResult, ValueType, WatchRegistry};
 use crate::resp::RespValue;
 
@@ -631,7 +641,7 @@ impl DbOp for XAddOp {
         let field_values = self.field_values.clone();
         let registry = self.registry.clone();
         Box::pin(async move {
-            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
+            let node_prefix = resolve_prefix_for_write(tx, &public_key, &node_prefix).await?;
             let mut meta = match read_sentinel(tx, &public_key).await {
                 Ok(m) => m,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
@@ -1223,8 +1233,7 @@ impl DbOp for XSetIdOp {
         let node_prefix = self.node_prefix.clone();
         let last_id = self.last_id;
         Box::pin(async move {
-            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
-            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
+            let node_prefix = resolve_prefix_for_write(tx, &public_key, &node_prefix).await?;
             let mut meta = match read_sentinel(tx, &public_key).await {
                 Ok(m) => m,
                 Err(DbError::Kv(KvError::KeyNotFound)) => StreamMeta::new(),
@@ -1474,8 +1483,6 @@ mod tests {
 
     // --- namespaced layout (RFC 0001) ---
 
-    const NS_S: &[u8] = b"+0:ns-stream-00s";
-
     fn id(s: &str) -> StreamEntryId {
         parse_stream_id_arg(s.as_bytes()).expect("valid").expect("not $")
     }
@@ -1504,7 +1511,9 @@ mod tests {
                 crate::testutil::exec(s, add(s, at, v)).await;
             }
         }
-        crate::testutil::namespace_key(&ns, b"st", NS_S).await;
+        // New streams are born namespaced; the twin is put back into the layout earlier releases wrote.
+        crate::testutil::legacy_key(&legacy, b"st").await;
+        let ns_s = crate::testutil::namespace_of(&ns, b"st").await;
 
         // Reads.
         both(&legacy, &ns, |s| xlen(s, b"st")).await;
@@ -1525,9 +1534,42 @@ mod tests {
 
         // Nothing under the name-derived prefix; sentinel still records the namespace.
         assert_eq!(crate::testutil::entries_under(&ns, &ns.private_key(b"st")).await, 0);
-        assert!(crate::testutil::entries_under(&ns, NS_S).await > 0);
+        assert!(crate::testutil::entries_under(&ns, &ns_s).await > 0);
         let meta = crate::testutil::stored_type_byte(&ns, &ns.public_key(b"st")).await.unwrap();
         assert_eq!(meta, TYPE_STREAM | crate::common::namespace::NAMESPACE_FLAG);
+    }
+
+    /// Every command that can create a stream gives it a namespace of its own.
+    #[tokio::test]
+    async fn every_command_that_creates_a_stream_gives_it_a_namespace() {
+        let s = test_session();
+        crate::testutil::exec(&s, add(&s, "1-1", "a")).await;
+        crate::testutil::exec(&s, xsetid(&s, b"by_xsetid", id("5-0"))).await;
+        crate::testutil::exec(&s, xadd(&s, b"by_xadd", false, None, None, Some(id("2-1")), &fv(&["f", "v"]))).await;
+        // NOMKSTREAM never creates one.
+        crate::testutil::exec(&s, xadd(&s, b"never_created", true, None, None, Some(id("1-1")), &fv(&["f", "v"]))).await;
+        assert_eq!(crate::testutil::stored_type_byte(&s, &s.public_key(b"never_created")).await, None);
+
+        let mut seen = std::collections::HashSet::new();
+        for key in ["st", "by_xadd"] {
+            let ns = crate::testutil::namespace_of(&s, key.as_bytes()).await;
+            assert!(crate::testutil::entries_under(&s, &ns).await > 0, "{key}");
+            assert_eq!(crate::testutil::entries_under(&s, &s.private_key(key.as_bytes())).await, 0, "{key}: nothing under the name");
+            assert!(seen.insert(ns), "{key}: namespaces must be unique");
+        }
+        // XSETID on a missing key makes an empty stream, which still records a namespace.
+        assert!(seen.insert(crate::testutil::namespace_of(&s, b"by_xsetid").await));
+    }
+
+    #[tokio::test]
+    async fn recreating_a_stream_does_not_resurrect_old_entries() {
+        let s = test_session();
+        crate::testutil::exec(&s, xadd(&s, b"st", false, None, None, Some(id("1-1")), &fv(&["f", "old"]))).await;
+        crate::testutil::exec(&s, crate::keys::pexpire(&s, b"st", 5)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        crate::testutil::exec(&s, xadd(&s, b"st", false, None, None, Some(id("2-1")), &fv(&["f", "new"]))).await;
+        let RespValue::Array(Some(entries)) = crate::testutil::exec(&s, xrange(&s, b"st", None, None, 100)).await else { panic!("XRANGE must reply an array") };
+        assert_eq!(entries.len(), 1, "the expired stream's entry came back: {entries:?}");
     }
 
     #[tokio::test]
@@ -1535,7 +1577,6 @@ mod tests {
         let s = test_session();
         crate::testutil::exec(&s, add(&s, "1-1", "a")).await;
         crate::testutil::exec(&s, crate::keys::expire(&s, b"st", 100)).await;
-        crate::testutil::namespace_key(&s, b"st", NS_S).await;
         crate::testutil::exec(&s, add(&s, "2-1", "b")).await;
         let ttl = crate::testutil::exec(&s, crate::keys::ttl(&s, b"st")).await;
         assert!(matches!(ttl, RespValue::Integer(n) if (90..=100).contains(&n)), "ttl was {ttl:?}");

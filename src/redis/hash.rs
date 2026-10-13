@@ -15,6 +15,16 @@
 //!   prefix by [`field_key`]); its stored value is the field value. Fields
 //!   are enumerated with a prefix iterator over `-<db>:<hashname>\x00`
 //!   (see [`fields_prefix`]).
+//!
+//! # Where the entries live (RFC 0001)
+//!
+//! The `-<db>:<name>` prefix in the layout above is the *legacy* one, derived
+//! from the key's name, which is how values written by earlier releases are
+//! stored. A value created by this release records a **namespace** instead
+//! (see [`crate::common::namespace`]): its sentinel carries the prefix its
+//! entries live under (`+<db>:` and a random id), so the name plays no part in
+//! where the data is stored and the value can be renamed without moving it.
+//! The suffixes appended to the prefix are the same either way.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,7 +34,7 @@ use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use crate::common::session::Session;
-use crate::common::namespace::{self, base_type, resolve_prefix, ElementPrefix};
+use crate::common::namespace::{self, base_type, resolve_prefix, resolve_prefix_for_write, ElementPrefix};
 use crate::common::ValueType;
 use crate::resp::RespValue;
 
@@ -427,7 +437,7 @@ impl DbOp for HSetOp {
         let node_prefix = self.node_prefix.clone();
         let field_values = self.field_values.clone();
         Box::pin(async move {
-            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
+            let node_prefix = resolve_prefix_for_write(tx, &public_key, &node_prefix).await?;
             let mut count = match read_sentinel(tx, &public_key).await {
                 Ok(c) => c,
                 Err(DbError::Kv(KvError::KeyNotFound)) => 0,
@@ -473,7 +483,7 @@ impl DbOp for HSetNxOp {
         let field = self.field.clone();
         let value = self.value.clone();
         Box::pin(async move {
-            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
+            let node_prefix = resolve_prefix_for_write(tx, &public_key, &node_prefix).await?;
             let fk = field_key(&node_prefix, &field);
             match tx.get(&fk).await {
                 Ok(_) => {
@@ -778,7 +788,7 @@ impl DbOp for HIncrByOp {
         let field = self.field.clone();
         let amount = self.amount;
         Box::pin(async move {
-            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
+            let node_prefix = resolve_prefix_for_write(tx, &public_key, &node_prefix).await?;
             let fk = field_key(&node_prefix, &field);
             let (current, field_existed) = match tx.get(&fk).await {
                 Ok(item) => {
@@ -830,7 +840,7 @@ impl DbOp for HIncrByFloatOp {
         let field = self.field.clone();
         let amount = self.amount;
         Box::pin(async move {
-            let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
+            let node_prefix = resolve_prefix_for_write(tx, &public_key, &node_prefix).await?;
             if amount.is_nan() {
                 return Err(DbError::Redis("value is not a valid float".to_string()));
             }
@@ -1316,10 +1326,8 @@ mod tests {
 
     // --- namespaced layout (RFC 0001) ---
 
-    const NS: &[u8] = b"+0:ns-hash-0001";
-
-    /// Runs the same op on a legacy hash and on its namespaced twin and
-    /// demands identical replies.
+    /// Runs the same op on a hash in the legacy layout and on its namespaced
+    /// twin and demands identical replies.
     async fn both(legacy: &Session, namespaced: &Session, build: impl Fn(&Session) -> QueuedOp) -> RespValue {
         let a = crate::testutil::exec(legacy, build(legacy)).await;
         let b = crate::testutil::exec(namespaced, build(namespaced)).await;
@@ -1337,7 +1345,10 @@ mod tests {
         for s in [&legacy, &namespaced] {
             exec(s, hset(s, b"h", &bs(&["a", "1", "b", "2", "c", "3"]))).await;
         }
-        crate::testutil::namespace_key(&namespaced, b"h", NS).await;
+        // New hashes are born namespaced; the twin is put back into the layout
+        // earlier releases wrote.
+        crate::testutil::legacy_key(&legacy, b"h").await;
+        let ns = crate::testutil::namespace_of(&namespaced, b"h").await;
 
         // Reads.
         both(&legacy, &namespaced, |s| hget(s, b"h", b"b")).await;
@@ -1363,7 +1374,7 @@ mod tests {
         // Nothing may have been written under the name-derived prefix, the
         // sentinel must still record the namespace, and the elements live there.
         assert_eq!(crate::testutil::entries_under(&namespaced, &namespaced.private_key(b"h")).await, 0);
-        assert!(crate::testutil::entries_under(&namespaced, NS).await > 0);
+        assert!(crate::testutil::entries_under(&namespaced, &ns).await > 0);
         let meta = crate::testutil::stored_type_byte(&namespaced, &namespaced.public_key(b"h")).await.unwrap();
         assert_eq!(meta, TYPE_HASH | crate::common::namespace::NAMESPACE_FLAG);
 
@@ -1372,7 +1383,58 @@ mod tests {
         both(&legacy, &namespaced, |s| hdel(s, b"h", &all)).await;
         both(&legacy, &namespaced, |s| hlen(s, b"h")).await;
         assert_eq!(crate::testutil::stored_type_byte(&namespaced, &namespaced.public_key(b"h")).await, None);
-        assert_eq!(crate::testutil::entries_under(&namespaced, NS).await, 0);
+        assert_eq!(crate::testutil::entries_under(&namespaced, &ns).await, 0);
+    }
+
+    /// Every command that can create a hash gives it a namespace of its own and
+    /// stores the fields there, none under the prefix derived from the name.
+    #[tokio::test]
+    async fn every_command_that_creates_a_hash_gives_it_a_namespace() {
+        let s = test_session();
+        exec(&s, hset(&s, b"by_hset", &bs(&["f", "v"]))).await;
+        exec(&s, hsetnx(&s, b"by_hsetnx", b"f", b"v")).await;
+        exec(&s, hincrby(&s, b"by_hincrby", b"f", 3)).await;
+        exec(&s, hincrbyfloat(&s, b"by_hincrbyfloat", b"f", 1.5)).await;
+        exec(&s, hset(&s, b"by_hmset", &bs(&["a", "1", "b", "2"]))).await;
+
+        let mut seen = std::collections::HashSet::new();
+        for key in ["by_hset", "by_hsetnx", "by_hincrby", "by_hincrbyfloat", "by_hmset"] {
+            let ns = crate::testutil::namespace_of(&s, key.as_bytes()).await;
+            assert!(ns.starts_with(b"+0:"), "{key}: {}", String::from_utf8_lossy(&ns));
+            assert!(crate::testutil::entries_under(&s, &ns).await > 0, "{key}: fields live in the namespace");
+            assert_eq!(crate::testutil::entries_under(&s, &s.private_key(key.as_bytes())).await, 0, "{key}: nothing under the name");
+            assert!(seen.insert(ns), "{key}: namespaces must be unique");
+        }
+    }
+
+    /// The elements of a hash that expired or was deleted can never reappear
+    /// in a hash created later under the same name.
+    #[tokio::test]
+    async fn recreating_a_hash_does_not_resurrect_old_fields() {
+        let s = test_session();
+        exec(&s, hset(&s, b"h", &bs(&["old", "1"]))).await;
+        exec(&s, crate::keys::pexpire(&s, b"h", 5)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+
+        exec(&s, hset(&s, b"h", &bs(&["new", "2"]))).await;
+
+        let got = expect_bulk_array(&exec(&s, hgetall(&s, b"h")).await);
+        assert_eq!(got, vec![b"new".to_vec(), b"2".to_vec()], "the expired hash's field came back");
+    }
+
+    /// Two commands creating and then extending the same new hash inside one
+    /// transaction must agree on its namespace.
+    #[tokio::test]
+    async fn creating_then_extending_a_hash_in_one_transaction_uses_one_namespace() {
+        use crate::commands::enqueue_command;
+        let mut s = test_session();
+        let run = |args: &[&str]| args.iter().map(|a| Bytes::copy_from_slice(a.as_bytes())).collect::<Vec<_>>();
+        for cmd in [vec!["multi"], vec!["hset", "h", "a", "1"], vec!["hset", "h", "b", "2"], vec!["hincrby", "h", "n", "5"], vec!["exec"]] {
+            enqueue_command(&mut s, &run(&cmd)).await;
+        }
+        let ns = crate::testutil::namespace_of(&s, b"h").await;
+        assert_eq!(crate::testutil::entries_under(&s, &ns).await, 3, "all three fields share the namespace");
+        assert_eq!(expect_int(&exec(&s, hlen(&s, b"h")).await), 3);
     }
 
     #[tokio::test]
@@ -1380,7 +1442,6 @@ mod tests {
         let s = test_session();
         exec(&s, hset(&s, b"h", &bs(&["a", "1"]))).await;
         exec(&s, crate::keys::expire(&s, b"h", 100)).await;
-        crate::testutil::namespace_key(&s, b"h", NS).await;
 
         exec(&s, hset(&s, b"h", &bs(&["b", "2"]))).await; // rewrites the sentinel
         let ttl = crate::testutil::exec(&s, crate::keys::ttl(&s, b"h")).await;
@@ -1397,7 +1458,6 @@ mod tests {
         use crate::common::namespace::ElementPrefix;
         let s = test_session();
         exec(&s, hset(&s, b"h", &bs(&["a", "1"]))).await;
-        crate::testutil::namespace_key(&s, b"h", NS).await;
 
         let store = s.store();
         let tx = store.begin(true, kv::kv::TxIsolation::Snapshot).await.unwrap();

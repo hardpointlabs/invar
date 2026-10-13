@@ -463,9 +463,12 @@ impl DbOp for MoveOp {
 /// are addressed by the old name, and the public entry moves with its
 /// remaining TTL. `RENAME k k` is a no-op.
 ///
-/// A value whose sentinel records a namespace needs nothing but its sentinel
-/// copied, so renaming it is O(1). A legacy value's elements are addressed by
-/// its name (`-<db>:<name>...`), so they are re-keyed: O(size of the value).
+/// Renaming is O(1) whatever the layout, because the elements never move. A
+/// value whose sentinel records a namespace just has the sentinel copied. A
+/// legacy value's elements are addressed by its old name (`-<db>:<old>...`),
+/// so the new sentinel records that prefix as its namespace; nothing else is
+/// rewritten, and a key later created under the old name gets a namespace of
+/// its own instead of colliding with them.
 async fn rename_entry(tx: &dyn Tx, old: &[u8], new: &[u8], item: &Item) -> Result<(), DbError> {
     if old == new {
         return Ok(());
@@ -482,10 +485,12 @@ async fn rename_entry(tx: &dyn Tx, old: &[u8], new: &[u8], item: &Item) -> Resul
     }
 
     let source = prefix_of(item, &legacy(old))?;
-    if !source.is_explicit() {
-        move_elements(tx, old, base_type(item.metadata()), &source, &legacy(new)).await?;
-    }
-    tx.set(Entry::new(new.to_vec(), item.value().to_vec()).metadata(item.metadata()).keep_ttl_of(item))?;
+    let (value, metadata) = if source.is_explicit() || !has_elements(base_type(item.metadata())) {
+        (item.value().to_vec(), item.metadata())
+    } else {
+        encode_sentinel(item.value().to_vec(), item.metadata(), &ElementPrefix::explicit(source.to_vec()))
+    };
+    tx.set(Entry::new(new.to_vec(), value).metadata(metadata).keep_ttl_of(item))?;
     tx.delete(old)?;
     Ok(())
 }
@@ -756,6 +761,14 @@ fn element_prefixes(base_type: u8, prefix: &[u8]) -> Vec<Vec<u8>> {
     } else {
         Vec::new()
     }
+}
+
+/// Whether values of this type keep their data as separate element entries
+/// (strings, HyperLogLogs and JSON documents live in the public entry itself).
+fn has_elements(base_type: u8) -> bool {
+    [ValueType::List, ValueType::Set, ValueType::SortedSet, ValueType::Hash, ValueType::Stream, ValueType::Bloom]
+        .iter()
+        .any(|t| *t as u8 == base_type)
 }
 
 /// Re-keys every entry under `from` to live under `to` instead (keeping the
@@ -1226,17 +1239,10 @@ mod tests {
         assert_eq!(expect_int(&reply), 0);
     }
 
-    /// Number of internal (`-`-prefixed) entries currently in the store.
+    /// Number of internal (`-`- or `+`-prefixed) entries currently in the store.
     async fn internal_entry_count(session: &Session) -> usize {
-        let store = session.store();
-        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
-        let mut it = tx.new_prefix_iterator(b"-").await.expect("iterator");
-        let mut count = 0;
-        while it.next().await {
-            count += 1;
-        }
-        it.close().await.expect("close");
-        count
+        // Name-derived prefixes start with `-`, namespaces with `+`.
+        crate::testutil::entries_under(session, b"-").await + crate::testutil::entries_under(session, b"+").await
     }
 
     /// Builds a value of each compound type under `key`, so tests can check
@@ -1259,15 +1265,20 @@ mod tests {
     #[tokio::test]
     async fn del_removes_every_internal_entry_of_each_compound_type() {
         for ty in ["list", "hash", "set", "zset", "stream", "bloom"] {
+          for legacy in [false, true] {
             let session = test_session();
             for op in build_ops(&session, ty, b"k") {
                 exec(&session, op).await;
+            }
+            if legacy {
+                crate::testutil::legacy_key(&session, b"k").await;
             }
             assert!(internal_entry_count(&session).await > 0, "{ty}: test data must create internal entries");
 
             let reply = exec(&session, del(&session, &[bs("k")])).await;
             assert_eq!(expect_int(&reply), 1, "{ty}");
-            assert_eq!(internal_entry_count(&session).await, 0, "{ty}: DEL left internal entries behind");
+            assert_eq!(internal_entry_count(&session).await, 0, "{ty} (legacy layout: {legacy}): DEL left internal entries behind");
+          }
         }
     }
 
@@ -1451,9 +1462,11 @@ mod tests {
         }
     }
 
-    /// The namespace used for `ty` in these tests (db 0).
-    fn ns_for(ty: &str) -> Vec<u8> {
-        format!("+0:ns-{ty:-<8}-keys").into_bytes()
+    /// Builds the value, then puts it into the layout earlier releases wrote
+    /// (elements addressed by the key's name).
+    async fn build_legacy(session: &Session, ty: &str, key: &[u8]) {
+        build(session, ty, key).await;
+        crate::testutil::legacy_key(session, key).await;
     }
 
     #[tokio::test]
@@ -1461,8 +1474,7 @@ mod tests {
         for ty in TYPES {
             let s = test_session();
             build(&s, ty, b"k").await;
-            let ns = ns_for(ty);
-            crate::testutil::namespace_key(&s, b"k", &ns).await;
+            let ns = crate::testutil::namespace_of(&s, b"k").await;
             assert!(crate::testutil::entries_under(&s, &ns).await > 0, "{ty}");
 
             assert_eq!(expect_int(&exec(&s, del(&s, &[bs("k")])).await), 1, "{ty}");
@@ -1479,8 +1491,7 @@ mod tests {
         for ty in TYPES {
             let s = test_session();
             build(&s, ty, b"old").await;
-            let ns = ns_for(ty);
-            crate::testutil::namespace_key(&s, b"old", &ns).await;
+            let ns = crate::testutil::namespace_of(&s, b"old").await;
             let before = read_back(&s, ty, b"old").await;
             let elements = crate::testutil::entries_snapshot(&s, &ns).await;
             let empty = read_back(&s, ty, b"never-existed").await;
@@ -1497,21 +1508,61 @@ mod tests {
         }
     }
 
-    /// A legacy value's elements are addressed by its name, so they are re-keyed.
+    /// A legacy value's elements are addressed by its old name, so the renamed
+    /// value's sentinel records that prefix and nothing is moved: O(1) here too.
     #[tokio::test]
-    async fn renaming_a_legacy_value_moves_its_elements() {
+    async fn renaming_a_legacy_value_does_not_touch_its_elements() {
         for ty in TYPES {
             let s = test_session();
-            build(&s, ty, b"old").await;
+            build_legacy(&s, ty, b"old").await;
             let before = read_back(&s, ty, b"old").await;
             let empty = read_back(&s, ty, b"never-existed").await;
+            let old_prefix = s.private_key(b"old");
+            let elements = crate::testutil::entries_snapshot(&s, &old_prefix).await;
+            assert!(!elements.is_empty(), "{ty}");
 
             exec(&s, rename(&s, b"old", b"new")).await;
 
             assert_eq!(read_back(&s, ty, b"new").await, before, "{ty}");
             assert_eq!(read_back(&s, ty, b"old").await, empty, "{ty}");
-            assert_eq!(internal_entry_count(&s).await, crate::testutil::entries_under(&s, &s.private_key(b"new")).await, "{ty}: stray entries");
+            assert_eq!(crate::testutil::entries_snapshot(&s, &old_prefix).await, elements, "{ty}: RENAME rewrote elements");
+            assert_eq!(crate::testutil::namespace_of(&s, b"new").await, old_prefix, "{ty}: the new sentinel records the prefix the elements live under");
         }
+    }
+
+    /// Elements left under the old name's prefix by a rename can never be seen
+    /// by a key created later under that name.
+    #[tokio::test]
+    async fn a_name_freed_by_a_rename_starts_empty() {
+        for legacy in [false, true] {
+            let s = test_session();
+            exec(&s, crate::hash::hset(&s, b"old", &[bs("f"), bs("v")])).await;
+            if legacy {
+                crate::testutil::legacy_key(&s, b"old").await;
+            }
+            exec(&s, rename(&s, b"old", b"new")).await;
+
+            exec(&s, crate::hash::hset(&s, b"old", &[bs("g"), bs("w")])).await;
+
+            let fresh = exec(&s, crate::hash::hgetall(&s, b"old")).await;
+            assert_eq!(fresh, RespValue::Array(Some(vec![RespValue::BulkString(Some(bs("g"))), RespValue::BulkString(Some(bs("w")))])), "legacy={legacy}");
+            let renamed = exec(&s, crate::hash::hgetall(&s, b"new")).await;
+            assert_eq!(renamed, RespValue::Array(Some(vec![RespValue::BulkString(Some(bs("f"))), RespValue::BulkString(Some(bs("v")))])), "legacy={legacy}");
+        }
+    }
+
+    /// Strings (and other types with no separate elements) have nothing to
+    /// record, so renaming them must leave a plain string behind.
+    #[tokio::test]
+    async fn renaming_a_string_does_not_make_it_a_namespaced_value() {
+        let s = test_session();
+        seed_string(&s, b"old", b"value").await;
+        exec(&s, rename(&s, b"old", b"new")).await;
+        assert_eq!(stored(&s, 0, b"new").await, Some(b"value".to_vec()));
+        assert_eq!(
+            crate::testutil::stored_type_byte(&s, &s.public_key(b"new")).await,
+            Some(ValueType::String as u8)
+        );
     }
 
     #[tokio::test]
@@ -1519,14 +1570,14 @@ mod tests {
         let s = test_session();
         build(&s, "hash", b"dst").await;
         crate::testutil::exec(&s, crate::hash::hset(&s, b"dst", &[bs("stale"), bs("x")])).await;
-        crate::testutil::namespace_key(&s, b"dst", b"+0:ns-dst-0001").await;
+        let dst_ns = crate::testutil::namespace_of(&s, b"dst").await;
         crate::testutil::exec(&s, crate::hash::hset(&s, b"src", &[bs("f"), bs("v")])).await;
 
         exec(&s, rename(&s, b"src", b"dst")).await;
 
         let got = exec(&s, crate::hash::hgetall(&s, b"dst")).await;
         assert_eq!(got, RespValue::Array(Some(vec![RespValue::BulkString(Some(bs("f"))), RespValue::BulkString(Some(bs("v")))])));
-        assert_eq!(crate::testutil::entries_under(&s, b"+0:ns-dst-0001").await, 0, "the old destination's elements must be cleared");
+        assert_eq!(crate::testutil::entries_under(&s, &dst_ns).await, 0, "the old destination's elements must be cleared");
     }
 
     #[tokio::test]
@@ -1534,7 +1585,6 @@ mod tests {
         let s = test_session();
         build(&s, "list", b"old").await;
         exec(&s, expire(&s, b"old", 100)).await;
-        crate::testutil::namespace_key(&s, b"old", b"+0:ns-ttl-0001").await;
         exec(&s, rename(&s, b"old", b"new")).await;
         let remaining = ttl_secs(&s, b"new").await;
         assert!((90..=100).contains(&remaining), "ttl was {remaining}");
@@ -1545,7 +1595,6 @@ mod tests {
         let s = test_session();
         for ty in TYPES {
             build(&s, ty, ty.as_bytes()).await;
-            crate::testutil::namespace_key(&s, ty.as_bytes(), &ns_for(ty)).await;
         }
         // TYPE and EXISTS.
         for ty in TYPES {
@@ -1580,7 +1629,7 @@ mod tests {
     async fn move_carries_a_legacy_value_to_another_db() {
         for ty in TYPES {
             let mut s = test_session();
-            build(&s, ty, b"k").await;
+            build_legacy(&s, ty, b"k").await;
             exec(&s, expire(&s, b"k", 100)).await;
             let before = read_back(&s, ty, b"k").await;
 
@@ -1600,8 +1649,7 @@ mod tests {
         for ty in TYPES {
             let mut s = test_session();
             build(&s, ty, b"k").await;
-            let ns = ns_for(ty);
-            crate::testutil::namespace_key(&s, b"k", &ns).await;
+            let ns = crate::testutil::namespace_of(&s, b"k").await;
             let before = read_back(&s, ty, b"k").await;
             let elements = crate::testutil::entries_snapshot(&s, &ns).await.len();
 

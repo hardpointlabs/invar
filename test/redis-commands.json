@@ -4211,5 +4211,191 @@
     "setup": [
       ["DEL", "mv_missing_key"]
     ]
+  },
+  {
+    "name": "Recreating a hash after SET and DEL does not resurrect its old elements",
+    "command": ["HGETALL", "ns_res_hash"],
+    "expected": ["new", "2"],
+    "type": "array",
+    "version": "2.0.0",
+    "description": "elements of the hash overwritten by SET must not reappear in a hash created later under the same name",
+    "setup": [
+      ["DEL", "ns_res_hash"],
+      ["HSET", "ns_res_hash", "old", "1"],
+      ["SET", "ns_res_hash", "now a string"],
+      ["DEL", "ns_res_hash"],
+      ["HSET", "ns_res_hash", "new", "2"]
+    ]
+  },
+  {
+    "name": "Recreating a set after SET and DEL does not resurrect its old elements",
+    "command": ["SMEMBERS", "ns_res_set"],
+    "expected": ["new"],
+    "type": "set",
+    "version": "1.0.0",
+    "description": "elements of the set overwritten by SET must not reappear in a set created later under the same name",
+    "setup": [
+      ["DEL", "ns_res_set"],
+      ["SADD", "ns_res_set", "old"],
+      ["SET", "ns_res_set", "now a string"],
+      ["DEL", "ns_res_set"],
+      ["SADD", "ns_res_set", "new"]
+    ]
+  },
+  {
+    "name": "Recreating a sorted set after SET and DEL does not resurrect its old elements",
+    "command": ["ZRANGE", "ns_res_zset", "0", "-1", "WITHSCORES"],
+    "expected": ["new", "2"],
+    "type": "array",
+    "version": "1.2.0",
+    "description": "elements of the sorted set overwritten by SET must not reappear in a sorted set created later under the same name",
+    "setup": [
+      ["DEL", "ns_res_zset"],
+      ["ZADD", "ns_res_zset", "1", "old"],
+      ["SET", "ns_res_zset", "now a string"],
+      ["DEL", "ns_res_zset"],
+      ["ZADD", "ns_res_zset", "2", "new"]
+    ]
+  },
+  {
+    "name": "Recreating a list after SET and DEL does not resurrect its old elements",
+    "command": ["LRANGE", "ns_res_list", "0", "-1"],
+    "expected": ["new"],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "elements of the list overwritten by SET must not reappear in a list created later under the same name",
+    "setup": [
+      ["DEL", "ns_res_list"],
+      ["RPUSH", "ns_res_list", "old"],
+      ["SET", "ns_res_list", "now a string"],
+      ["DEL", "ns_res_list"],
+      ["RPUSH", "ns_res_list", "new"]
+    ]
+  },
+  {
+    "name": "Recreating a stream after SET and DEL does not resurrect its old elements",
+    "command": ["XRANGE", "ns_res_stream", "-", "+"],
+    "expected": [["2-1", ["f", "new"]]],
+    "type": "array",
+    "version": "5.0.0",
+    "description": "elements of the stream overwritten by SET must not reappear in a stream created later under the same name",
+    "setup": [
+      ["DEL", "ns_res_stream"],
+      ["XADD", "ns_res_stream", "1-1", "f", "old"],
+      ["SET", "ns_res_stream", "now a string"],
+      ["DEL", "ns_res_stream"],
+      ["XADD", "ns_res_stream", "2-1", "f", "new"]
+    ]
+  },
+  {
+    "name": "Recreating a bloom filter after SET and DEL does not resurrect its old elements",
+    "command": ["BF.EXISTS", "ns_res_bloom", "old"],
+    "expected": 0,
+    "type": "integer",
+    "version": "1.0.0",
+    "description": "elements of the bloom filter overwritten by SET must not reappear in a bloom filter created later under the same name",
+    "setup": [
+      ["DEL", "ns_res_bloom"],
+      ["BF.ADD", "ns_res_bloom", "old"],
+      ["SET", "ns_res_bloom", "now a string"],
+      ["DEL", "ns_res_bloom"],
+      ["BF.ADD", "ns_res_bloom", "new"]
+    ]
+  },
+  {
+    "name": "A name freed by RENAME starts as an empty hash",
+    "command": ["HGETALL", "ns_free_hash_old"],
+    "expected": ["g", "w"],
+    "type": "array",
+    "version": "2.0.0",
+    "description": "reusing the old name of a renamed hash must not show the renamed hash's fields",
+    "setup": [
+      ["DEL", "ns_free_hash_old", "ns_free_hash_new"],
+      ["HSET", "ns_free_hash_old", "f", "v"],
+      ["RENAME", "ns_free_hash_old", "ns_free_hash_new"],
+      ["HSET", "ns_free_hash_old", "g", "w"]
+    ]
+  },
+  {
+    "name": "The hash a RENAME moved is unaffected by reusing its old name",
+    "command": ["HGETALL", "ns_free_hash2_new"],
+    "expected": ["f", "v"],
+    "type": "array",
+    "version": "2.0.0",
+    "description": "the renamed hash keeps exactly its own fields",
+    "setup": [
+      ["DEL", "ns_free_hash2_old", "ns_free_hash2_new"],
+      ["HSET", "ns_free_hash2_old", "f", "v"],
+      ["RENAME", "ns_free_hash2_old", "ns_free_hash2_new"],
+      ["HSET", "ns_free_hash2_old", "g", "w"]
+    ]
+  },
+  {
+    "name": "A name freed by RENAME starts as an empty list",
+    "command": ["LRANGE", "ns_free_list_old", "0", "-1"],
+    "expected": ["c"],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "reusing the old name of a renamed list must not show the renamed list's elements",
+    "setup": [
+      ["DEL", "ns_free_list_old", "ns_free_list_new"],
+      ["RPUSH", "ns_free_list_old", "a", "b"],
+      ["RENAME", "ns_free_list_old", "ns_free_list_new"],
+      ["RPUSH", "ns_free_list_old", "c"]
+    ]
+  },
+  {
+    "name": "Creating a hash with two HSETs inside MULTI keeps both fields",
+    "command": ["HGETALL", "ns_multi_hash"],
+    "expected": ["a", "1", "b", "2"],
+    "type": "array",
+    "version": "2.0.0",
+    "description": "both commands of the transaction must use the same storage for the new hash",
+    "setup": [
+      ["DEL", "ns_multi_hash"],
+      ["MULTI"],
+      ["HSET", "ns_multi_hash", "a", "1"],
+      ["HSET", "ns_multi_hash", "b", "2"],
+      ["EXEC"]
+    ]
+  },
+  {
+    "name": "Creating a list with two RPUSHes inside MULTI keeps both elements",
+    "command": ["LRANGE", "ns_multi_list", "0", "-1"],
+    "expected": ["a", "b"],
+    "type": "array",
+    "version": "1.0.0",
+    "description": "both commands of the transaction must use the same storage for the new list",
+    "setup": [
+      ["DEL", "ns_multi_list"],
+      ["MULTI"],
+      ["RPUSH", "ns_multi_list", "a"],
+      ["RPUSH", "ns_multi_list", "b"],
+      ["EXEC"]
+    ]
+  },
+  {
+    "name": "Creating a sorted set with two ZADDs in a Lua script keeps both members",
+    "command": ["ZRANGE", "ns_script_zset", "0", "-1"],
+    "expected": ["a", "b"],
+    "type": "array",
+    "version": "1.2.0",
+    "description": "both calls of the script must use the same storage for the new sorted set",
+    "setup": [
+      ["DEL", "ns_script_zset"],
+      ["EVAL", "redis.call('ZADD',KEYS[1],1,'a'); redis.call('ZADD',KEYS[1],2,'b')", "1", "ns_script_zset"]
+    ]
+  },
+  {
+    "name": "Creating a hash with HSET then HINCRBY in a Lua script keeps both fields",
+    "command": ["HGETALL", "ns_script_hash"],
+    "expected": ["a", "1", "n", "5"],
+    "type": "array",
+    "version": "2.0.0",
+    "description": "both calls of the script must use the same storage for the new hash",
+    "setup": [
+      ["DEL", "ns_script_hash"],
+      ["EVAL", "redis.call('HSET',KEYS[1],'a','1'); redis.call('HINCRBY',KEYS[1],'n',5)", "1", "ns_script_hash"]
+    ]
   }
 ]
