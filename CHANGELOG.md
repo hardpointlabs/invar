@@ -1,3 +1,24 @@
+# [1.1.0](https://github.com/hardpointlabs/invar/compare/v1.0.36...v1.1.0) (2026-10-14)
+
+
+### Bug Fixes
+
+* blocked XREAD no longer misses an entry committed around its read ([f92279f](https://github.com/hardpointlabs/invar/commit/f92279f399e50fe64cf5b9cd393fcddf5b43b7a0))
+* make MOVE correct for compound values; DEL, RENAME, MOVE and FLUSHDB understand namespaces ([0176cd5](https://github.com/hardpointlabs/invar/commit/0176cd528119fd488f085ea8fbe3203321798d14))
+* make redis_glob_match a faithful port of Redis's stringmatchlen ([cdcbf02](https://github.com/hardpointlabs/invar/commit/cdcbf0207e99611bcbe62dee0d7d290be43f2fdf))
+
+
+### Features
+
+* add the KEYS command ([5d8f86f](https://github.com/hardpointlabs/invar/commit/5d8f86ff4104a718dd94367ad3e83c5cd8f8b089))
+* give new compound values a namespace of their own ([b231aeb](https://github.com/hardpointlabs/invar/commit/b231aeb1279e2b05859d137e38509f12a7a68418))
+* make the write-conflict retry count configurable (--conflict-retry-count) ([8cbaf28](https://github.com/hardpointlabs/invar/commit/8cbaf282229181534f92e4dded7f658bab1b8445))
+* resolve a bloom filter's page prefix from its meta entry ([0bb051a](https://github.com/hardpointlabs/invar/commit/0bb051ace68e73964f26de0a70efb1f1bf9c96b3))
+* resolve a compound value's element prefix from its sentinel (hash, set) ([0dce7b3](https://github.com/hardpointlabs/invar/commit/0dce7b3bd3d0d54638f5b8fa639c3b0750103d4e))
+* resolve a list's node prefix from its sentinel ([309c9de](https://github.com/hardpointlabs/invar/commit/309c9dec81a69fec300bd45c4f8fdf55d3dcb22f))
+* resolve a sorted set's index prefix from its sentinel ([e8dc521](https://github.com/hardpointlabs/invar/commit/e8dc5216b6b368db7f05e3840467c03d16711313))
+* resolve a stream's entry prefix from its sentinel ([62a333a](https://github.com/hardpointlabs/invar/commit/62a333a11e455f2ec962b51fac2cd0f6f9e356f8))
+
 # [1.3.0](https://github.com/hardpointlabs/invar/compare/v1.2.0...v1.3.0) (2026-10-13)
 
 
