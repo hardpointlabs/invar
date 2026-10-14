@@ -83,6 +83,10 @@ struct Waiter {
 pub struct Claim {
     waiter: Arc<Waiter>,
     result: Option<BlockResult>,
+    /// Set for a stream notification (see [`WatchRegistry::stream_notification`]):
+    /// there is no claimed waiter, and waking serves every stream waiter that
+    /// is registered at that moment.
+    notify: Option<Arc<WatchRegistry>>,
 }
 
 impl Claim {
@@ -107,6 +111,10 @@ impl Claim {
     /// transaction that produced it has committed. Removes the delivery
     /// channel from the waiter afterwards.
     pub fn wake(&self) {
+        if let Some(registry) = &self.notify {
+            registry.wake_stream_waiters(&self.waiter.keys[0]);
+            return;
+        }
         if let WaitKind::Stream = self.waiter.kind {
             tracing::debug!(waiter_id = self.waiter.id, "stream waiter woken");
         }
@@ -222,7 +230,61 @@ impl WatchRegistry {
         Some(Claim {
             waiter,
             result: None,
+            notify: None,
         })
+    }
+
+    /// Returns a [`Claim`] that, when woken (after the writer's transaction
+    /// has committed), wakes every `XREAD` waiter registered on `public_key`
+    /// at that moment.
+    ///
+    /// Stream waiters only need a signal, since they re-read the stream.
+    /// Serving them at wake time rather than claiming them inside the DbOp
+    /// matters: a reader that registers and reads after the DbOp ran but
+    /// before it committed misses the entry, and must still be signalled.
+    pub fn stream_notification(self: &Arc<Self>, public_key: &[u8]) -> Claim {
+        Claim {
+            waiter: Arc::new(Waiter {
+                id: 0,
+                keys: vec![public_key.to_vec()],
+                kind: WaitKind::Stream,
+                tx: Mutex::new(None),
+            }),
+            result: None,
+            notify: Some(self.clone()),
+        }
+    }
+
+    fn wake_stream_waiters(&self, public_key: &[u8]) {
+        let woken: Vec<Arc<Waiter>> = {
+            let mut inner = self.inner.lock().unwrap();
+            let Some(queue) = inner.waiters.get_mut(public_key) else {
+                return;
+            };
+            let woken: Vec<Arc<Waiter>> = queue
+                .iter()
+                .filter(|w| matches!(w.kind, WaitKind::Stream))
+                .cloned()
+                .collect();
+            for waiter in &woken {
+                for key in &waiter.keys {
+                    if let Some(queue) = inner.waiters.get_mut(key) {
+                        queue.retain(|w| w.id != waiter.id);
+                        if queue.is_empty() {
+                            inner.waiters.remove(key);
+                        }
+                    }
+                }
+            }
+            woken
+        };
+        for waiter in woken {
+            if let Some(sender) = waiter.tx.lock().unwrap().take() {
+                let _ = sender.send(BlockResult::Stream(StreamResult {
+                    public_key: public_key.to_vec(),
+                }));
+            }
+        }
     }
 
     /// Pushes a released claim's waiter back to the FRONT of each key's queue
@@ -230,6 +292,9 @@ impl WatchRegistry {
     /// later op in the same batch) fails after [`WatchRegistry::try_claim`]
     /// already ran.
     pub fn release_front(&self, claim: &Claim) {
+        if claim.notify.is_some() {
+            return;
+        }
         let mut inner = self.inner.lock().unwrap();
         for key in &claim.waiter.keys {
             inner
@@ -271,35 +336,28 @@ impl WatchRegistry {
         self.block_inner(keys, WaitKind::Stream, timeout).await
     }
 
-    /// Registers `kind` as a waiter on all `keys`, then blocks until a writer
-    /// claims it and delivers a result, or `timeout` elapses (`None` = wait
-    /// indefinitely).
+    /// Registers the caller as an XREAD waiter on `keys` without blocking.
     ///
-    /// Returns `None` on a clean timeout. If a writer claimed this waiter
-    /// concurrently, the registration is gone, so the channel is drained
-    /// instead — discarding a real result that was already removed from the
-    /// sorted set would lose data.
-    async fn block_inner(
-        &self,
-        keys: &[Vec<u8>],
-        kind: WaitKind,
-        timeout: Option<Duration>,
-    ) -> Option<BlockResult> {
-        let (tx, mut rx) = oneshot::channel();
-        let id = {
+    /// Register *before* reading the stream, then [`Registration::wait`] only
+    /// if the read found nothing: a write landing between the read and a
+    /// later registration would otherwise be missed until the next write.
+    pub fn register_stream(&self, keys: &[Vec<u8>]) -> Registration<'_> {
+        tracing::debug!(keys = ?keys, "xread registering");
+        self.register(keys, WaitKind::Stream)
+    }
+
+    fn register(&self, keys: &[Vec<u8>], kind: WaitKind) -> Registration<'_> {
+        let (tx, rx) = oneshot::channel();
+        let waiter = {
             let mut inner = self.inner.lock().unwrap();
             let id = inner.next_id;
             inner.next_id += 1;
-            id
-        };
-        let waiter = Arc::new(Waiter {
-            id,
-            keys: keys.to_vec(),
-            kind,
-            tx: Mutex::new(Some(tx)),
-        });
-        {
-            let mut inner = self.inner.lock().unwrap();
+            let waiter = Arc::new(Waiter {
+                id,
+                keys: keys.to_vec(),
+                kind,
+                tx: Mutex::new(Some(tx)),
+            });
             for key in keys {
                 inner
                     .waiters
@@ -307,48 +365,25 @@ impl WatchRegistry {
                     .or_default()
                     .push_back(waiter.clone());
             }
-        }
-        if let WaitKind::Stream = kind {
-            tracing::debug!(
-                waiter_id = id,
-                keys = ?keys,
-                "stream waiter registered (xread blocking)"
-            );
-        }
-
-        // If this future is dropped while blocked (its client disconnected),
-        // the registration must not outlive it, or a later write would claim
-        // a waiter nobody can reply to.
-        let _deregister = Deregister {
-            registry: self,
-            waiter: waiter.clone(),
+            waiter
         };
-
-        match timeout {
-            Some(duration) => {
-                match tokio::time::timeout(duration, &mut rx).await {
-                    Ok(result) => result.ok(),
-                    Err(_elapsed) => {
-                        if self.remove_waiter(&waiter) {
-                            if let WaitKind::Stream = waiter.kind {
-                                tracing::debug!(
-                                    waiter_id = waiter.id,
-                                    keys = ?waiter.keys,
-                                    "stream waiter timed out (wake missed)"
-                                );
-                            }
-                            // Cleanly removed ourselves: a genuine timeout.
-                            None
-                        } else {
-                            // Lost the race: a writer claimed us and is about
-                            // to send (or already sent) into the channel.
-                            rx.await.ok()
-                        }
-                    }
-                }
-            }
-            None => rx.await.ok(),
+        Registration {
+            registry: self,
+            waiter,
+            rx,
         }
+    }
+
+    /// Registers `kind` as a waiter on all `keys`, then blocks until a writer
+    /// claims it and delivers a result, or `timeout` elapses (`None` = wait
+    /// indefinitely).
+    async fn block_inner(
+        &self,
+        keys: &[Vec<u8>],
+        kind: WaitKind,
+        timeout: Option<Duration>,
+    ) -> Option<BlockResult> {
+        self.register(keys, kind).wait(timeout).await
     }
 
     /// Removes `waiter` from every queue it appears in. Returns `true` if it
@@ -373,18 +408,46 @@ impl WatchRegistry {
     }
 }
 
-/// Removes a waiter's registration when the blocked future holding it is
-/// dropped. A no-op if a writer or a timeout already removed the waiter.
-///
-/// This cannot recover a result a writer has already claimed for the waiter
-/// but not yet delivered; that window (claim to commit) is the same inherent
-/// race Redis has when a client drops as its blocked pop is served.
-struct Deregister<'a> {
+/// A waiter's place in the registry's queues. Dropping it (the client
+/// disconnected, or the caller found data without needing to wait) removes
+/// the registration, so a later write never claims a waiter nobody can reply
+/// to.
+pub struct Registration<'a> {
     registry: &'a WatchRegistry,
     waiter: Arc<Waiter>,
+    rx: oneshot::Receiver<BlockResult>,
 }
 
-impl Drop for Deregister<'_> {
+impl Registration<'_> {
+    /// Blocks until a writer claims the waiter and delivers a result, or
+    /// `timeout` elapses (`None` = wait indefinitely).
+    ///
+    /// Returns `None` on a clean timeout. If a writer claimed this waiter
+    /// concurrently, the registration is gone, so the channel is drained
+    /// instead — discarding a real result that was already removed from the
+    /// sorted set would lose data.
+    pub async fn wait(mut self, timeout: Option<Duration>) -> Option<BlockResult> {
+        let waiter = self.waiter.clone();
+        match timeout {
+            Some(duration) => match tokio::time::timeout(duration, &mut self.rx).await {
+                Ok(result) => result.ok(),
+                Err(_elapsed) => {
+                    if self.registry.remove_waiter(&waiter) {
+                        // Cleanly removed ourselves: a genuine timeout.
+                        None
+                    } else {
+                        // Lost the race: a writer claimed us and is about to
+                        // send (or already sent) into the channel.
+                        (&mut self.rx).await.ok()
+                    }
+                }
+            },
+            None => (&mut self.rx).await.ok(),
+        }
+    }
+}
+
+impl Drop for Registration<'_> {
     fn drop(&mut self) {
         self.registry.remove_waiter(&self.waiter);
     }
@@ -439,6 +502,48 @@ mod tests {
         assert!(tokio::time::timeout(Duration::from_millis(20), blocked)
             .await
             .is_err());
+        assert!(registry.try_claim(&key()).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_stream_notification_wakes_every_stream_waiter_registered_at_wake_time() {
+        let registry = Arc::new(WatchRegistry::new());
+        // The writer's DbOp ran (no waiters yet) ...
+        let notification = registry.stream_notification(&key());
+        // ... readers register and read before the writer commits ...
+        let first = registry.register_stream(&[key()]);
+        let second = registry.register_stream(&[key()]);
+        // ... then the commit happens and the notification is delivered.
+        notification.wake();
+        for r in [first, second] {
+            let woken = tokio::time::timeout(Duration::from_secs(1), r.wait(None))
+                .await
+                .expect("wake must not be lost");
+            assert!(woken.is_some());
+        }
+        assert!(registry.try_claim(&key()).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_write_between_registering_and_waiting_is_not_missed() {
+        let registry = WatchRegistry::new();
+        let registration = registry.register_stream(&[key()]);
+
+        // The writer commits after the reader's read but before it waits.
+        let mut claim = registry.try_claim(&key()).expect("registered waiter");
+        claim.set_result(BlockResult::Stream(StreamResult { public_key: key() }));
+        claim.wake();
+
+        let woken = tokio::time::timeout(Duration::from_secs(1), registration.wait(None))
+            .await
+            .expect("wake must not be lost");
+        assert!(woken.is_some());
+    }
+
+    #[tokio::test]
+    async fn dropping_a_registration_removes_it() {
+        let registry = WatchRegistry::new();
+        drop(registry.register_stream(&[key()]));
         assert!(registry.try_claim(&key()).is_none());
     }
 
