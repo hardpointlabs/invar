@@ -12,8 +12,6 @@
 //! surface as [`Error::Conflict`].
 
 use std::collections::{Bound, HashMap};
-use std::ffi::CString;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -42,6 +40,11 @@ fn map_slate_error(err: SlateError) -> Error {
     }
 }
 
+/// Keep ~20% of the cache disk free for external FS operations;
+/// for example, ZFS' metaslab allocator perf can start to degrade
+/// beyond this threshold
+const FREE_SPACE_HIGH_WATERMARK: f64 = 0.8;
+
 /// Returns 80% of the free bytes available on the filesystem containing `path`.
 /// Calls `statvfs(2)` on the path itself, or its parent if the path doesn't exist yet.
 fn disk_capacity_bytes(path: &Path) -> Result<usize, Error> {
@@ -52,26 +55,23 @@ fn disk_capacity_bytes(path: &Path) -> Result<usize, Error> {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("/"))
     };
-    let c_path = CString::new(stat_path.as_os_str().as_bytes()).map_err(|_| Error::Undefined)?;
-    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-    let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
-    if ret != 0 {
-        return Err(Error::Undefined);
-    }
-    let free_bytes = (stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64);
-    Ok((free_bytes as f64 * 0.8) as usize)
+    let size = rustix::fs::statvfs(&stat_path).map(|stat| {
+        stat.f_bavail.saturating_mul(stat.f_frsize)
+    }).expect("unable to call statvfs");
+    Ok((size as f64 * FREE_SPACE_HIGH_WATERMARK) as usize)
 }
 
 async fn build_foyer_cache(
     cache_path: &Path,
     mem_limit_mb: usize,
 ) -> Result<Arc<dyn DbCache>, Error> {
-    let disk_capacity = disk_capacity_bytes(cache_path)?;
+    let disk_capacity = disk_capacity_bytes(cache_path)
+        .expect("couldn't probe disk capacity");
     let mem_capacity = if mem_limit_mb == 0 { 16 } else { mem_limit_mb } * 1024 * 1024;
     let device = FsDeviceBuilder::new(cache_path)
         .with_capacity(disk_capacity)
         .build()
-        .map_err(|_| Error::Undefined)?;
+        .expect("couldn't build FsDevice");
     let cache = HybridCacheBuilder::new()
         .with_policy(HybridCachePolicy::WriteOnInsertion)
         .with_name("slatedb_block_cache")
@@ -82,7 +82,8 @@ async fn build_foyer_cache(
         .with_engine_config(BlockEngineConfig::new(device))
         .build()
         .await
-        .map_err(|_| Error::Undefined)?;
+        .inspect_err(|e| tracing::error!(error=?e, "error building Foyer block cache"))
+        .expect("cache build failed");
     Ok(Arc::new(FoyerHybridCache::new_with_cache(cache)) as Arc<dyn DbCache>)
 }
 
@@ -131,7 +132,7 @@ impl SlateDb {
         builder = builder.with_metrics_recorder(Arc::new(MetricsRsRecorder) as Arc<dyn MetricsRecorder>);
 
         let cache: Option<Arc<dyn DbCache>> = if let Some(ref cp) = cache_path {
-            let c = build_foyer_cache(cp, cache_mem_limit).await?;
+            let c = build_foyer_cache(cp, cache_mem_limit).await.expect("couldn't build foyer cache");
             builder = builder.with_db_cache(c.clone());
             Some(c)
         } else {

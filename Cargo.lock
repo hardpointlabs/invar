@@ -1539,13 +1539,14 @@ dependencies = [
  "async-trait",
  "fjall",
  "foyer",
- "libc",
  "metrics",
+ "rustix",
  "slatedb",
  "slatedb-common",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

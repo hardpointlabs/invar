@@ -10,12 +10,13 @@ path = "lib.rs"
 async-trait = "0.1"
 fjall = "3.1"
 foyer = "0.22"
-libc = "0.2"
 metrics = "0.24"
 slatedb = { version = "0.16", features = ["aws", "foyer", "zstd"] }
 slatedb-common = "0.16"
 thiserror = "2.0.20"
 tokio = { version = "1", features = ["time"] }
+tracing = "0.1.44"
+rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
 tempfile = "3"
