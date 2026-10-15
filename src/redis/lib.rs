@@ -15,6 +15,7 @@ pub mod json;
 pub mod keys;
 pub mod list;
 pub mod listener;
+pub mod pattern;
 pub mod pubsub;
 pub mod resp;
 pub mod server;
