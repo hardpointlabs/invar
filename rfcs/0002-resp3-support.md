@@ -117,18 +117,23 @@ merge without exposing RESP3 to clients.
 
 ## 4. Command audit
 
-Only commands whose RESP3 reply differs from the RESP2 shape change. The list below is from the RESP3
-specification and Redis's behaviour; **each entry is verified against the spec before it is changed**, and
-commands not listed are left alone:
+Only commands whose RESP3 reply differs from the RESP2 shape change. The candidate list is drawn from the
+RESP3 specification and Redis's behaviour, intersected with the commands Invar supports (see the
+[command support appendix](https://docs.hardpoint.dev/guides/invar/appendix/redis-tm-command-support)).
+**Each entry is verified against the spec before it is changed**, and commands not listed are left alone.
+Commands Invar does not implement (e.g. `CONFIG GET`, `XREADGROUP`, other `XINFO` subcommands) are out of
+scope until they exist:
 
-* **Map:** `HGETALL`, `CONFIG GET`, `XREAD` / `XREADGROUP` (keyed by stream), `XINFO *`, `PUBSUB NUMSUB`,
-  `HELLO`, bloom-family `*.INFO`.
+* **Map:** `HGETALL`, `XREAD` (keyed by stream), `XINFO STREAM`, `PUBSUB NUMSUB`, `HELLO`, and possibly
+  `BF.INFO` / `JSON.RESP`.
 * **Set:** `SMEMBERS`, `SINTER` / `SUNION` / `SDIFF`, `SPOP` with count.
 * **Double:** `ZSCORE`, `ZINCRBY`, `ZMSCORE`.
-* **Pair arrays:** `ZRANGE` family with `WITHSCORES`, `ZPOPMIN` / `ZPOPMAX` with count, `ZRANDMEMBER` /
-  `HRANDFIELD` with scores/values.
+* **Pair arrays:** `ZRANGE` / `ZRANGEBYSCORE` / `ZREVRANGE` / `ZREVRANGEBYSCORE` with `WITHSCORES`,
+  `ZDIFF` / `ZINTER` / `ZUNION` with `WITHSCORES`, `ZPOPMIN` / `ZPOPMAX` with count, `BZPOPMIN` /
+  `BZPOPMAX` (member and double score), `ZRANDMEMBER` / `HRANDFIELD` with scores/values.
 * **Push:** the helpers in `pubsub.rs` (`message_resp`, `subscribe_resp`, ...) return `Push`, which renders
   as an array in RESP2.
+* **Verbatim (optional):** `INFO`, `CLIENT LIST`, `CLIENT INFO`.
 
 Because `RespValue` carries the richer type and the encoder downgrades, a command converted in this step
 still produces exactly its old bytes on RESP2 connections. A unit test per converted command asserts both
@@ -201,5 +206,6 @@ Separate PRs, each independently green on RESP2:
 > **Open Question:** how the Deno `redis` client surfaces RESP3 types is unverified, so the exact shape of
 > the dual-protocol test harness (step 7) may change.
 
-> **Open Question:** the command audit list is drawn from the spec and from memory of Redis's behaviour,
-> not yet checked against each `WireOp` in this repository.
+> **Open Question:** the command audit list is drawn from the spec and the command support appendix, not yet
+> checked against each `WireOp` in this repository. The appendix may also omit a few supported commands
+> (e.g. `KEYS`).
