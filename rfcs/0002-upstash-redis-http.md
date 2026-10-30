@@ -37,13 +37,8 @@ Out of scope: everything else in Upstash's product surface (QStash, Vector, Sear
 billing/quota behaviour, `MONITOR` (see Unresolved Questions), and global replication semantics (read replicas,
 regions).
 
-**Out of scope, by project policy: authentication, authorization and multi-tenancy controls.** Open-source Invar has no
-authn/authz, and RBAC/ABAC is not planned: Invar is designed for massive multitenancy, with many instances each
-serving a discrete dataset, and in production each instance is protected by a separate proxy that owns credentials,
-TLS, CORS, rate limiting and tenant routing. The HTTP listener follows the same posture as the RESP listener, which
-accepts `AUTH` and ignores it. It checks no token, issues none, has no read-only mode, and does not distinguish callers.
-This removes a whole class of design questions (token configuration, read-only command classification, 401 handling,
-secret logging, constant-time comparison) from this RFC. It must not be exposed to untrusted networks directly.
+Authentication, authorization (RBAC/ABAC) and multi-tenancy controls are also out of scope: they are offered in Invar's
+cloud and enterprise products, not the open-source one. The HTTP listener is unauthenticated, like the RESP listener.
 
 ## On "all languages"
 
@@ -188,15 +183,9 @@ Allowed methods are `HEAD`, `GET`, `POST` and `PUT`; any other method is `405` *
 
 ### Authentication (not implemented)
 
-Upstash requires `Authorization: Bearer <token>` or the query parameter `_token=<token>`, answers `401` on failure, and
-issues standard, read-only and per-ACL-user tokens **[D, S]**. None of that is implemented here (see *Scope*). What
-Invar must do so that clients work **[Invar]**:
-
-* accept requests with any `Authorization` header, or none, and ignore it;
-* never treat `_token` as a command argument (it is dropped from the query parameters before they are appended);
-* never emit `401`, and never log the header or the parameter.
-
-A proxy in front of Invar may enforce Upstash-style tokens, strip them, or both; Invar does not care.
+Upstash requires a bearer token (`Authorization` header or `_token` parameter) and answers `401` on failure **[D, S]**.
+Invar does not: it ignores the `Authorization` header, drops `_token` from the query parameters instead of treating it as
+an argument, and never emits `401`. SDKs insist on a non-empty token, so clients must be given some string.
 
 ### Command encoding
 
