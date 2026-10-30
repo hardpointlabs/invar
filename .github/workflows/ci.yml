@@ -12,6 +12,15 @@ jobs:
       - uses: goreleaser/goreleaser-action@v7
         with:
           args: check
+  # Advisory-only: transitive deps can be flagged faster than upstream can ship
+  # fixes (e.g. zstd via slatedb/foyer), so this must not block PRs.
+  audit:
+    runs-on: blacksmith-2vcpu-ubuntu-2404-arm
+    continue-on-error: true
+    steps:
+      - uses: useblacksmith/checkout@v1
+      - uses: taiki-e/install-action@cargo-audit
+      - run: cargo audit
   test:
     runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     steps:
@@ -19,7 +28,6 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: false # use Blacksmith's caching instead
-      - uses: taiki-e/install-action@cargo-audit
       - name: Sticky disk - cargo registry
         uses: useblacksmith/stickydisk@v1
         with:
@@ -40,6 +48,5 @@ jobs:
           deno-version: lts
       - name: Build, unit tests, and integration tests
         run: |
-          cargo audit
           cargo clippy
           ./run-tests.sh
