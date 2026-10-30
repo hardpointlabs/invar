@@ -15,7 +15,7 @@ one documentation page and the source of its SDKs. This RFC does two things. Fir
 (the *Upstash REST protocol*, restricted to submitting Redis commands) from the public docs and the SDK sources, and
 marks each statement by how well it is evidenced. Second, it proposes an optional, off-by-default HTTP listener in Invar
 that implements it, so that `@upstash/redis`, `upstash-redis` (Python) and everything built on them can talk to Invar
-unmodified by changing only a URL and a token.
+unmodified by changing only a URL (and a placeholder token; see *Authentication*).
 
 # Motivation
 
@@ -31,12 +31,19 @@ unmodified by changing only a URL and a token.
 
 ## Scope
 
-In scope: submission of Redis commands (single, pipelined, transactional) over HTTP, bearer-token authentication,
-response encodings, and `SUBSCRIBE`/`PSUBSCRIBE` over server-sent events.
+In scope: submission of Redis commands (single, pipelined, transactional) over HTTP, response encodings, and `SUBSCRIBE`/`PSUBSCRIBE` over server-sent events.
 
-Out of scope: everything else in Upstash's product surface (QStash, Vector, Search, Workflow, the management API), TLS
-termination, multi-tenancy and per-database tokens, billing/quota behaviour, `MONITOR` (see Unresolved Questions), and
-global replication semantics (read replicas, regions).
+Out of scope: everything else in Upstash's product surface (QStash, Vector, Search, Workflow, the management API),
+billing/quota behaviour, `MONITOR` (see Unresolved Questions), and global replication semantics (read replicas,
+regions).
+
+**Out of scope, by project policy: authentication, authorization and multi-tenancy controls.** Open-source Invar has no
+authn/authz, and RBAC/ABAC is not planned: Invar is designed for massive multitenancy, with many instances each
+serving a discrete dataset, and in production each instance is protected by a separate proxy that owns credentials,
+TLS, CORS, rate limiting and tenant routing. The HTTP listener follows the same posture as the RESP listener, which
+accepts `AUTH` and ignores it. It checks no token, issues none, has no read-only mode, and does not distinguish callers.
+This removes a whole class of design questions (token configuration, read-only command classification, 401 handling,
+secret logging, constant-time comparison) from this RFC. It must not be exposed to untrusted networks directly.
 
 ## On "all languages"
 
@@ -88,7 +95,7 @@ identifiers needed for interoperability are not reproduced *expression*.
   feature must say so.
 * The name is used only *nominatively*, to say what Invar is compatible with ("compatible with the Upstash Redis REST
   protocol and its SDKs"), never as the name of Invar, a flag, an environment variable, a binary, a crate or a logo. For
-  that reason the proposed flags are `--http-addr`/`--http-token` and not `--upstash-*`, and the module is
+  that reason the proposed flags are `--http-addr` and not `--upstash-*`, and the module is
   `src/redis/http`, not `upstash`.
 * Protocol identifiers that must appear on the wire for clients to work (`Upstash-Encoding`, `Upstash-Sync-Token`, the
   `UPSTASH_REDIS_REST_*` variable names users already have) are used because interoperability requires them; they are
@@ -100,7 +107,7 @@ identifiers needed for interoperability are not reproduced *expression*.
 Start Invar with the HTTP listener enabled:
 
 ```
-invar --backend fjall --http-addr 0.0.0.0:8080 --http-token s3cret
+invar --backend fjall --http-addr 127.0.0.1:8080
 ```
 
 Point an Upstash SDK at it:
@@ -108,7 +115,7 @@ Point an Upstash SDK at it:
 ```ts
 import { Redis } from "@upstash/redis";
 
-const redis = new Redis({ url: "http://localhost:8080", token: "s3cret" });
+const redis = new Redis({ url: "http://localhost:8080", token: "unused" });
 await redis.set("user:1", { name: "ada" });   // POST http://localhost:8080  body ["set","user:1","{\"name\":\"ada\"}"]
 const user = await redis.get("user:1");        // { name: "ada" }
 ```
@@ -116,18 +123,19 @@ const user = await redis.get("user:1");        // { name: "ada" }
 ```python
 from upstash_redis import Redis
 
-redis = Redis(url="http://localhost:8080", token="s3cret")
+redis = Redis(url="http://localhost:8080", token="unused")
 redis.set("k", "v")
 ```
 
-Or use it with `curl`, which is how the API is documented:
+The SDKs insist on a non-empty token (the TypeScript client warns that it was initialized without one) and always send
+it, so clients must be given *some* string. Invar ignores it. Or use `curl`, which is how the API is documented:
 
 ```
-$ curl localhost:8080/set/foo/bar -H "Authorization: Bearer s3cret"
+$ curl localhost:8080/set/foo/bar -H "Authorization: Bearer unused"
 {"result":"OK"}
-$ curl localhost:8080/get/foo -H "Authorization: Bearer s3cret"
+$ curl localhost:8080/get/foo -H "Authorization: Bearer unused"
 {"result":"bar"}
-$ curl -X POST localhost:8080/pipeline -H "Authorization: Bearer s3cret" \
+$ curl -X POST localhost:8080/pipeline -H "Authorization: Bearer unused" \
     -d '[["SET","a","1"],["INCR","a"],["GET","missing"]]'
 [{"result":"OK"},{"result":2},{"result":null}]
 ```
@@ -138,8 +146,7 @@ operate on the same store, so a key written over HTTP is visible over RESP and v
 `PUBLISH` and `WATCH` machinery, so an HTTP `PUBLISH` reaches RESP subscribers and an HTTP write invalidates a RESP
 connection's `WATCH`.
 
-The listener is off unless `--http-addr` (`INVAR_HTTP_ADDR`) is set. When it is set, `--http-token`
-(`INVAR_HTTP_TOKEN`) is mandatory: Invar refuses to start an unauthenticated HTTP listener.
+The listener is off unless `--http-addr` (`INVAR_HTTP_ADDR`) is set.
 
 # Reference Implementation
 
@@ -179,13 +186,17 @@ Allowed methods are `HEAD`, `GET`, `POST` and `PUT`; any other method is `405` *
 `Content-Type` is not relied upon: the SDKs send `application/json`, but the documented `curl -d` examples send
 `application/x-www-form-urlencoded`, so the server must ignore the request content type. [I]
 
-### Authentication
+### Authentication (not implemented)
 
-`Authorization: Bearer <token>` **[D, S]**, or the query parameter `_token=<token>` **[D]**. Failure is `401` **[D]**. The
-response body for `401` is `{"error": "..."}` by analogy with other errors [I]; its text is unknown [?].
+Upstash requires `Authorization: Bearer <token>` or the query parameter `_token=<token>`, answers `401` on failure, and
+issues standard, read-only and per-ACL-user tokens **[D, S]**. None of that is implemented here (see *Scope*). What
+Invar must do so that clients work **[Invar]**:
 
-Upstash issues a *standard* token and a *read-only* token per database, plus per-ACL-user tokens **[D]**. This RFC
-proposes a single standard token for the first version (see Unresolved Questions).
+* accept requests with any `Authorization` header, or none, and ignore it;
+* never treat `_token` as a command argument (it is dropped from the query parameters before they are appended);
+* never emit `401`, and never log the header or the parameter.
+
+A proxy in front of Invar may enforce Upstash-style tokens, strip them, or both; Invar does not care.
 
 ### Command encoding
 
@@ -274,12 +285,11 @@ the lowest-priority item in this RFC and may be deferred.
 |---|---|---|
 | 200 | executed (even if an item of a pipeline failed) | D, S |
 | 400 | syntax error, unsupported command, or a command failed | D |
-| 401 | missing or invalid token | D |
 | 405 | unsupported HTTP method | D |
 
 Both SDKs treat any non-2xx status as failure and read `error` from the JSON body (TypeScript throws
 `UpstashError("<error>, command was: …")`; Python ignores the status and checks for an `error` key) **[S]**, so the
-body must be JSON for every error the server generates, including 401/405 [I]. Anything else Upstash returns (413 for an
+body must be JSON for every error the server generates, including 405 [I]. Anything else Upstash returns (413 for an
 oversized request, 429 for quota, 5xx) is not documented [?]. The documented trigger for the 413-like case is the
 message `ERR max request size exceeded` **[D]** (troubleshooting page), whose HTTP status is [?].
 
@@ -367,7 +377,7 @@ re-export that internals surface; it is a reasonable later move if the HTTP depe
 ### Request flow
 
 ```
-hyper service  ->  authenticate  ->  parse (path | json | pipeline | multi-exec)
+hyper service  ->  parse (path | json | pipeline | multi-exec)
                ->  Vec<Vec<Bytes>>  ->  Session::new_with_pubsub(...)
                ->  enqueue_command(&mut session, &args)  ->  Vec<RespValue>
                ->  encode (json | base64 | resp2)  ->  response
@@ -399,7 +409,7 @@ The existing hand-rolled HTTP server in `src/main.rs` (for `/livez`, `/readyz`, 
 and always closes the connection; it cannot do keep-alive, request bodies, chunked transfer or streaming responses, all
 of which this protocol needs. This RFC proposes `hyper` 1.x (with `http1`, `server`) and `hyper-util`, plus
 `percent-encoding` and `base64`. `serde_json` is already a dependency; elements must be read with `RawValue` (or the
-`arbitrary_precision` feature) so that number text is preserved. No TLS: terminate it in front of Invar. The SDKs accept
+`arbitrary_precision` feature) so that number text is preserved. No TLS, CORS or rate limiting: those belong to the proxy in front of Invar. The SDKs accept
 `http://` URLs (the TypeScript URL check is `^https?://`).
 
 ### Limits
@@ -415,18 +425,16 @@ of which this protocol needs. This RFC proposes `hyper` 1.x (with `http1`, `serv
 The listener starts only if `--http-addr` is given and is part of the same shutdown path as the RESP listener and the
 metrics server: stop accepting, let in-flight requests finish (bounded), then close the store. SSE streams are
 cancelled at shutdown. Counters follow the `metrics` crate usage already in the tree (requests by endpoint and status,
-rejected-auth count, in-flight SSE streams).
+in-flight SSE streams).
 
 ### Configuration
 
 | Flag | Env | Default | Meaning |
 |---|---|---|---|
 | `--http-addr` | `INVAR_HTTP_ADDR` | unset (disabled) | enable the listener on this address |
-| `--http-token` | `INVAR_HTTP_TOKEN` | none | bearer token; required when enabled |
 | `--http-max-body` | `INVAR_HTTP_MAX_BODY` | 10 MiB | max request body |
 
-`--http-addr` follows the precedent of `--metrics-addr`: presence enables the feature. The token is compared in
-constant time. It must not be logged.
+`--http-addr` follows the precedent of `--metrics-addr`: presence enables the feature. There is no token flag.
 
 ## Testing
 
@@ -434,7 +442,7 @@ constant time. It must not be logged.
   query-parameter appending, JSON-array to `Vec<Bytes>` (number text preserved, rejections), `RespValue` to JSON, the
   base64 rule (`OK` unencoded, `PONG` encoded, nested arrays, error strings untouched), and status-code mapping.
 * **Integration tests** (the project's preferred level). Deno can import `npm:@upstash/redis`, so the real TypeScript
-  SDK is driven against a daemon started with `--http-addr`/`--http-token` by `run-tests.sh`. Cases: every endpoint,
+  SDK is driven against a daemon started with `--http-addr` by `run-tests.sh`. Cases: every endpoint,
   SDK defaults (base64 off), `responseEncoding: "base64"`, auto-pipelining, `multi()`, `Script.exec()` falling back from
   `EVALSHA` to `EVAL`, `subscribe`, and a raw-`fetch` file for status codes and path-form behaviour the SDK never sends.
 * **Cross-listener tests**: write over HTTP and read over RESP, `PUBLISH` over HTTP received by a RESP subscriber, an
@@ -451,17 +459,14 @@ constant time. It must not be logged.
   notice, and this RFC's [I] and [?] items are our best reading. A faithful implementation of the SDKs is not the same as
   being a drop-in for every use of Upstash's API.
 * **New dependency surface and a second network listener** in a project that currently has none beyond a hand-rolled
-  probe server. More code that parses untrusted input; one more thing to authenticate and rate-limit.
-* **A security regression risk.** The RESP listener accepts `AUTH` and ignores it (Invar has no authentication). The
-  HTTP listener introduces the first credential in the system. A shared bearer token, sent in cleartext unless TLS is
-  terminated in front, is weaker than it looks, and the `_token` query parameter puts it in access logs.
+  probe server. More code that parses untrusted input.
+* **Unauthenticated by design**, like the RESP listener. Operators who enable `--http-addr` must put it behind the
+  protecting proxy or bind it to loopback or a private network.
 * **`GET` can mutate.** `GET /del/foo` deletes foo. This is the documented Upstash behaviour, and `HEAD` has the same
-  surface, but it is unusual HTTP and can be triggered by link prefetchers or cross-site requests if the token is ever
-  ambient.
+  surface, but it is unusual HTTP: link prefetchers or cross-site requests (a browser can issue a `GET` or a simple
+  `POST` to a reachable listener) can modify data. With no credential to withhold, the proxy is the only defence.
 * **Semantics that differ from the RESP listener**: no `SELECT`, no blocking commands, no connection state. A command
   that works over RESP may be rejected over HTTP.
-* **Edge-runtime clients are often public.** Upstash's answer is the read-only token; shipping without one means the
-  token must never reach a browser.
 
 # Rationale / Alternatives
 
@@ -488,11 +493,6 @@ constant time. It must not be logged.
 > `--http-addr` (presence enables), mirroring `--metrics-addr`. Is that acceptable, or should protocols become explicit
 > opt-in flags (`--redis`, `--http`) with RESP's default behaviour preserved?
 
-> **Open Question (decision):** Authentication. A single mandatory bearer token (proposed). Should a **read-only token**
-> be supported, given that browser/edge use is the main reason the protocol exists? If so, the read-only/write
-> classification of every command needs an owner, because Upstash also restricts some powerful read commands (it names `SCAN` and
-> `KEYS`) for that token **[D]**, and the full list is not documented.
-
 > **Open Question (decision):** Dependency. Adding `hyper`, `hyper-util`, `base64` and `percent-encoding`. Acceptable?
 
 > **Open Question (decision):** `RedisListener` exposes its registries (two accessors or a shared state struct). This is
@@ -502,11 +502,9 @@ constant time. It must not be logged.
 > blocking commands with a server-side timeout?
 
 > **Open Question [?]:** Observable Upstash behaviours that nothing public settles. They are listed with probe commands in
-> Appendix A: error body and status for 401/413/malformed JSON; query-parameter ordering and valueless parameters;
+> Appendix A: error body and status for 413/malformed JSON; query-parameter ordering and valueless parameters;
 > boolean and `null` arguments; whether `PONG` and other status replies are really base64 encoded; `HEAD` semantics (does
-> it execute the command?); behaviour of `OPTIONS` and CORS (the documented 405 list suggests preflight is not
-> served by the data plane, which would block direct browser use with non-simple headers, yet browser use with the
-> read-only token is advertised); SSE event framing for messages containing newlines, keep-alive comments, and whether
+> it execute the command?); SSE event framing for messages containing newlines, keep-alive comments, and whether
 > `/subscribe/a/b` is legal. **Is there an Upstash database I can run Appendix A against, or would you rather settle
 > each point by decision?** Per the project rule not to speculate on public API behaviour, nothing in this list will be
 > implemented from a guess.
@@ -520,11 +518,6 @@ constant time. It must not be logged.
 
 > **Open Question:** `Upstash-Response-Format: resp2`. Implement in the first version or defer? No client uses it.
 
-> **Open Question:** TLS. Left to a reverse proxy. Is a built-in `--http-tls-cert/--http-tls-key` ever wanted for the
-> edge/browser scenario?
-
-> **Open Question:** Rate limiting and connection limits on the HTTP listener, which the RESP listener does not have.
-
 # Appendix A: Probes to settle the [?] items
 
 To be run against a real Upstash database by someone with one; each answers a question above. `$U` is the REST URL
@@ -532,13 +525,10 @@ and `$T` the token.
 
 ```
 # error shapes and statuses
-curl -si $U/get/foo                                     # 401 body and headers
 curl -si $U -H "Authorization: Bearer $T" -d 'not json' # malformed body
 curl -si $U -H "Authorization: Bearer $T" -d '["SET","k",null]'
 curl -si $U -H "Authorization: Bearer $T" -d '["SET","k",true]' ; curl -s $U/get/k -H "Authorization: Bearer $T"
 curl -si -X DELETE $U/get/foo -H "Authorization: Bearer $T"   # 405 body
-curl -si -X OPTIONS $U -H "Origin: https://example.com" -H "Access-Control-Request-Method: POST" \
-     -H "Access-Control-Request-Headers: authorization,content-type"
 curl -si -I $U/set/h/1 -H "Authorization: Bearer $T"; curl -s $U/get/h -H "Authorization: Bearer $T"  # does HEAD execute?
 
 # query parameter semantics
