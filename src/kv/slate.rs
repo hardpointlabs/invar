@@ -87,6 +87,13 @@ async fn build_foyer_cache(
     Ok(Arc::new(FoyerHybridCache::new_with_cache(cache)) as Arc<dyn DbCache>)
 }
 
+/// Cache namespace for a database, derived from its path. It must be stable
+/// across restarts so the persisted Foyer cache is recovered on reopen, so this
+/// uses FNV-1a rather than `DefaultHasher`, whose output isn't guaranteed stable.
+fn db_cache_id(path: &str) -> u64 {
+    path.bytes().fold(0xcbf29ce484222325, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
+}
+
 /// Options for opening a SlateDB-backed [`KeyValueStore`].
 #[derive(Debug, Clone, Default)]
 pub struct SlateDbOpts {
@@ -127,13 +134,14 @@ impl SlateDb {
     ) -> Result<SlateDb, Error> {
         let settings = Settings::from_env_with_default(
             "SLATEDB_", Settings::default()).expect("couldn't read settings");
-        let mut builder = Db::builder(path, store.clone());
+        let mut builder = Db::builder(path.clone(), store.clone());
         builder = builder.with_settings(settings);
         builder = builder.with_metrics_recorder(Arc::new(MetricsRsRecorder) as Arc<dyn MetricsRecorder>);
 
+        let cache_id = db_cache_id(&path);
         let cache: Option<Arc<dyn DbCache>> = if let Some(ref cp) = cache_path {
             let c = build_foyer_cache(cp, cache_mem_limit).await.expect("couldn't build foyer cache");
-            builder = builder.with_db_cache(c.clone());
+            builder = builder.with_db_cache(c.clone(), cache_id);
             Some(c)
         } else {
             None
