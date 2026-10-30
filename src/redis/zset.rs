@@ -56,7 +56,7 @@ use smallvec::{smallvec, SmallVec};
 use crate::common::session::Session;
 use crate::common::namespace::{self, base_type, new_namespace, resolve_prefix, resolve_prefix_for_write, ElementPrefix};
 use crate::common::{BlockResult, BlockingSignal, Claim, PopResult, RedisStore, ValueType, WatchRegistry};
-use crate::resp::RespValue;
+use crate::resp::{format_f64, RespValue};
 
 /// Metadata type byte stamped on every zset sentinel, matching
 /// `ValueType::SortedSet`.
@@ -66,25 +66,6 @@ const TYPE_SORTED_SET: u8 = ValueType::SortedSet as u8;
 /// result shape is unexpected (a "can't happen" guard).
 fn internal_error() -> RespValue {
     RespValue::Error(Bytes::from_static(b"ERR internal error"))
-}
-
-// --- Float formatting ---
-
-/// Formats a float the way Go's `redis/common.FormatFloat` does (which the
-/// zset wire replies use): shortest round-trip decimal digits, no exponent,
-/// and `inf`/`-inf` (not `+Inf`/`-Inf`, matching Redis's literal scores) for
-/// the infinities. NaN is kept as `NaN`.
-fn format_f64(v: f64) -> String {
-    if v.is_nan() {
-        return "NaN".to_string();
-    }
-    if v > 0.0 && v.is_infinite() {
-        return "inf".to_string();
-    }
-    if v < 0.0 && v.is_infinite() {
-        return "-inf".to_string();
-    }
-    format!("{v}")
 }
 
 // --- Score encoding ---

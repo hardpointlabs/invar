@@ -13,7 +13,7 @@
 //!   absurd declared sizes before any allocation or waiting happens (the
 //!   proto-max-bulk-len equivalent of Redis's `PROTO_MAX_BULK_LEN` and
 //!   `PROTO_MAX_MULTIBULK_LEN`).
-//! * The decoder is **stateful** (a stack of in-progress arrays) and never
+//! * The decoder is **stateful** (a stack of in-progress aggregates) and never
 //!   clones the input buffer to peek: lines are located with an immutable
 //!   slice scan and consumed with `split_to`, and bulk-string payloads are
 //!   zero-copy views over the receive buffer (`split_to(...).truncate(...)
@@ -56,7 +56,7 @@ impl RespError {
 
 /// A decoded RESP value. Bulk strings and simple strings are binary-safe
 /// ([`Bytes`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RespValue {
     SimpleString(Bytes),
     Error(Bytes),
@@ -65,29 +65,85 @@ pub enum RespValue {
     BulkString(Option<Bytes>),
     /// `None` represents the null array (`*-1\r\n`).
     Array(Option<Vec<RespValue>>),
+    /// RESP3 null (`_\r\n`). Renders as `$-1` on a RESP2 connection.
+    Null,
+    /// RESP3 boolean. Renders as `:1` / `:0` on a RESP2 connection.
+    Boolean(bool),
+    /// RESP3 double. Renders as a bulk string (via [`format_f64`]) on a RESP2
+    /// connection.
+    Double(f64),
+    /// RESP3 map. Renders as a flat array of `2n` elements on a RESP2
+    /// connection.
+    Map(Vec<(RespValue, RespValue)>),
+    /// RESP3 set. Renders as an array on a RESP2 connection.
+    Set(Vec<RespValue>),
+    /// RESP3 out-of-band push. Renders as an array on a RESP2 connection.
+    Push(Vec<RespValue>),
 }
 
-/// A frame currently being assembled: an array waiting for its remaining
-/// elements.
-struct ArrayFrame {
+/// The wire protocol a connection speaks. RESP2 is the default; a connection
+/// opts into RESP3 with `HELLO 3`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Protocol {
+    #[default]
+    Resp2,
+    Resp3,
+}
+
+/// The kind of aggregate a [`AggFrame`] is collecting elements for.
+#[derive(Clone, Copy)]
+enum AggKind {
+    Array,
+    Map,
+    Set,
+    Push,
+}
+
+/// A frame currently being assembled: an aggregate waiting for its remaining
+/// elements. Maps count `2n` children (key, value, key, value, ...) and pair
+/// them up on completion.
+struct AggFrame {
+    kind: AggKind,
     remaining: usize,
     elements: Vec<RespValue>,
+}
+
+impl AggFrame {
+    fn finish(self) -> RespValue {
+        match self.kind {
+            AggKind::Array => RespValue::Array(Some(self.elements)),
+            AggKind::Set => RespValue::Set(self.elements),
+            AggKind::Push => RespValue::Push(self.elements),
+            AggKind::Map => {
+                let mut pairs = Vec::with_capacity(self.elements.len() / 2);
+                let mut it = self.elements.into_iter();
+                while let (Some(k), Some(v)) = (it.next(), it.next()) {
+                    pairs.push((k, v));
+                }
+                RespValue::Map(pairs)
+            }
+        }
+    }
 }
 
 /// A Tokio codec that frames incoming bytes into [`RespValue`]s.
 ///
 /// The decoder is stateful across calls: once it has seen a bulk-string
-/// header or an array header it remembers it, so a frame split across many
-/// socket reads is assembled without re-scanning the header.
+/// header or an aggregate header it remembers it, so a frame split across
+/// many socket reads is assembled without re-scanning the header.
+///
+/// As an [`Encoder`] it renders replies for the connection's [`Protocol`].
 pub struct RespDecoder {
     max_bulk_len: usize,
     max_array_len: usize,
     max_depth: usize,
-    /// In-progress arrays; the last entry is the innermost array being
+    /// In-progress aggregates; the last entry is the innermost one being
     /// filled with elements.
-    stack: Vec<ArrayFrame>,
+    stack: Vec<AggFrame>,
     /// Length of the bulk-string payload currently awaited, if any.
     pending_bulk_len: Option<usize>,
+    /// Protocol used when encoding replies.
+    protocol: Protocol,
 }
 
 impl RespDecoder {
@@ -104,7 +160,18 @@ impl RespDecoder {
             max_depth,
             stack: Vec::new(),
             pending_bulk_len: None,
+            protocol: Protocol::Resp2,
         }
+    }
+
+    /// Sets the protocol replies are encoded for. Only affects values encoded
+    /// after this call; bytes already written are never re-encoded.
+    pub fn set_protocol(&mut self, protocol: Protocol) {
+        self.protocol = protocol;
+    }
+
+    pub fn protocol(&self) -> Protocol {
+        self.protocol
     }
 
     pub fn max_bulk_len(&self) -> usize {
@@ -119,9 +186,9 @@ impl RespDecoder {
         self.max_depth
     }
 
-    /// Routes a completed value to the innermost open array, or returns it
-    /// directly when it is a top-level value. When a completed array closes
-    /// its parent, the cascade continues.
+    /// Routes a completed value to the innermost open aggregate, or returns
+    /// it directly when it is a top-level value. When a completed aggregate
+    /// closes its parent, the cascade continues.
     fn deliver(&mut self, value: RespValue) -> Option<RespValue> {
         if self.stack.is_empty() {
             return Some(value);
@@ -131,15 +198,55 @@ impl RespDecoder {
         top.remaining -= 1;
         while self.stack.last().is_some_and(|f| f.remaining == 0) {
             let frame = self.stack.pop().expect("stack is not empty");
-            let array = RespValue::Array(Some(frame.elements));
+            let done = frame.finish();
             if self.stack.is_empty() {
-                return Some(array);
+                return Some(done);
             }
             let top = self.stack.last_mut().expect("stack is not empty");
-            top.elements.push(array);
+            top.elements.push(done);
             top.remaining -= 1;
         }
         None
+    }
+}
+
+impl RespDecoder {
+    /// Starts an aggregate of `len` elements (`len` pairs for a map). Empty
+    /// aggregates complete immediately and are delivered; otherwise a frame
+    /// is pushed and `None` is returned. The declared length and nesting
+    /// depth are checked against the configured limits first.
+    fn open_aggregate(
+        &mut self,
+        kind: AggKind,
+        len: usize,
+    ) -> Result<Option<RespValue>, RespError> {
+        if len > self.max_array_len {
+            return Err(RespError::protocol(format!(
+                "array length {len} exceeds configured maximum {}",
+                self.max_array_len
+            )));
+        }
+        let children = match kind {
+            AggKind::Map => len * 2,
+            _ => len,
+        };
+        if children == 0 {
+            let empty = AggFrame {
+                kind,
+                remaining: 0,
+                elements: Vec::new(),
+            };
+            return Ok(self.deliver(empty.finish()));
+        }
+        if self.stack.len() >= self.max_depth {
+            return Err(RespError::protocol("maximum array nesting depth exceeded"));
+        }
+        self.stack.push(AggFrame {
+            kind,
+            remaining: children,
+            elements: Vec::new(),
+        });
+        Ok(None)
     }
 }
 
@@ -257,27 +364,66 @@ impl Decoder for RespDecoder {
                         }
                         continue;
                     }
-                    let len = declared as usize;
-                    if len > self.max_array_len {
+                    if let Some(v) = self.open_aggregate(AggKind::Array, declared as usize)? {
+                        return Ok(Some(v));
+                    }
+                }
+                b @ (b'%' | b'~' | b'>') => {
+                    let Some((clen, consumed)) = read_line(src, self.max_bulk_len)? else {
+                        return Ok(None);
+                    };
+                    let declared = parse_int(&src[1..1 + clen])?;
+                    src.advance(consumed);
+                    // Only arrays have a null form; RESP3 nulls are `_`.
+                    if declared < 0 {
                         return Err(RespError::protocol(format!(
-                            "array length {len} exceeds configured maximum {}",
-                            self.max_array_len
+                            "invalid aggregate length {declared}"
                         )));
                     }
-                    if len == 0 {
-                        if let Some(v) = self.deliver(RespValue::Array(Some(Vec::new()))) {
-                            return Ok(Some(v));
-                        }
-                        continue;
+                    let kind = match b {
+                        b'%' => AggKind::Map,
+                        b'~' => AggKind::Set,
+                        _ => AggKind::Push,
+                    };
+                    if let Some(v) = self.open_aggregate(kind, declared as usize)? {
+                        return Ok(Some(v));
                     }
-                    if self.stack.len() >= self.max_depth {
-                        return Err(RespError::protocol("maximum array nesting depth exceeded"));
+                }
+                b'_' => {
+                    let Some((clen, consumed)) = read_line(src, self.max_bulk_len)? else {
+                        return Ok(None);
+                    };
+                    if clen != 0 {
+                        return Err(RespError::protocol("invalid null: unexpected payload"));
                     }
-                    self.stack.push(ArrayFrame {
-                        remaining: len,
-                        elements: Vec::new(),
-                    });
-                    continue;
+                    src.advance(consumed);
+                    if let Some(v) = self.deliver(RespValue::Null) {
+                        return Ok(Some(v));
+                    }
+                }
+                b'#' => {
+                    let Some((clen, consumed)) = read_line(src, self.max_bulk_len)? else {
+                        return Ok(None);
+                    };
+                    let value = match &src[1..1 + clen] {
+                        b"t" => true,
+                        b"f" => false,
+                        _ => return Err(RespError::protocol("invalid boolean")),
+                    };
+                    src.advance(consumed);
+                    if let Some(v) = self.deliver(RespValue::Boolean(value)) {
+                        return Ok(Some(v));
+                    }
+                }
+                b',' => {
+                    let Some((clen, consumed)) = read_line(src, self.max_bulk_len)? else {
+                        return Ok(None);
+                    };
+                    let double = parse_double(&src[1..1 + clen])?;
+                    src.advance(consumed);
+                    if let Some(v) = self.deliver(RespValue::Double(double)) {
+                        return Ok(Some(v));
+                    }
                 }
                 b => {
                     return Err(RespError::protocol(format!(
@@ -292,17 +438,80 @@ impl Decoder for RespDecoder {
 /// Encodes a [`RespValue`] to the wire format so a [`Framed`] can use
 /// [`RespDecoder`] for both directions. Bulk strings stay binary-safe: the
 /// payload length is written in bytes, never via string length semantics.
+///
+/// Values are rendered for the codec's [`Protocol`]. On RESP2 the RESP3-only
+/// types are first downgraded with [`downgrade_to_resp2`], so the RESP2 bytes
+/// for a value are defined in exactly one place.
 impl Encoder<RespValue> for RespDecoder {
     type Error = RespError;
 
-    fn encode(&mut self, item: RespValue, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        encode_value(&item, dst);
+    fn encode(&mut self, mut item: RespValue, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        if self.protocol == Protocol::Resp2 {
+            downgrade_to_resp2(&mut item);
+        }
+        encode_value(&item, self.protocol, dst);
         Ok(())
     }
 }
 
-/// Encodes `value` into `dst` as RESP.
-fn encode_value(value: &RespValue, dst: &mut BytesMut) {
+/// Rewrites RESP3-only types in place into their RESP2 shapes: `Null` to the
+/// null bulk string, `Boolean` to `0`/`1`, `Double` to a bulk string, `Map`
+/// to a flat key/value array, and `Set`/`Push` to arrays. Recurses through
+/// every aggregate. Used by the encoder for RESP2 connections and by the Lua
+/// bridge, which follows RESP2 conversion rules.
+pub fn downgrade_to_resp2(value: &mut RespValue) {
+    match value {
+        RespValue::SimpleString(_)
+        | RespValue::Error(_)
+        | RespValue::Integer(_)
+        | RespValue::BulkString(_)
+        | RespValue::Array(None) => {}
+        RespValue::Array(Some(items)) => items.iter_mut().for_each(downgrade_to_resp2),
+        RespValue::Null => *value = RespValue::BulkString(None),
+        RespValue::Boolean(b) => *value = RespValue::Integer(i64::from(*b)),
+        RespValue::Double(d) => {
+            *value = RespValue::BulkString(Some(Bytes::from(format_f64(*d))));
+        }
+        RespValue::Map(pairs) => {
+            let mut flat = Vec::with_capacity(pairs.len() * 2);
+            for (mut k, mut v) in std::mem::take(pairs) {
+                downgrade_to_resp2(&mut k);
+                downgrade_to_resp2(&mut v);
+                flat.push(k);
+                flat.push(v);
+            }
+            *value = RespValue::Array(Some(flat));
+        }
+        RespValue::Set(items) | RespValue::Push(items) => {
+            let mut items = std::mem::take(items);
+            items.iter_mut().for_each(downgrade_to_resp2);
+            *value = RespValue::Array(Some(items));
+        }
+    }
+}
+
+/// Formats a float the way Go's `redis/common.FormatFloat` does (which the
+/// zset wire replies use): shortest round-trip decimal digits, no exponent,
+/// and `inf`/`-inf` (not `+Inf`/`-Inf`, matching Redis's literal scores) for
+/// the infinities. NaN is kept as `NaN`.
+pub fn format_f64(v: f64) -> String {
+    if v.is_nan() {
+        return "NaN".to_string();
+    }
+    if v > 0.0 && v.is_infinite() {
+        return "inf".to_string();
+    }
+    if v < 0.0 && v.is_infinite() {
+        return "-inf".to_string();
+    }
+    format!("{v}")
+}
+
+/// Encodes `value` into `dst` as RESP for `protocol`. On RESP2 the value must
+/// already have been through [`downgrade_to_resp2`]; only the null forms
+/// differ between protocols for the original five types.
+fn encode_value(value: &RespValue, protocol: Protocol, dst: &mut BytesMut) {
+    let resp3 = protocol == Protocol::Resp3;
     match value {
         RespValue::SimpleString(s) => {
             dst.extend_from_slice(b"+");
@@ -326,16 +535,41 @@ fn encode_value(value: &RespValue, dst: &mut BytesMut) {
             dst.extend_from_slice(b);
             dst.extend_from_slice(b"\r\n");
         }
-        RespValue::BulkString(None) => dst.extend_from_slice(b"$-1\r\n"),
-        RespValue::Array(Some(items)) => {
-            dst.extend_from_slice(b"*");
-            dst.extend_from_slice(items.len().to_string().as_bytes());
+        RespValue::BulkString(None) | RespValue::Null if resp3 => dst.extend_from_slice(b"_\r\n"),
+        RespValue::BulkString(None) | RespValue::Null => dst.extend_from_slice(b"$-1\r\n"),
+        RespValue::Array(Some(items)) => encode_aggregate(b'*', items, protocol, dst),
+        RespValue::Array(None) if resp3 => dst.extend_from_slice(b"_\r\n"),
+        RespValue::Array(None) => dst.extend_from_slice(b"*-1\r\n"),
+        RespValue::Boolean(b) => dst.extend_from_slice(if *b { b"#t\r\n" } else { b"#f\r\n" }),
+        RespValue::Double(d) => {
+            dst.extend_from_slice(b",");
+            if d.is_nan() {
+                dst.extend_from_slice(b"nan");
+            } else {
+                dst.extend_from_slice(format_f64(*d).as_bytes());
+            }
             dst.extend_from_slice(b"\r\n");
-            for item in items {
-                encode_value(item, dst);
+        }
+        RespValue::Map(pairs) => {
+            dst.extend_from_slice(b"%");
+            dst.extend_from_slice(pairs.len().to_string().as_bytes());
+            dst.extend_from_slice(b"\r\n");
+            for (k, v) in pairs {
+                encode_value(k, protocol, dst);
+                encode_value(v, protocol, dst);
             }
         }
-        RespValue::Array(None) => dst.extend_from_slice(b"*-1\r\n"),
+        RespValue::Set(items) => encode_aggregate(b'~', items, protocol, dst),
+        RespValue::Push(items) => encode_aggregate(b'>', items, protocol, dst),
+    }
+}
+
+fn encode_aggregate(prefix: u8, items: &[RespValue], protocol: Protocol, dst: &mut BytesMut) {
+    dst.extend_from_slice(&[prefix]);
+    dst.extend_from_slice(items.len().to_string().as_bytes());
+    dst.extend_from_slice(b"\r\n");
+    for item in items {
+        encode_value(item, protocol, dst);
     }
 }
 
@@ -396,6 +630,21 @@ fn parse_int(buf: &[u8]) -> Result<i64, RespError> {
             .ok_or_else(|| RespError::protocol("integer out of range"))?;
     }
     Ok(if negative { -value } else { value })
+}
+
+/// Parses a RESP3 double: a decimal float, `inf`, `-inf` or `nan`.
+fn parse_double(buf: &[u8]) -> Result<f64, RespError> {
+    let text = std::str::from_utf8(buf).map_err(|_| RespError::protocol("invalid double"))?;
+    match text {
+        "inf" => Ok(f64::INFINITY),
+        "-inf" => Ok(f64::NEG_INFINITY),
+        "nan" => Ok(f64::NAN),
+        _ => text
+            .parse::<f64>()
+            .ok()
+            .filter(|d| d.is_finite())
+            .ok_or_else(|| RespError::protocol("invalid double")),
+    }
 }
 
 pub fn ok_resp() -> RespValue {
@@ -751,9 +1000,9 @@ mod tests {
 
     #[test]
     fn unknown_type_byte_rejected() {
-        assert!(decode(b"~foo\r\n").is_err());
+        assert!(decode(b"|foo\r\n").is_err());
         assert!(decode(b"\r\n").is_err());
-        assert!(decode(b"#t\r\n").is_err());
+        assert!(decode(b"(123\r\n").is_err());
     }
 
     // --- encoding (Encoder side of the codec) ---
@@ -806,6 +1055,227 @@ mod tests {
         let mut dst = BytesMut::new();
         RespDecoder::new().encode(value.clone(), &mut dst).unwrap();
         assert_eq!(RespDecoder::new().decode(&mut dst).unwrap(), Some(value));
+    }
+
+    // --- RESP3 decoding ---
+
+    #[test]
+    fn resp3_scalars() {
+        assert_eq!(decode(b"_\r\n").unwrap(), Some(RespValue::Null));
+        assert_eq!(decode(b"#t\r\n").unwrap(), Some(RespValue::Boolean(true)));
+        assert_eq!(decode(b"#f\r\n").unwrap(), Some(RespValue::Boolean(false)));
+        assert_eq!(decode(b",1.5\r\n").unwrap(), Some(RespValue::Double(1.5)));
+        assert_eq!(
+            decode(b",-inf\r\n").unwrap(),
+            Some(RespValue::Double(f64::NEG_INFINITY))
+        );
+        assert!(matches!(
+            decode(b",nan\r\n").unwrap(),
+            Some(RespValue::Double(d)) if d.is_nan()
+        ));
+    }
+
+    #[test]
+    fn resp3_malformed_scalars_rejected() {
+        assert!(decode(b"_x\r\n").is_err());
+        assert!(decode(b"#x\r\n").is_err());
+        assert!(decode(b"#\r\n").is_err());
+        assert!(decode(b",abc\r\n").is_err());
+        assert!(decode(b",\r\n").is_err());
+    }
+
+    #[test]
+    fn resp3_map_pairs_children() {
+        let wire = b"%2\r\n$1\r\na\r\n:1\r\n$1\r\nb\r\n_\r\n";
+        assert_eq!(
+            decode(wire).unwrap(),
+            Some(RespValue::Map(vec![
+                (bulk(b"a"), RespValue::Integer(1)),
+                (bulk(b"b"), RespValue::Null),
+            ]))
+        );
+    }
+
+    #[test]
+    fn resp3_set_push_and_empty_aggregates() {
+        assert_eq!(
+            decode(b"~2\r\n:1\r\n:2\r\n").unwrap(),
+            Some(RespValue::Set(vec![
+                RespValue::Integer(1),
+                RespValue::Integer(2)
+            ]))
+        );
+        assert_eq!(
+            decode(b">2\r\n$7\r\nmessage\r\n$1\r\nc\r\n").unwrap(),
+            Some(RespValue::Push(vec![bulk(b"message"), bulk(b"c")]))
+        );
+        assert_eq!(decode(b"%0\r\n").unwrap(), Some(RespValue::Map(vec![])));
+        assert_eq!(decode(b"~0\r\n").unwrap(), Some(RespValue::Set(vec![])));
+        assert_eq!(decode(b">0\r\n").unwrap(), Some(RespValue::Push(vec![])));
+    }
+
+    #[test]
+    fn resp3_negative_aggregate_length_rejected() {
+        assert!(decode(b"%-1\r\n").is_err());
+        assert!(decode(b"~-1\r\n").is_err());
+        assert!(decode(b">-1\r\n").is_err());
+    }
+
+    #[test]
+    fn resp3_nested_and_incremental() {
+        let wire = b"%1\r\n$1\r\nk\r\n~1\r\n*1\r\n#t\r\n";
+        let expected = RespValue::Map(vec![(
+            bulk(b"k"),
+            RespValue::Set(vec![array(vec![RespValue::Boolean(true)])]),
+        )]);
+        let mut decoder = RespDecoder::new();
+        let mut buf = BytesMut::new();
+        let mut completed = None;
+        for &b in wire.iter() {
+            buf.extend_from_slice(&[b]);
+            if let Some(v) = decoder.decode(&mut buf).unwrap() {
+                completed = Some(v);
+            }
+        }
+        assert_eq!(completed, Some(expected));
+    }
+
+    #[test]
+    fn resp3_limits_apply_to_new_aggregates() {
+        let mut decoder = RespDecoder::with_limits(DEFAULT_MAX_BULK_LEN, 2, DEFAULT_MAX_DEPTH);
+        assert!(decoder.decode(&mut BytesMut::from(&b"%3\r\n"[..])).is_err());
+        let mut decoder = RespDecoder::with_limits(DEFAULT_MAX_BULK_LEN, 2, DEFAULT_MAX_DEPTH);
+        assert!(decoder.decode(&mut BytesMut::from(&b"~3\r\n"[..])).is_err());
+
+        let mut decoder = RespDecoder::with_limits(DEFAULT_MAX_BULK_LEN, DEFAULT_MAX_ARRAY_LEN, 2);
+        let mut buf = BytesMut::from(&b"%1\r\n$1\r\nk\r\n~1\r\n~1\r\n:1\r\n"[..]);
+        assert!(decoder.decode(&mut buf).is_err());
+    }
+
+    // --- protocol-aware encoding ---
+
+    fn encode_as(protocol: Protocol, value: RespValue) -> Vec<u8> {
+        let mut codec = RespDecoder::new();
+        codec.set_protocol(protocol);
+        let mut dst = BytesMut::new();
+        codec.encode(value, &mut dst).unwrap();
+        dst.to_vec()
+    }
+
+    /// Every variant, rendered for both protocols.
+    #[test]
+    fn encode_every_variant_under_both_protocols() {
+        use Protocol::{Resp2, Resp3};
+        let cases: Vec<(RespValue, &[u8], &[u8])> = vec![
+            (RespValue::BulkString(None), b"$-1\r\n", b"_\r\n"),
+            (RespValue::Array(None), b"*-1\r\n", b"_\r\n"),
+            (RespValue::Null, b"$-1\r\n", b"_\r\n"),
+            (RespValue::Boolean(true), b":1\r\n", b"#t\r\n"),
+            (RespValue::Boolean(false), b":0\r\n", b"#f\r\n"),
+            (RespValue::Double(1.5), b"$3\r\n1.5\r\n", b",1.5\r\n"),
+            (RespValue::Double(3.0), b"$1\r\n3\r\n", b",3\r\n"),
+            (
+                RespValue::Double(f64::INFINITY),
+                b"$3\r\ninf\r\n",
+                b",inf\r\n",
+            ),
+            (
+                RespValue::Double(f64::NEG_INFINITY),
+                b"$4\r\n-inf\r\n",
+                b",-inf\r\n",
+            ),
+            (RespValue::Double(f64::NAN), b"$3\r\nNaN\r\n", b",nan\r\n"),
+            (
+                RespValue::Map(vec![(bulk(b"a"), RespValue::Integer(1))]),
+                b"*2\r\n$1\r\na\r\n:1\r\n",
+                b"%1\r\n$1\r\na\r\n:1\r\n",
+            ),
+            (
+                RespValue::Set(vec![bulk(b"a")]),
+                b"*1\r\n$1\r\na\r\n",
+                b"~1\r\n$1\r\na\r\n",
+            ),
+            (
+                RespValue::Push(vec![bulk(b"a")]),
+                b"*1\r\n$1\r\na\r\n",
+                b">1\r\n$1\r\na\r\n",
+            ),
+        ];
+        for (value, resp2, resp3) in cases {
+            assert_eq!(encode_as(Resp2, value.clone()), resp2, "resp2 {value:?}");
+            assert_eq!(encode_as(Resp3, value.clone()), resp3, "resp3 {value:?}");
+        }
+    }
+
+    #[test]
+    fn encode_nested_values_downgrade_recursively() {
+        let value = array(vec![
+            RespValue::Map(vec![(bulk(b"k"), RespValue::Set(vec![RespValue::Null]))]),
+            RespValue::BulkString(None),
+        ]);
+        assert_eq!(
+            encode_as(Protocol::Resp2, value.clone()),
+            b"*2\r\n*2\r\n$1\r\nk\r\n*1\r\n$-1\r\n$-1\r\n"
+        );
+        assert_eq!(
+            encode_as(Protocol::Resp3, value),
+            b"*2\r\n%1\r\n$1\r\nk\r\n~1\r\n_\r\n_\r\n"
+        );
+    }
+
+    #[test]
+    fn resp3_encoding_round_trips_through_decode() {
+        let value = RespValue::Map(vec![
+            (bulk(b"s"), RespValue::Set(vec![RespValue::Integer(1)])),
+            (bulk(b"d"), RespValue::Double(-2.25)),
+            (bulk(b"n"), RespValue::Null),
+            (bulk(b"b"), RespValue::Boolean(true)),
+            (bulk(b"p"), RespValue::Push(vec![bulk(b"x")])),
+        ]);
+        let mut dst = BytesMut::from(&encode_as(Protocol::Resp3, value.clone())[..]);
+        assert_eq!(RespDecoder::new().decode(&mut dst).unwrap(), Some(value));
+    }
+
+    #[test]
+    fn protocol_defaults_to_resp2_and_only_affects_later_encodes() {
+        let mut codec = RespDecoder::new();
+        assert_eq!(codec.protocol(), Protocol::Resp2);
+        let mut dst = BytesMut::new();
+        codec.encode(RespValue::Null, &mut dst).unwrap();
+        codec.set_protocol(Protocol::Resp3);
+        codec.encode(RespValue::Null, &mut dst).unwrap();
+        codec.set_protocol(Protocol::Resp2);
+        codec.encode(RespValue::Null, &mut dst).unwrap();
+        assert_eq!(&dst[..], b"$-1\r\n_\r\n$-1\r\n");
+    }
+
+    /// Pins the RESP2 bytes of the original five types so the protocol work
+    /// can never change what existing clients see.
+    #[test]
+    fn resp2_golden_output_is_unchanged() {
+        let value = array(vec![
+            RespValue::SimpleString(Bytes::from_static(b"OK")),
+            RespValue::Error(Bytes::from_static(b"ERR boom")),
+            RespValue::Integer(-42),
+            bulk(b"hello"),
+            RespValue::BulkString(Some(Bytes::new())),
+            RespValue::BulkString(None),
+            RespValue::Array(None),
+            array(vec![]),
+            array(vec![bulk(b"x"), RespValue::Integer(1)]),
+        ]);
+        assert_eq!(
+            encode_as(Protocol::Resp2, value),
+            b"*9\r\n+OK\r\n-ERR boom\r\n:-42\r\n$5\r\nhello\r\n$0\r\n\r\n$-1\r\n*-1\r\n*0\r\n*2\r\n$1\r\nx\r\n:1\r\n"
+                .to_vec()
+        );
+    }
+
+    #[test]
+    fn downgrade_matches_resp2_encoding() {
+        let mut value = RespValue::Map(vec![(bulk(b"k"), RespValue::Double(0.5))]);
+        downgrade_to_resp2(&mut value);
+        assert_eq!(value, array(vec![bulk(b"k"), bulk(b"0.5")]),);
     }
 
     // --- Decoder over an actual byte stream (FramedRead) ---

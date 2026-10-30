@@ -31,7 +31,7 @@ use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use crate::common::registry::{Claim, WatchRegistry};
 use crate::common::session::Session;
 use crate::common::store::RedisStore;
-use crate::resp::RespValue;
+use crate::resp::{downgrade_to_resp2, RespValue};
 use kv::kv::{BoxFuture, Tx};
 
 /// Global cache mapping SHA1 hex digests to their Lua script source.
@@ -153,6 +153,18 @@ fn resp_to_piccolo<'gc>(ctx: Context<'gc>, resp: RespValue) -> Value<'gc> {
             }
             None => Value::from(false),
         },
+        // Scripts see RESP2 conversions (Redis does too, absent
+        // `redis.setresp(3)`), so the RESP3 types are downgraded first.
+        RespValue::Null
+        | RespValue::Boolean(_)
+        | RespValue::Double(_)
+        | RespValue::Map(_)
+        | RespValue::Set(_)
+        | RespValue::Push(_) => {
+            let mut resp = resp;
+            downgrade_to_resp2(&mut resp);
+            resp_to_piccolo(ctx, resp)
+        }
     }
 }
 

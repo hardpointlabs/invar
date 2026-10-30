@@ -34,4 +34,4 @@ pub use common::session::DEFAULT_CONFLICT_RETRY_COUNT;
 pub use common::{RedisStore, Session, WatchRegistry};
 pub use listener::{ListenAddr, RedisListener};
 pub use pubsub::PubSubRegistry;
-pub use resp::{RespDecoder, RespError, RespValue};
+pub use resp::{downgrade_to_resp2, Protocol, RespDecoder, RespError, RespValue};
