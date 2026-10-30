@@ -48,15 +48,15 @@
 
 use std::sync::Arc;
 
+use crate::common::op::NoOp;
+use crate::common::{op, DbError, DbOp, DbResult, QueuedOp, WireOp};
+use crate::pattern::{GlobPattern, PatternMatcher};
+use crate::RespValue;
 use bytes::Bytes;
 use dashmap::DashMap;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamMap;
-use crate::common::{op, DbError, DbOp, DbResult, QueuedOp, WireOp};
-use crate::common::op::NoOp;
-use crate::pattern::{GlobPattern, PatternMatcher};
-use crate::RespValue;
 
 /// Capacity of each per-channel/per-pattern broadcast channel.  Slow consumers
 /// that fall more than this many messages behind receive a
@@ -193,9 +193,13 @@ impl PubSubRegistry {
     /// Returns all channel names with at least one active subscriber,
     /// optionally filtered by a glob pattern.
     pub fn active_channels(self: Arc<Self>, pattern: Option<&[u8]>) -> QueuedOp {
-        op::wire_only_op(Box::new(ChannelsOp {
-            registry: self, pattern: pattern.map(Bytes::copy_from_slice)
-        }), true)
+        op::wire_only_op(
+            Box::new(ChannelsOp {
+                registry: self,
+                pattern: pattern.map(Bytes::copy_from_slice),
+            }),
+            true,
+        )
     }
 
     fn active_channels_val(&self, pattern: Option<&[u8]>) -> Vec<Bytes> {
@@ -237,7 +241,13 @@ impl PubSubRegistry {
     }
 
     pub fn numsub(self: Arc<Self>, channels: Vec<Bytes>) -> QueuedOp {
-        op::wire_only_op(Box::new(NumSubOp { registry: self, channels }), true)
+        op::wire_only_op(
+            Box::new(NumSubOp {
+                registry: self,
+                channels,
+            }),
+            true,
+        )
     }
 
     /// Returns a [`QueuedOp`] that publishes `payload` to `channel` when executed.
@@ -246,8 +256,7 @@ impl PubSubRegistry {
     /// pub/sub delivery should not be rolled back if the enclosing transaction
     /// fails for unrelated reasons — this matches real Redis semantics where
     /// `PUBLISH` inside `MULTI` always fires when `EXEC` runs.
-    pub fn publish_op(self: Arc<Self>, channel: Bytes, payload: Bytes,
-    ) -> QueuedOp {
+    pub fn publish_op(self: Arc<Self>, channel: Bytes, payload: Bytes) -> QueuedOp {
         QueuedOp {
             db_op: Box::new(PublishDbOp),
             wire_op: Box::new(PublishWireOp {
@@ -257,8 +266,8 @@ impl PubSubRegistry {
             }),
             is_mutating: false,
             allowed_in_tx: true,
-        abort_in_tx: false,
-        keys: None,
+            abort_in_tx: false,
+            keys: None,
         }
     }
 }
@@ -456,11 +465,7 @@ pub fn message_resp(channel: Bytes, payload: Bytes) -> crate::resp::RespValue {
 }
 
 /// `["pmessage", pattern, channel, payload]` — pattern-match push.
-pub fn pmessage_resp(
-    pattern: Bytes,
-    channel: Bytes,
-    payload: Bytes,
-) -> crate::resp::RespValue {
+pub fn pmessage_resp(pattern: Bytes, channel: Bytes, payload: Bytes) -> crate::resp::RespValue {
     crate::resp::RespValue::Array(Some(vec![
         crate::resp::RespValue::BulkString(Some(Bytes::from_static(b"pmessage"))),
         crate::resp::RespValue::BulkString(Some(pattern)),
@@ -553,7 +558,9 @@ struct ChannelsOp {
 impl WireOp for ChannelsOp {
     fn reply(&self, _result: Result<DbResult, DbError>) -> RespValue {
         let pattern = &self.pattern;
-        let channels: Vec<Bytes> = self.registry.active_channels_val(pattern.as_ref().map(|p| p.as_ref()));
+        let channels: Vec<Bytes> = self
+            .registry
+            .active_channels_val(pattern.as_ref().map(|p| p.as_ref()));
 
         RespValue::Array(Some(
             channels
@@ -563,7 +570,6 @@ impl WireOp for ChannelsOp {
         ))
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Tests

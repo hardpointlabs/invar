@@ -30,10 +30,10 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::time::{Duration};
+use std::time::Duration;
 
+use crate::time::now_millis;
 use async_trait::async_trait;
-use crate::time::{now_millis};
 
 /// A pinned, `Send` boxed future. The closure-based entry points on
 /// [`KeyValueStore`] use this type so callers can write `async` blocks
@@ -225,7 +225,11 @@ pub trait Tx: Send + Sync + 'static {
     /// An unbounded start key means starting from the beginning of the keyspace
     /// An unbounded end key means this iterator will run through the whole keyspace (assuming
     /// caller keeps iterating).
-    async fn new_range_iterator(&self, start: std::ops::Bound<&[u8]>, end: std::ops::Bound<&[u8]>) -> Result<Box<dyn KeyValueIterator>, Error>;
+    async fn new_range_iterator(
+        &self,
+        start: std::ops::Bound<&[u8]>,
+        end: std::ops::Bound<&[u8]>,
+    ) -> Result<Box<dyn KeyValueIterator>, Error>;
 
     /// Create a KeyValueIterator with an arbitrary start key prefix
     async fn new_prefix_iterator(&self, prefix: &[u8]) -> Result<Box<dyn KeyValueIterator>, Error>;

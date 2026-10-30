@@ -30,11 +30,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use kv::kv::{TxIsolation, BoxFuture, Entry, Error as KvError, Tx};
+use kv::kv::{BoxFuture, Entry, Error as KvError, Tx, TxIsolation};
 
+use crate::common::namespace::{
+    self, base_type, resolve_prefix, resolve_prefix_for_write, ElementPrefix,
+};
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use crate::common::session::Session;
-use crate::common::namespace::{self, base_type, resolve_prefix, resolve_prefix_for_write, ElementPrefix};
 use crate::common::{BlockingSignal, Claim, RedisStore, ValueType, WatchRegistry};
 use crate::resp::RespValue;
 
@@ -170,9 +172,7 @@ impl StreamMeta {
 fn entry_key(node_prefix: &[u8], version: u64, id: &StreamEntryId) -> Vec<u8> {
     let version_str = version.to_string();
     let id_part = id.key_part();
-    let mut key = Vec::with_capacity(
-        node_prefix.len() + 1 + version_str.len() + 1 + id_part.len(),
-    );
+    let mut key = Vec::with_capacity(node_prefix.len() + 1 + version_str.len() + 1 + id_part.len());
     key.extend_from_slice(node_prefix);
     key.push(0);
     key.extend_from_slice(version_str.as_bytes());
@@ -222,11 +222,7 @@ fn range_start_bound(
 
 /// Returns the `Bound` for the end of an entry range. If `id` is `None`,
 /// the range extends to the end of the keyspace.
-fn range_end_bound(
-    node_prefix: &[u8],
-    version: u64,
-    id: Option<&StreamEntryId>,
-) -> Bound<Vec<u8>> {
+fn range_end_bound(node_prefix: &[u8], version: u64, id: Option<&StreamEntryId>) -> Bound<Vec<u8>> {
     match id {
         Some(id) => Bound::Included(entry_key(node_prefix, version, id)),
         None => Bound::Unbounded,
@@ -541,11 +537,7 @@ pub fn xtrim_maxlen(session: &Session, key: &[u8], max_len: u64) -> QueuedOp {
 }
 
 /// `XTRIM key MINID [~] ms-seq`
-pub fn xtrim_minid(
-    session: &Session,
-    key: &[u8],
-    min_id: StreamEntryId,
-) -> QueuedOp {
+pub fn xtrim_minid(session: &Session, key: &[u8], min_id: StreamEntryId) -> QueuedOp {
     QueuedOp {
         db_op: Box::new(XTrimOp {
             public_key: session.public_key(key),
@@ -562,11 +554,7 @@ pub fn xtrim_minid(
 }
 
 /// `XSETID key last-entry-id`
-pub fn xsetid(
-    session: &Session,
-    key: &[u8],
-    last_id: StreamEntryId,
-) -> QueuedOp {
+pub fn xsetid(session: &Session, key: &[u8], last_id: StreamEntryId) -> QueuedOp {
     QueuedOp {
         db_op: Box::new(XSetIdOp {
             public_key: session.public_key(key),
@@ -644,9 +632,7 @@ impl DbOp for XAddOp {
                 Ok(m) => m,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
                     if nomkstream {
-                        return Err(DbError::Redis(
-                            "no such key".to_string(),
-                        ));
+                        return Err(DbError::Redis("no such key".to_string()));
                     }
                     StreamMeta::new()
                 }
@@ -656,7 +642,8 @@ impl DbOp for XAddOp {
             // Resolve entry ID.
             let id = match explicit_id {
                 Some(id) => {
-                    if id.ms <= meta.last_id.ms && id.seq <= meta.last_id.seq
+                    if id.ms <= meta.last_id.ms
+                        && id.seq <= meta.last_id.seq
                         && !(id.ms == 0 && id.seq == 0 && meta.last_id == StreamEntryId::ZERO)
                     {
                         return Err(DbError::Redis(
@@ -756,7 +743,9 @@ impl DbOp for XAddOp {
                 &mut xadd.claim,
                 self.registry.stream_notification(&self.public_key),
             );
-            into.lock().expect("deferred claims mutex poisoned").push(claim);
+            into.lock()
+                .expect("deferred claims mutex poisoned")
+                .push(claim);
         }
     }
 }
@@ -807,10 +796,8 @@ impl DbOp for XRangeOp {
                 Ok(m) => m,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
                     #[allow(clippy::box_default)]
-                    let result: DbResult = Box::new(Vec::<(
-                        StreamEntryId,
-                        Vec<(Vec<u8>, Vec<u8>)>,
-                    )>::new());
+                    let result: DbResult =
+                        Box::new(Vec::<(StreamEntryId, Vec<(Vec<u8>, Vec<u8>)>)>::new());
                     return Ok(result);
                 }
                 Err(e) => return Err(e),
@@ -944,7 +931,11 @@ async fn read_streams(
 impl DbOp for XReadOp {
     fn run<'a>(&'a self, tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
         if !self.can_block {
-            tracing::debug!(blockers = 0, streams = self.streams.len(), "xread op non-blocking");
+            tracing::debug!(
+                blockers = 0,
+                streams = self.streams.len(),
+                "xread op non-blocking"
+            );
             // Non-blocking, and the MULTI/script degrade path: use the
             // dispatcher's batch transaction.
             let streams = self.streams.clone();
@@ -975,8 +966,7 @@ impl DbOp for XReadOp {
         let timeout = self.timeout;
         let blocking = self.blocking.clone();
         Box::pin(async move {
-            let public_keys: Vec<Vec<u8>> =
-                streams.iter().map(|s| s.public_key.clone()).collect();
+            let public_keys: Vec<Vec<u8>> = streams.iter().map(|s| s.public_key.clone()).collect();
             let deadline = if timeout.is_finite() && timeout > 0.0 {
                 Some(tokio::time::Instant::now() + Duration::from_secs_f64(timeout))
             } else {
@@ -986,7 +976,10 @@ impl DbOp for XReadOp {
             let mut announced = false;
             loop {
                 let registration = registry.register_stream(&public_keys);
-                let own_tx = store.begin(false, TxIsolation::Snapshot).await.map_err(DbError::Kv)?;
+                let own_tx = store
+                    .begin(false, TxIsolation::Snapshot)
+                    .await
+                    .map_err(DbError::Kv)?;
                 let ids_now = match &resolved {
                     Some(r) => r.clone(),
                     None => match resolve_read_ids(&*own_tx, &streams, &ids).await {
@@ -1140,7 +1133,9 @@ async fn do_trim(
         let prefix = entry_prefix(node_prefix, meta.version);
         let prefix_len = prefix.len();
         let prefix_ref: &[u8] = &prefix;
-        let mut it = tx.new_range_iterator(Bound::Included(prefix_ref), Bound::Unbounded).await?;
+        let mut it = tx
+            .new_range_iterator(Bound::Included(prefix_ref), Bound::Unbounded)
+            .await?;
         let mut keys_to_delete: Vec<Vec<u8>> = Vec::new();
         let mut first_kept: Option<StreamEntryId> = None;
         let mut seen = 0u64;
@@ -1320,7 +1315,8 @@ impl WireOp for XRangeWire {
     fn reply(&self, result: Result<DbResult, DbError>) -> RespValue {
         match result {
             Ok(res) => {
-                let Ok(entries) = res.downcast::<Vec<(StreamEntryId, Vec<(Vec<u8>, Vec<u8>)>)>>() else {
+                let Ok(entries) = res.downcast::<Vec<(StreamEntryId, Vec<(Vec<u8>, Vec<u8>)>)>>()
+                else {
                     return internal_error();
                 };
                 let items: Vec<RespValue> = entries
@@ -1340,10 +1336,9 @@ impl WireOp for XReadWire {
     fn reply(&self, result: Result<DbResult, DbError>) -> RespValue {
         match result {
             Ok(res) => {
-                let Ok(streams) = res.downcast::<Vec<(
-                    Bytes,
-                    Vec<(StreamEntryId, Vec<(Vec<u8>, Vec<u8>)>)>,
-                )>>() else {
+                let Ok(streams) =
+                    res.downcast::<Vec<(Bytes, Vec<(StreamEntryId, Vec<(Vec<u8>, Vec<u8>)>)>)>>()
+                else {
                     return internal_error();
                 };
                 // nil when no stream has entries.
@@ -1421,7 +1416,10 @@ mod tests {
 
     async fn exec(session: &Session, op: QueuedOp) -> RespValue {
         let store = session.store();
-        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
+        let tx = store
+            .begin(op.is_mutating, TxIsolation::Snapshot)
+            .await
+            .expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -1432,7 +1430,10 @@ mod tests {
     /// Like [`exec`] but takes owned data so it can be spawned as a `'static`
     /// task (needed for blocking-read tests).
     async fn exec_owned(op: QueuedOp, store: Arc<dyn RedisStore>) -> RespValue {
-        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
+        let tx = store
+            .begin(op.is_mutating, TxIsolation::Snapshot)
+            .await
+            .expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -1484,11 +1485,16 @@ mod tests {
     // --- namespaced layout (RFC 0001) ---
 
     fn id(s: &str) -> StreamEntryId {
-        parse_stream_id_arg(s.as_bytes()).expect("valid").expect("not $")
+        parse_stream_id_arg(s.as_bytes())
+            .expect("valid")
+            .expect("not $")
     }
 
     fn fv(parts: &[&str]) -> Vec<Bytes> {
-        parts.iter().map(|p| Bytes::copy_from_slice(p.as_bytes())).collect()
+        parts
+            .iter()
+            .map(|p| Bytes::copy_from_slice(p.as_bytes()))
+            .collect()
     }
 
     fn add(s: &Session, at: &str, v: &str) -> QueuedOp {
@@ -1496,10 +1502,17 @@ mod tests {
     }
 
     /// Runs the op on a legacy twin and on the namespaced one; replies must match.
-    async fn both(legacy: &Session, ns: &Session, build: impl Fn(&Session) -> QueuedOp) -> RespValue {
+    async fn both(
+        legacy: &Session,
+        ns: &Session,
+        build: impl Fn(&Session) -> QueuedOp,
+    ) -> RespValue {
         let a = crate::testutil::exec(legacy, build(legacy)).await;
         let b = crate::testutil::exec(ns, build(ns)).await;
-        assert_eq!(a, b, "a namespaced stream must answer exactly like a legacy one");
+        assert_eq!(
+            a, b,
+            "a namespaced stream must answer exactly like a legacy one"
+        );
         a
     }
 
@@ -1518,10 +1531,16 @@ mod tests {
         // Reads.
         both(&legacy, &ns, |s| xlen(s, b"st")).await;
         both(&legacy, &ns, |s| xrange(s, b"st", None, None, 100)).await;
-        both(&legacy, &ns, |s| xrange(s, b"st", Some(id("2-1")), Some(id("3-1")), 100)).await;
+        both(&legacy, &ns, |s| {
+            xrange(s, b"st", Some(id("2-1")), Some(id("3-1")), 100)
+        })
+        .await;
         both(&legacy, &ns, |s| xrevrange(s, b"st", None, None, 2)).await;
         both(&legacy, &ns, |s| xinfo_stream(s, b"st")).await;
-        both(&legacy, &ns, |s| xread(s, &fv(&["st"]), vec![Some(id("2-1"))], 10, None)).await;
+        both(&legacy, &ns, |s| {
+            xread(s, &fv(&["st"]), vec![Some(id("2-1"))], 10, None)
+        })
+        .await;
 
         // Writes.
         both(&legacy, &ns, |s| add(s, "5-1", "e")).await;
@@ -1533,9 +1552,14 @@ mod tests {
         both(&legacy, &ns, |s| xinfo_stream(s, b"st")).await;
 
         // Nothing under the name-derived prefix; sentinel still records the namespace.
-        assert_eq!(crate::testutil::entries_under(&ns, &ns.private_key(b"st")).await, 0);
+        assert_eq!(
+            crate::testutil::entries_under(&ns, &ns.private_key(b"st")).await,
+            0
+        );
         assert!(crate::testutil::entries_under(&ns, &ns_s).await > 0);
-        let meta = crate::testutil::stored_type_byte(&ns, &ns.public_key(b"st")).await.unwrap();
+        let meta = crate::testutil::stored_type_byte(&ns, &ns.public_key(b"st"))
+            .await
+            .unwrap();
         assert_eq!(meta, TYPE_STREAM | crate::common::namespace::NAMESPACE_FLAG);
     }
 
@@ -1545,16 +1569,47 @@ mod tests {
         let s = test_session();
         crate::testutil::exec(&s, add(&s, "1-1", "a")).await;
         crate::testutil::exec(&s, xsetid(&s, b"by_xsetid", id("5-0"))).await;
-        crate::testutil::exec(&s, xadd(&s, b"by_xadd", false, None, None, Some(id("2-1")), &fv(&["f", "v"]))).await;
+        crate::testutil::exec(
+            &s,
+            xadd(
+                &s,
+                b"by_xadd",
+                false,
+                None,
+                None,
+                Some(id("2-1")),
+                &fv(&["f", "v"]),
+            ),
+        )
+        .await;
         // NOMKSTREAM never creates one.
-        crate::testutil::exec(&s, xadd(&s, b"never_created", true, None, None, Some(id("1-1")), &fv(&["f", "v"]))).await;
-        assert_eq!(crate::testutil::stored_type_byte(&s, &s.public_key(b"never_created")).await, None);
+        crate::testutil::exec(
+            &s,
+            xadd(
+                &s,
+                b"never_created",
+                true,
+                None,
+                None,
+                Some(id("1-1")),
+                &fv(&["f", "v"]),
+            ),
+        )
+        .await;
+        assert_eq!(
+            crate::testutil::stored_type_byte(&s, &s.public_key(b"never_created")).await,
+            None
+        );
 
         let mut seen = std::collections::HashSet::new();
         for key in ["st", "by_xadd"] {
             let ns = crate::testutil::namespace_of(&s, key.as_bytes()).await;
             assert!(crate::testutil::entries_under(&s, &ns).await > 0, "{key}");
-            assert_eq!(crate::testutil::entries_under(&s, &s.private_key(key.as_bytes())).await, 0, "{key}: nothing under the name");
+            assert_eq!(
+                crate::testutil::entries_under(&s, &s.private_key(key.as_bytes())).await,
+                0,
+                "{key}: nothing under the name"
+            );
             assert!(seen.insert(ns), "{key}: namespaces must be unique");
         }
         // XSETID on a missing key makes an empty stream, which still records a namespace.
@@ -1564,12 +1619,44 @@ mod tests {
     #[tokio::test]
     async fn recreating_a_stream_does_not_resurrect_old_entries() {
         let s = test_session();
-        crate::testutil::exec(&s, xadd(&s, b"st", false, None, None, Some(id("1-1")), &fv(&["f", "old"]))).await;
+        crate::testutil::exec(
+            &s,
+            xadd(
+                &s,
+                b"st",
+                false,
+                None,
+                None,
+                Some(id("1-1")),
+                &fv(&["f", "old"]),
+            ),
+        )
+        .await;
         crate::testutil::exec(&s, crate::keys::pexpire(&s, b"st", 5)).await;
         tokio::time::sleep(std::time::Duration::from_millis(60)).await;
-        crate::testutil::exec(&s, xadd(&s, b"st", false, None, None, Some(id("2-1")), &fv(&["f", "new"]))).await;
-        let RespValue::Array(Some(entries)) = crate::testutil::exec(&s, xrange(&s, b"st", None, None, 100)).await else { panic!("XRANGE must reply an array") };
-        assert_eq!(entries.len(), 1, "the expired stream's entry came back: {entries:?}");
+        crate::testutil::exec(
+            &s,
+            xadd(
+                &s,
+                b"st",
+                false,
+                None,
+                None,
+                Some(id("2-1")),
+                &fv(&["f", "new"]),
+            ),
+        )
+        .await;
+        let RespValue::Array(Some(entries)) =
+            crate::testutil::exec(&s, xrange(&s, b"st", None, None, 100)).await
+        else {
+            panic!("XRANGE must reply an array")
+        };
+        assert_eq!(
+            entries.len(),
+            1,
+            "the expired stream's entry came back: {entries:?}"
+        );
     }
 
     #[tokio::test]
@@ -1579,7 +1666,10 @@ mod tests {
         crate::testutil::exec(&s, crate::keys::expire(&s, b"st", 100)).await;
         crate::testutil::exec(&s, add(&s, "2-1", "b")).await;
         let ttl = crate::testutil::exec(&s, crate::keys::ttl(&s, b"st")).await;
-        assert!(matches!(ttl, RespValue::Integer(n) if (90..=100).contains(&n)), "ttl was {ttl:?}");
+        assert!(
+            matches!(ttl, RespValue::Integer(n) if (90..=100).contains(&n)),
+            "ttl was {ttl:?}"
+        );
     }
 
     #[tokio::test]
@@ -1594,10 +1684,7 @@ mod tests {
                 None,
                 None,
                 None,
-                &[
-                    Bytes::from_static(b"f1"),
-                    Bytes::from_static(b"v1"),
-                ],
+                &[Bytes::from_static(b"f1"), Bytes::from_static(b"v1")],
             ),
         )
         .await;
@@ -1619,10 +1706,7 @@ mod tests {
                 None,
                 None,
                 Some(StreamEntryId::new(100, 1)),
-                &[
-                    Bytes::from_static(b"f"),
-                    Bytes::from_static(b"v"),
-                ],
+                &[Bytes::from_static(b"f"), Bytes::from_static(b"v")],
             ),
         )
         .await;
@@ -1633,17 +1717,11 @@ mod tests {
     async fn xadd_duplicate_id_errors() {
         let session = test_session();
         let id = Some(StreamEntryId::new(100, 0));
-        let fv = &[
-            Bytes::from_static(b"f"),
-            Bytes::from_static(b"v"),
-        ];
+        let fv = &[Bytes::from_static(b"f"), Bytes::from_static(b"v")];
         exec(&session, xadd(&session, b"s", false, None, None, id, fv)).await;
         let r = exec(&session, xadd(&session, b"s", false, None, None, id, fv)).await;
         let err = expect_error(&r);
-        assert!(
-            err.starts_with(b"ERR"),
-            "expected ERR, got {err:?}"
-        );
+        assert!(err.starts_with(b"ERR"), "expected ERR, got {err:?}");
     }
 
     #[tokio::test]
@@ -1732,12 +1810,28 @@ mod tests {
         let fv = &[Bytes::from_static(b"f"), Bytes::from_static(b"v")];
         exec(
             &session,
-            xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(1, 0)), fv),
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(1, 0)),
+                fv,
+            ),
         )
         .await;
         exec(
             &session,
-            xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(2, 0)), fv),
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(2, 0)),
+                fv,
+            ),
         )
         .await;
         assert_eq!(expect_int(&exec(&session, xlen(&session, b"s")).await), 2);
@@ -1756,9 +1850,45 @@ mod tests {
     async fn xrange_returns_all_entries() {
         let session = test_session();
         let fv = &[Bytes::from_static(b"f"), Bytes::from_static(b"v")];
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(1, 0)), fv)).await;
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(2, 0)), fv)).await;
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(3, 0)), fv)).await;
+        exec(
+            &session,
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(1, 0)),
+                fv,
+            ),
+        )
+        .await;
+        exec(
+            &session,
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(2, 0)),
+                fv,
+            ),
+        )
+        .await;
+        exec(
+            &session,
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(3, 0)),
+                fv,
+            ),
+        )
+        .await;
         let r = exec(&session, xrange(&session, b"s", None, None, 100)).await;
         let items = expect_array(&r);
         assert_eq!(items.len(), 3);
@@ -1770,9 +1900,45 @@ mod tests {
     async fn xrange_with_count() {
         let session = test_session();
         let fv = &[Bytes::from_static(b"f"), Bytes::from_static(b"v")];
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(1, 0)), fv)).await;
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(2, 0)), fv)).await;
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(3, 0)), fv)).await;
+        exec(
+            &session,
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(1, 0)),
+                fv,
+            ),
+        )
+        .await;
+        exec(
+            &session,
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(2, 0)),
+                fv,
+            ),
+        )
+        .await;
+        exec(
+            &session,
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(3, 0)),
+                fv,
+            ),
+        )
+        .await;
         let r = exec(&session, xrange(&session, b"s", None, None, 2)).await;
         assert_eq!(expect_array(&r).len(), 2);
     }
@@ -1781,9 +1947,45 @@ mod tests {
     async fn xrange_filtered_range() {
         let session = test_session();
         let fv = &[Bytes::from_static(b"f"), Bytes::from_static(b"v")];
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(1, 0)), fv)).await;
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(2, 0)), fv)).await;
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(3, 0)), fv)).await;
+        exec(
+            &session,
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(1, 0)),
+                fv,
+            ),
+        )
+        .await;
+        exec(
+            &session,
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(2, 0)),
+                fv,
+            ),
+        )
+        .await;
+        exec(
+            &session,
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(3, 0)),
+                fv,
+            ),
+        )
+        .await;
         let r = exec(
             &session,
             xrange(
@@ -1806,9 +2008,45 @@ mod tests {
     async fn xrevrange_returns_reversed() {
         let session = test_session();
         let fv = &[Bytes::from_static(b"f"), Bytes::from_static(b"v")];
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(1, 0)), fv)).await;
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(2, 0)), fv)).await;
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(3, 0)), fv)).await;
+        exec(
+            &session,
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(1, 0)),
+                fv,
+            ),
+        )
+        .await;
+        exec(
+            &session,
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(2, 0)),
+                fv,
+            ),
+        )
+        .await;
+        exec(
+            &session,
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(3, 0)),
+                fv,
+            ),
+        )
+        .await;
         let r = exec(
             &session,
             xrevrange(
@@ -1832,14 +2070,46 @@ mod tests {
     async fn xdel_removes_entries() {
         let session = test_session();
         let fv = &[Bytes::from_static(b"f"), Bytes::from_static(b"v")];
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(1, 0)), fv)).await;
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(2, 0)), fv)).await;
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(3, 0)), fv)).await;
-        let r = exec(
+        exec(
             &session,
-            xdel(&session, b"s", &[StreamEntryId::new(2, 0)]),
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(1, 0)),
+                fv,
+            ),
         )
         .await;
+        exec(
+            &session,
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(2, 0)),
+                fv,
+            ),
+        )
+        .await;
+        exec(
+            &session,
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(3, 0)),
+                fv,
+            ),
+        )
+        .await;
+        let r = exec(&session, xdel(&session, b"s", &[StreamEntryId::new(2, 0)])).await;
         assert_eq!(expect_int(&r), 1);
         assert_eq!(expect_int(&exec(&session, xlen(&session, b"s")).await), 2);
         let r = exec(&session, xrange(&session, b"s", None, None, 100)).await;
@@ -1853,12 +2123,20 @@ mod tests {
     async fn xdel_missing_entry() {
         let session = test_session();
         let fv = &[Bytes::from_static(b"f"), Bytes::from_static(b"v")];
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(1, 0)), fv)).await;
-        let r = exec(
+        exec(
             &session,
-            xdel(&session, b"s", &[StreamEntryId::new(99, 0)]),
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(1, 0)),
+                fv,
+            ),
         )
         .await;
+        let r = exec(&session, xdel(&session, b"s", &[StreamEntryId::new(99, 0)])).await;
         assert_eq!(expect_int(&r), 0);
         assert_eq!(expect_int(&exec(&session, xlen(&session, b"s")).await), 1);
     }
@@ -1867,7 +2145,19 @@ mod tests {
     async fn xdel_all_entries_removes_stream() {
         let session = test_session();
         let fv = &[Bytes::from_static(b"f"), Bytes::from_static(b"v")];
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(1, 0)), fv)).await;
+        exec(
+            &session,
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(1, 0)),
+                fv,
+            ),
+        )
+        .await;
         exec(&session, xdel(&session, b"s", &[StreamEntryId::new(1, 0)])).await;
         assert_eq!(expect_int(&exec(&session, xlen(&session, b"s")).await), 0);
     }
@@ -1881,7 +2171,15 @@ mod tests {
         for i in 1..=5u64 {
             exec(
                 &session,
-                xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(i, 0)), fv),
+                xadd(
+                    &session,
+                    b"s",
+                    false,
+                    None,
+                    None,
+                    Some(StreamEntryId::new(i, 0)),
+                    fv,
+                ),
             )
             .await;
         }
@@ -1899,9 +2197,45 @@ mod tests {
     async fn xtrim_minid_basic() {
         let session = test_session();
         let fv = &[Bytes::from_static(b"f"), Bytes::from_static(b"v")];
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(1, 0)), fv)).await;
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(2, 0)), fv)).await;
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(3, 0)), fv)).await;
+        exec(
+            &session,
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(1, 0)),
+                fv,
+            ),
+        )
+        .await;
+        exec(
+            &session,
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(2, 0)),
+                fv,
+            ),
+        )
+        .await;
+        exec(
+            &session,
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(3, 0)),
+                fv,
+            ),
+        )
+        .await;
         let r = exec(
             &session,
             xtrim_minid(&session, b"s", StreamEntryId::new(2, 0)),
@@ -1924,7 +2258,15 @@ mod tests {
         for i in 1..=5u64 {
             exec(
                 &session,
-                xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(i, 0)), fv),
+                xadd(
+                    &session,
+                    b"s",
+                    false,
+                    None,
+                    None,
+                    Some(StreamEntryId::new(i, 0)),
+                    fv,
+                ),
             )
             .await;
         }
@@ -1954,15 +2296,8 @@ mod tests {
     #[tokio::test]
     async fn xsetid_creates_stream() {
         let session = test_session();
-        let r = exec(
-            &session,
-            xsetid(&session, b"s", StreamEntryId::new(100, 5)),
-        )
-        .await;
-        assert_eq!(
-            r,
-            RespValue::SimpleString(Bytes::from_static(b"OK"))
-        );
+        let r = exec(&session, xsetid(&session, b"s", StreamEntryId::new(100, 5))).await;
+        assert_eq!(r, RespValue::SimpleString(Bytes::from_static(b"OK")));
         assert_eq!(expect_int(&exec(&session, xlen(&session, b"s")).await), 0);
         // XADD after XSETID should use the set ID as the base.
         let r = exec(
@@ -1987,12 +2322,20 @@ mod tests {
     async fn xsetid_updates_existing() {
         let session = test_session();
         let fv = &[Bytes::from_static(b"f"), Bytes::from_static(b"v")];
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(1, 0)), fv)).await;
         exec(
             &session,
-            xsetid(&session, b"s", StreamEntryId::new(500, 0)),
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(1, 0)),
+                fv,
+            ),
         )
         .await;
+        exec(&session, xsetid(&session, b"s", StreamEntryId::new(500, 0))).await;
         // Auto-ID should now be after 500-0.
         let r = exec(
             &session,
@@ -2025,8 +2368,32 @@ mod tests {
     async fn xinfo_stream_with_entries() {
         let session = test_session();
         let fv = &[Bytes::from_static(b"f"), Bytes::from_static(b"v")];
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(10, 0)), fv)).await;
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(20, 1)), fv)).await;
+        exec(
+            &session,
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(10, 0)),
+                fv,
+            ),
+        )
+        .await;
+        exec(
+            &session,
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(20, 1)),
+                fv,
+            ),
+        )
+        .await;
         let r = exec(&session, xinfo_stream(&session, b"s")).await;
         let items = expect_array(&r);
         // Verify some key-value pairs.
@@ -2096,7 +2463,11 @@ mod tests {
     #[tokio::test]
     async fn wrong_type_xlen() {
         let session = test_session();
-        exec(&session, crate::strings::set(&session, b"key", b"val", None)).await;
+        exec(
+            &session,
+            crate::strings::set(&session, b"key", b"val", None),
+        )
+        .await;
         let r = exec(&session, xlen(&session, b"key")).await;
         assert_eq!(
             expect_error(&r),
@@ -2109,7 +2480,11 @@ mod tests {
     #[tokio::test]
     async fn wrong_type_xrange() {
         let session = test_session();
-        exec(&session, crate::strings::set(&session, b"key", b"val", None)).await;
+        exec(
+            &session,
+            crate::strings::set(&session, b"key", b"val", None),
+        )
+        .await;
         let r = exec(&session, xrange(&session, b"key", None, None, 10)).await;
         assert_eq!(
             expect_error(&r),
@@ -2142,9 +2517,45 @@ mod tests {
     async fn xread_after_specific_id() {
         let session = test_session();
         let fv = &[Bytes::from_static(b"f"), Bytes::from_static(b"v")];
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(1, 0)), fv)).await;
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(2, 0)), fv)).await;
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(3, 0)), fv)).await;
+        exec(
+            &session,
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(1, 0)),
+                fv,
+            ),
+        )
+        .await;
+        exec(
+            &session,
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(2, 0)),
+                fv,
+            ),
+        )
+        .await;
+        exec(
+            &session,
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(3, 0)),
+                fv,
+            ),
+        )
+        .await;
         let r = exec(
             &session,
             xread(
@@ -2175,7 +2586,19 @@ mod tests {
     async fn xread_dollar_id() {
         let session = test_session();
         let fv = &[Bytes::from_static(b"f"), Bytes::from_static(b"v")];
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(1, 0)), fv)).await;
+        exec(
+            &session,
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(1, 0)),
+                fv,
+            ),
+        )
+        .await;
         // $ means "after last entry" → should return nil.
         let r = exec(
             &session,
@@ -2291,7 +2714,19 @@ mod tests {
     async fn xread_block_returns_existing_immediately() {
         let session = test_session();
         let fv = &[Bytes::from_static(b"f"), Bytes::from_static(b"v")];
-        exec(&session, xadd(&session, b"s", false, None, None, Some(StreamEntryId::new(5, 0)), fv)).await;
+        exec(
+            &session,
+            xadd(
+                &session,
+                b"s",
+                false,
+                None,
+                None,
+                Some(StreamEntryId::new(5, 0)),
+                fv,
+            ),
+        )
+        .await;
         // Data already exists after 0-0, so BLOCK must not wait.
         let r = exec(
             &session,

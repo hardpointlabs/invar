@@ -10,13 +10,13 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Instant;
 
-use bytes::Bytes;
-use kv::kv::{BoxFuture, Tx};
-use crate::common::DbOp;
 use crate::common::op::{DbError, DbResult, DefaultWire, NoOp, QueuedOp, WireOp};
 use crate::common::session::Session;
-use crate::{conn, RedisStore};
+use crate::common::DbOp;
 use crate::resp::RespValue;
+use crate::{conn, RedisStore};
+use bytes::Bytes;
+use kv::kv::{BoxFuture, Tx};
 
 /// The Redis wire-protocol version Invar claims compatibility with. Reported
 /// in INFO so client libraries gate their behaviour on it; must be a valid
@@ -123,14 +123,24 @@ impl Drop for ClientGuard {
 
 /// Updates the registry entry when a client renames itself via `CLIENT SETNAME`.
 pub fn update_client_name(id: u64, name: String) {
-    if let Some(entry) = CLIENT_REGISTRY.lock().unwrap().iter_mut().find(|e| e.id == id) {
+    if let Some(entry) = CLIENT_REGISTRY
+        .lock()
+        .unwrap()
+        .iter_mut()
+        .find(|e| e.id == id)
+    {
         entry.name = name;
     }
 }
 
 /// Updates the registry entry when a client sets metadata via `CLIENT SETINFO`.
 pub fn update_client_meta(id: u64, lib_name: String, lib_ver: String) {
-    if let Some(entry) = CLIENT_REGISTRY.lock().unwrap().iter_mut().find(|e| e.id == id) {
+    if let Some(entry) = CLIENT_REGISTRY
+        .lock()
+        .unwrap()
+        .iter_mut()
+        .find(|e| e.id == id)
+    {
         entry.lib_name = lib_name;
         entry.lib_ver = lib_ver;
     }
@@ -168,7 +178,9 @@ impl DbOp for SaveOp {
 
 pub fn save(session: &Session) -> QueuedOp {
     QueuedOp {
-        db_op: Box::new(SaveOp { store: session.store() }),
+        db_op: Box::new(SaveOp {
+            store: session.store(),
+        }),
         wire_op: Box::new(DefaultWire),
         is_mutating: false,
         allowed_in_tx: false,
@@ -192,7 +204,9 @@ impl DbOp for FlushAllOp {
 
 pub fn flushall(session: &Session) -> QueuedOp {
     QueuedOp {
-        db_op: Box::new(FlushAllOp { store: session.store() }),
+        db_op: Box::new(FlushAllOp {
+            store: session.store(),
+        }),
         wire_op: Box::new(DefaultWire),
         is_mutating: false,
         allowed_in_tx: false,
@@ -214,7 +228,9 @@ impl DbOp for FlushDbOp {
         Box::pin(async move {
             self.store.drop_prefix(self.prefix.as_ref()).await?;
             self.store.drop_prefix(self.private_prefix.as_ref()).await?;
-            self.store.drop_prefix(self.namespace_prefix.as_ref()).await?;
+            self.store
+                .drop_prefix(self.namespace_prefix.as_ref())
+                .await?;
             Ok(Box::new(()) as DbResult)
         })
     }
@@ -667,16 +683,31 @@ mod tests {
         match &reply {
             RespValue::Array(Some(items)) => {
                 assert_eq!(items.len(), 14);
-                assert_eq!(items[0], RespValue::BulkString(Some(Bytes::from_static(b"server"))));
-                assert_eq!(items[1], RespValue::BulkString(Some(Bytes::from_static(b"redis"))));
-                assert_eq!(items[4], RespValue::BulkString(Some(Bytes::from_static(b"proto"))));
+                assert_eq!(
+                    items[0],
+                    RespValue::BulkString(Some(Bytes::from_static(b"server")))
+                );
+                assert_eq!(
+                    items[1],
+                    RespValue::BulkString(Some(Bytes::from_static(b"redis")))
+                );
+                assert_eq!(
+                    items[4],
+                    RespValue::BulkString(Some(Bytes::from_static(b"proto")))
+                );
                 assert_eq!(items[5], RespValue::Integer(2));
-                assert_eq!(items[6], RespValue::BulkString(Some(Bytes::from_static(b"id"))));
+                assert_eq!(
+                    items[6],
+                    RespValue::BulkString(Some(Bytes::from_static(b"id")))
+                );
                 assert_eq!(
                     items[7],
                     RespValue::BulkString(Some(Bytes::from(session.id().to_string())))
                 );
-                assert_eq!(items[12], RespValue::BulkString(Some(Bytes::from_static(b"modules"))));
+                assert_eq!(
+                    items[12],
+                    RespValue::BulkString(Some(Bytes::from_static(b"modules")))
+                );
                 assert_eq!(items[13], RespValue::Array(Some(Vec::new())));
             }
             other => panic!("expected array, got {other:?}"),
@@ -698,7 +729,15 @@ mod tests {
         let mut session = test_session();
         let reply = exec(hello(
             &mut session,
-            &cmd(&[b"HELLO", b"2", b"AUTH", b"default", b"pw", b"SETNAME", b"bull:conn"]),
+            &cmd(&[
+                b"HELLO",
+                b"2",
+                b"AUTH",
+                b"default",
+                b"pw",
+                b"SETNAME",
+                b"bull:conn",
+            ]),
         ));
         assert_eq!(session.client_name(), "bull:conn");
         match &reply {
@@ -710,7 +749,10 @@ mod tests {
     #[test]
     fn client_setname_getname() {
         let mut session = test_session();
-        let reply = exec(client(&mut session, &cmd(&[b"CLIENT", b"SETNAME", b"worker-1"])));
+        let reply = exec(client(
+            &mut session,
+            &cmd(&[b"CLIENT", b"SETNAME", b"worker-1"]),
+        ));
         assert_eq!(reply, RespValue::SimpleString(Bytes::from_static(b"OK")));
 
         let reply = exec(client(&mut session, &cmd(&[b"CLIENT", b"GETNAME"])));
@@ -772,7 +814,10 @@ mod tests {
                 let info = String::from_utf8_lossy(info).to_string();
                 assert!(info.starts_with("id="), "got {info:?}");
                 for want in ["name=conn-1", "lib-name=ioredis", "lib-ver=6.0.0", "db=0"] {
-                    assert!(info.contains(want), "CLIENT INFO missing {want:?} in {info:?}");
+                    assert!(
+                        info.contains(want),
+                        "CLIENT INFO missing {want:?} in {info:?}"
+                    );
                 }
             }
             other => panic!("expected bulk, got {other:?}"),

@@ -14,11 +14,11 @@
 use std::any::Any;
 use std::sync::Mutex;
 
-use bytes::Bytes;
-use kv::kv::{BoxFuture, Error as KvError, Tx};
+use crate::common::registry::Claim;
 use crate::resp;
 use crate::resp::RespValue;
-use crate::common::registry::Claim;
+use bytes::Bytes;
+use kv::kv::{BoxFuture, Error as KvError, Tx};
 use smallvec::SmallVec;
 
 /// Opaque result of a [`DbOp`], analogous to Go's `any`. The corresponding

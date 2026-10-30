@@ -32,9 +32,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 
+use crate::common::namespace::{
+    self, base_type, resolve_prefix, resolve_prefix_for_write, ElementPrefix,
+};
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use crate::common::session::Session;
-use crate::common::namespace::{self, base_type, resolve_prefix, resolve_prefix_for_write, ElementPrefix};
 use crate::common::ValueType;
 use crate::pattern::{GlobPattern, PatternMatcher};
 use crate::resp::RespValue;
@@ -94,7 +96,9 @@ async fn read_sentinel(tx: &dyn Tx, public_key: &[u8]) -> Result<u32, DbError> {
     if val.len() < 4 {
         return Err(DbError::Kv(KvError::KeyNotFound));
     }
-    Ok(u32::from_be_bytes(val[0..4].try_into().expect("slice in range")))
+    Ok(u32::from_be_bytes(
+        val[0..4].try_into().expect("slice in range"),
+    ))
 }
 
 /// Writes the hash sentinel entry with hash metadata. `prefix` is the prefix
@@ -106,7 +110,14 @@ async fn write_sentinel(
     count: u32,
     prefix: &ElementPrefix,
 ) -> Result<(), DbError> {
-    namespace::write_sentinel(tx, public_key, count.to_be_bytes().to_vec(), TYPE_HASH, prefix).await
+    namespace::write_sentinel(
+        tx,
+        public_key,
+        count.to_be_bytes().to_vec(),
+        TYPE_HASH,
+        prefix,
+    )
+    .await
 }
 
 /// Formats a float the way Go's `redis/common.FormatFloat` does.
@@ -670,9 +681,7 @@ impl DbOp for HKeysOp {
             let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             match tx.get(&public_key).await {
                 Ok(_) => {}
-                Err(KvError::KeyNotFound) => {
-                    return no_op_result()
-                }
+                Err(KvError::KeyNotFound) => return no_op_result(),
                 Err(e) => return Err(e.into()),
             }
 
@@ -709,9 +718,7 @@ impl DbOp for HValsOp {
             let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             match tx.get(&public_key).await {
                 Ok(_) => {}
-                Err(KvError::KeyNotFound) => {
-                    return no_op_result()
-                }
+                Err(KvError::KeyNotFound) => return no_op_result(),
                 Err(e) => return Err(e.into()),
             }
 
@@ -748,9 +755,7 @@ impl DbOp for HGetAllOp {
             let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
             match tx.get(&public_key).await {
                 Ok(_) => {}
-                Err(KvError::KeyNotFound) => {
-                    return no_op_result()
-                }
+                Err(KvError::KeyNotFound) => return no_op_result(),
                 Err(e) => return Err(e.into()),
             }
 
@@ -807,9 +812,7 @@ impl DbOp for HIncrByOp {
             };
 
             let new_val = current + amount;
-            tx.set(
-                Entry::new(fk, new_val.to_string().into_bytes()).metadata(TYPE_HASH),
-            )?;
+            tx.set(Entry::new(fk, new_val.to_string().into_bytes()).metadata(TYPE_HASH))?;
 
             if !field_existed {
                 let mut count = match read_sentinel(tx, &public_key).await {
@@ -853,9 +856,7 @@ impl DbOp for HIncrByFloatOp {
                     let f = std::str::from_utf8(&val)
                         .ok()
                         .and_then(|s| s.parse::<f64>().ok())
-                        .ok_or_else(|| {
-                            DbError::Redis("hash value is not a float".to_string())
-                        })?;
+                        .ok_or_else(|| DbError::Redis("hash value is not a float".to_string()))?;
                     (f, true)
                 }
                 Err(KvError::KeyNotFound) => (0.0f64, false),
@@ -864,9 +865,7 @@ impl DbOp for HIncrByFloatOp {
 
             let new_val = current + amount;
             let new_str = format_float(new_val);
-            tx.set(
-                Entry::new(fk, new_str.clone().into_bytes()).metadata(TYPE_HASH),
-            )?;
+            tx.set(Entry::new(fk, new_str.clone().into_bytes()).metadata(TYPE_HASH))?;
 
             if !field_existed {
                 let mut count = match read_sentinel(tx, &public_key).await {
@@ -954,7 +953,10 @@ impl DbOp for HRandFieldOp {
                         }
                         r
                     } else {
-                        perm.iter().take(n).map(|&idx| field_list[idx].clone()).collect()
+                        perm.iter()
+                            .take(n)
+                            .map(|&idx| field_list[idx].clone())
+                            .collect()
                     }
                 }
             } else {
@@ -1252,12 +1254,15 @@ impl WireOp for HScanWire {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kv::kv::TxIsolation;
     use crate::testutil::test_session;
+    use kv::kv::TxIsolation;
 
     async fn exec(session: &Session, op: QueuedOp) -> RespValue {
         let store = session.store();
-        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
+        let tx = store
+            .begin(op.is_mutating, TxIsolation::Snapshot)
+            .await
+            .expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -1296,15 +1301,25 @@ mod tests {
 
     /// Runs the same op on a hash in the legacy layout and on its namespaced
     /// twin and demands identical replies.
-    async fn both(legacy: &Session, namespaced: &Session, build: impl Fn(&Session) -> QueuedOp) -> RespValue {
+    async fn both(
+        legacy: &Session,
+        namespaced: &Session,
+        build: impl Fn(&Session) -> QueuedOp,
+    ) -> RespValue {
         let a = crate::testutil::exec(legacy, build(legacy)).await;
         let b = crate::testutil::exec(namespaced, build(namespaced)).await;
-        assert_eq!(a, b, "a namespaced hash must answer exactly like a legacy one");
+        assert_eq!(
+            a, b,
+            "a namespaced hash must answer exactly like a legacy one"
+        );
         a
     }
 
     fn bs(parts: &[&str]) -> Vec<Bytes> {
-        parts.iter().map(|p| Bytes::copy_from_slice(p.as_bytes())).collect()
+        parts
+            .iter()
+            .map(|p| Bytes::copy_from_slice(p.as_bytes()))
+            .collect()
     }
 
     #[tokio::test]
@@ -1321,7 +1336,10 @@ mod tests {
         // Reads.
         both(&legacy, &namespaced, |s| hget(s, b"h", b"b")).await;
         both(&legacy, &namespaced, |s| hget(s, b"h", b"missing")).await;
-        both(&legacy, &namespaced, |s| hmget(s, b"h", &bs(&["a", "x", "c"]))).await;
+        both(&legacy, &namespaced, |s| {
+            hmget(s, b"h", &bs(&["a", "x", "c"]))
+        })
+        .await;
         both(&legacy, &namespaced, |s| hexists(s, b"h", b"a")).await;
         both(&legacy, &namespaced, |s| hlen(s, b"h")).await;
         both(&legacy, &namespaced, |s| hkeys(s, b"h")).await;
@@ -1330,7 +1348,10 @@ mod tests {
         both(&legacy, &namespaced, |s| hstrlen(s, b"h", b"a")).await;
 
         // Writes, each followed by a read of everything.
-        both(&legacy, &namespaced, |s| hset(s, b"h", &bs(&["d", "4", "a", "10"]))).await;
+        both(&legacy, &namespaced, |s| {
+            hset(s, b"h", &bs(&["d", "4", "a", "10"]))
+        })
+        .await;
         both(&legacy, &namespaced, |s| hsetnx(s, b"h", b"e", b"5")).await;
         both(&legacy, &namespaced, |s| hsetnx(s, b"h", b"e", b"ignored")).await;
         both(&legacy, &namespaced, |s| hincrby(s, b"h", b"n", 7)).await;
@@ -1341,16 +1362,24 @@ mod tests {
 
         // Nothing may have been written under the name-derived prefix, the
         // sentinel must still record the namespace, and the elements live there.
-        assert_eq!(crate::testutil::entries_under(&namespaced, &namespaced.private_key(b"h")).await, 0);
+        assert_eq!(
+            crate::testutil::entries_under(&namespaced, &namespaced.private_key(b"h")).await,
+            0
+        );
         assert!(crate::testutil::entries_under(&namespaced, &ns).await > 0);
-        let meta = crate::testutil::stored_type_byte(&namespaced, &namespaced.public_key(b"h")).await.unwrap();
+        let meta = crate::testutil::stored_type_byte(&namespaced, &namespaced.public_key(b"h"))
+            .await
+            .unwrap();
         assert_eq!(meta, TYPE_HASH | crate::common::namespace::NAMESPACE_FLAG);
 
         // Emptying it removes the sentinel and every element.
         let all = bs(&["a", "d", "e", "n", "f", "c"]);
         both(&legacy, &namespaced, |s| hdel(s, b"h", &all)).await;
         both(&legacy, &namespaced, |s| hlen(s, b"h")).await;
-        assert_eq!(crate::testutil::stored_type_byte(&namespaced, &namespaced.public_key(b"h")).await, None);
+        assert_eq!(
+            crate::testutil::stored_type_byte(&namespaced, &namespaced.public_key(b"h")).await,
+            None
+        );
         assert_eq!(crate::testutil::entries_under(&namespaced, &ns).await, 0);
     }
 
@@ -1366,11 +1395,28 @@ mod tests {
         exec(&s, hset(&s, b"by_hmset", &bs(&["a", "1", "b", "2"]))).await;
 
         let mut seen = std::collections::HashSet::new();
-        for key in ["by_hset", "by_hsetnx", "by_hincrby", "by_hincrbyfloat", "by_hmset"] {
+        for key in [
+            "by_hset",
+            "by_hsetnx",
+            "by_hincrby",
+            "by_hincrbyfloat",
+            "by_hmset",
+        ] {
             let ns = crate::testutil::namespace_of(&s, key.as_bytes()).await;
-            assert!(ns.starts_with(b"+0:"), "{key}: {}", String::from_utf8_lossy(&ns));
-            assert!(crate::testutil::entries_under(&s, &ns).await > 0, "{key}: fields live in the namespace");
-            assert_eq!(crate::testutil::entries_under(&s, &s.private_key(key.as_bytes())).await, 0, "{key}: nothing under the name");
+            assert!(
+                ns.starts_with(b"+0:"),
+                "{key}: {}",
+                String::from_utf8_lossy(&ns)
+            );
+            assert!(
+                crate::testutil::entries_under(&s, &ns).await > 0,
+                "{key}: fields live in the namespace"
+            );
+            assert_eq!(
+                crate::testutil::entries_under(&s, &s.private_key(key.as_bytes())).await,
+                0,
+                "{key}: nothing under the name"
+            );
             assert!(seen.insert(ns), "{key}: namespaces must be unique");
         }
     }
@@ -1387,7 +1433,11 @@ mod tests {
         exec(&s, hset(&s, b"h", &bs(&["new", "2"]))).await;
 
         let got = expect_bulk_array(&exec(&s, hgetall(&s, b"h")).await);
-        assert_eq!(got, vec![b"new".to_vec(), b"2".to_vec()], "the expired hash's field came back");
+        assert_eq!(
+            got,
+            vec![b"new".to_vec(), b"2".to_vec()],
+            "the expired hash's field came back"
+        );
     }
 
     /// Two commands creating and then extending the same new hash inside one
@@ -1396,12 +1446,26 @@ mod tests {
     async fn creating_then_extending_a_hash_in_one_transaction_uses_one_namespace() {
         use crate::commands::enqueue_command;
         let mut s = test_session();
-        let run = |args: &[&str]| args.iter().map(|a| Bytes::copy_from_slice(a.as_bytes())).collect::<Vec<_>>();
-        for cmd in [vec!["multi"], vec!["hset", "h", "a", "1"], vec!["hset", "h", "b", "2"], vec!["hincrby", "h", "n", "5"], vec!["exec"]] {
+        let run = |args: &[&str]| {
+            args.iter()
+                .map(|a| Bytes::copy_from_slice(a.as_bytes()))
+                .collect::<Vec<_>>()
+        };
+        for cmd in [
+            vec!["multi"],
+            vec!["hset", "h", "a", "1"],
+            vec!["hset", "h", "b", "2"],
+            vec!["hincrby", "h", "n", "5"],
+            vec!["exec"],
+        ] {
             enqueue_command(&mut s, &run(&cmd)).await;
         }
         let ns = crate::testutil::namespace_of(&s, b"h").await;
-        assert_eq!(crate::testutil::entries_under(&s, &ns).await, 3, "all three fields share the namespace");
+        assert_eq!(
+            crate::testutil::entries_under(&s, &ns).await,
+            3,
+            "all three fields share the namespace"
+        );
         assert_eq!(expect_int(&exec(&s, hlen(&s, b"h")).await), 3);
     }
 
@@ -1413,11 +1477,17 @@ mod tests {
 
         exec(&s, hset(&s, b"h", &bs(&["b", "2"]))).await; // rewrites the sentinel
         let ttl = crate::testutil::exec(&s, crate::keys::ttl(&s, b"h")).await;
-        assert!(matches!(ttl, RespValue::Integer(n) if (90..=100).contains(&n)), "ttl was {ttl:?}");
+        assert!(
+            matches!(ttl, RespValue::Integer(n) if (90..=100).contains(&n)),
+            "ttl was {ttl:?}"
+        );
 
         // A string command on a namespaced hash is a WRONGTYPE, as for a legacy one.
         let reply = crate::testutil::exec(&s, crate::strings::append(&s, b"h", b"x")).await;
-        assert!(matches!(&reply, RespValue::Error(e) if e.starts_with(b"WRONGTYPE")), "got {reply:?}");
+        assert!(
+            matches!(&reply, RespValue::Error(e) if e.starts_with(b"WRONGTYPE")),
+            "got {reply:?}"
+        );
         assert_eq!(expect_int(&exec(&s, hlen(&s, b"h")).await), 2);
     }
 
@@ -1428,19 +1498,47 @@ mod tests {
         exec(&s, hset(&s, b"h", &bs(&["a", "1"]))).await;
 
         let store = s.store();
-        let tx = store.begin(true, kv::kv::TxIsolation::Snapshot).await.unwrap();
-        let err = write_sentinel(&*tx, &s.public_key(b"h"), 9, &ElementPrefix::legacy(s.private_key(b"h"))).await;
-        assert!(err.is_err(), "dropping a namespace would strand the elements");
+        let tx = store
+            .begin(true, kv::kv::TxIsolation::Snapshot)
+            .await
+            .unwrap();
+        let err = write_sentinel(
+            &*tx,
+            &s.public_key(b"h"),
+            9,
+            &ElementPrefix::legacy(s.private_key(b"h")),
+        )
+        .await;
+        assert!(
+            err.is_err(),
+            "dropping a namespace would strand the elements"
+        );
     }
 
     #[tokio::test]
     async fn hset_new_and_update() {
         let session = test_session();
         // New field: returns 1.
-        let r = exec(&session, hset(&session, b"h", &[Bytes::from_static(b"f"), Bytes::from_static(b"v")])).await;
+        let r = exec(
+            &session,
+            hset(
+                &session,
+                b"h",
+                &[Bytes::from_static(b"f"), Bytes::from_static(b"v")],
+            ),
+        )
+        .await;
         assert_eq!(expect_int(&r), 1);
         // Update: returns 0.
-        let r = exec(&session, hset(&session, b"h", &[Bytes::from_static(b"f"), Bytes::from_static(b"v2")])).await;
+        let r = exec(
+            &session,
+            hset(
+                &session,
+                b"h",
+                &[Bytes::from_static(b"f"), Bytes::from_static(b"v2")],
+            ),
+        )
+        .await;
         assert_eq!(expect_int(&r), 0);
     }
 
@@ -1453,9 +1551,12 @@ mod tests {
                 &session,
                 b"h",
                 &[
-                    Bytes::from_static(b"a"), Bytes::from_static(b"1"),
-                    Bytes::from_static(b"b"), Bytes::from_static(b"2"),
-                    Bytes::from_static(b"c"), Bytes::from_static(b"3"),
+                    Bytes::from_static(b"a"),
+                    Bytes::from_static(b"1"),
+                    Bytes::from_static(b"b"),
+                    Bytes::from_static(b"2"),
+                    Bytes::from_static(b"c"),
+                    Bytes::from_static(b"3"),
                 ],
             ),
         )
@@ -1467,7 +1568,15 @@ mod tests {
     #[tokio::test]
     async fn hget_existing_and_missing() {
         let session = test_session();
-        exec(&session, hset(&session, b"h", &[Bytes::from_static(b"f"), Bytes::from_static(b"v")])).await;
+        exec(
+            &session,
+            hset(
+                &session,
+                b"h",
+                &[Bytes::from_static(b"f"), Bytes::from_static(b"v")],
+            ),
+        )
+        .await;
         let r = exec(&session, hget(&session, b"h", b"f")).await;
         assert_eq!(expect_bulk(&r), Some(Bytes::from_static(b"v")));
         let r = exec(&session, hget(&session, b"h", b"missing")).await;
@@ -1481,7 +1590,16 @@ mod tests {
         let session = test_session();
         exec(
             &session,
-            hset(&session, b"h", &[Bytes::from_static(b"f1"), Bytes::from_static(b"v1"), Bytes::from_static(b"f2"), Bytes::from_static(b"v2")]),
+            hset(
+                &session,
+                b"h",
+                &[
+                    Bytes::from_static(b"f1"),
+                    Bytes::from_static(b"v1"),
+                    Bytes::from_static(b"f2"),
+                    Bytes::from_static(b"v2"),
+                ],
+            ),
         )
         .await;
         let r = exec(&session, hdel(&session, b"h", &[Bytes::from_static(b"f1")])).await;
@@ -1497,14 +1615,34 @@ mod tests {
     #[tokio::test]
     async fn hexists_and_hsetnx() {
         let session = test_session();
-        exec(&session, hset(&session, b"h", &[Bytes::from_static(b"f"), Bytes::from_static(b"v")])).await;
-        assert_eq!(expect_int(&exec(&session, hexists(&session, b"h", b"f")).await), 1);
-        assert_eq!(expect_int(&exec(&session, hexists(&session, b"h", b"x")).await), 0);
+        exec(
+            &session,
+            hset(
+                &session,
+                b"h",
+                &[Bytes::from_static(b"f"), Bytes::from_static(b"v")],
+            ),
+        )
+        .await;
+        assert_eq!(
+            expect_int(&exec(&session, hexists(&session, b"h", b"f")).await),
+            1
+        );
+        assert_eq!(
+            expect_int(&exec(&session, hexists(&session, b"h", b"x")).await),
+            0
+        );
 
         // HSETNX on existing → 0.
-        assert_eq!(expect_int(&exec(&session, hsetnx(&session, b"h", b"f", b"new")).await), 0);
+        assert_eq!(
+            expect_int(&exec(&session, hsetnx(&session, b"h", b"f", b"new")).await),
+            0
+        );
         // HSETNX on new field → 1.
-        assert_eq!(expect_int(&exec(&session, hsetnx(&session, b"h", b"g", b"new")).await), 1);
+        assert_eq!(
+            expect_int(&exec(&session, hsetnx(&session, b"h", b"g", b"new")).await),
+            1
+        );
         assert_eq!(expect_int(&exec(&session, hlen(&session, b"h")).await), 2);
     }
 
@@ -1513,20 +1651,43 @@ mod tests {
         let session = test_session();
         exec(
             &session,
-            hset(&session, b"h", &[Bytes::from_static(b"a"), Bytes::from_static(b"1"), Bytes::from_static(b"b"), Bytes::from_static(b"2")]),
+            hset(
+                &session,
+                b"h",
+                &[
+                    Bytes::from_static(b"a"),
+                    Bytes::from_static(b"1"),
+                    Bytes::from_static(b"b"),
+                    Bytes::from_static(b"2"),
+                ],
+            ),
         )
         .await;
         let r = exec(
             &session,
-            hmget(&session, b"h", &[Bytes::from_static(b"a"), Bytes::from_static(b"x"), Bytes::from_static(b"b")]),
+            hmget(
+                &session,
+                b"h",
+                &[
+                    Bytes::from_static(b"a"),
+                    Bytes::from_static(b"x"),
+                    Bytes::from_static(b"b"),
+                ],
+            ),
         )
         .await;
         match r {
             RespValue::Array(Some(items)) => {
                 assert_eq!(items.len(), 3);
-                assert_eq!(items[0], RespValue::BulkString(Some(Bytes::from_static(b"1"))));
+                assert_eq!(
+                    items[0],
+                    RespValue::BulkString(Some(Bytes::from_static(b"1")))
+                );
                 assert_eq!(items[1], RespValue::BulkString(None));
-                assert_eq!(items[2], RespValue::BulkString(Some(Bytes::from_static(b"2"))));
+                assert_eq!(
+                    items[2],
+                    RespValue::BulkString(Some(Bytes::from_static(b"2")))
+                );
             }
             other => panic!("expected array, got {other:?}"),
         }
@@ -1537,7 +1698,16 @@ mod tests {
         let session = test_session();
         exec(
             &session,
-            hset(&session, b"h", &[Bytes::from_static(b"a"), Bytes::from_static(b"1"), Bytes::from_static(b"b"), Bytes::from_static(b"2")]),
+            hset(
+                &session,
+                b"h",
+                &[
+                    Bytes::from_static(b"a"),
+                    Bytes::from_static(b"1"),
+                    Bytes::from_static(b"b"),
+                    Bytes::from_static(b"2"),
+                ],
+            ),
         )
         .await;
 
@@ -1553,7 +1723,10 @@ mod tests {
         assert_eq!(all.len(), 4);
 
         // Missing key → empty.
-        assert_eq!(expect_bulk_array(&exec(&session, hkeys(&session, b"missing")).await).len(), 0);
+        assert_eq!(
+            expect_bulk_array(&exec(&session, hkeys(&session, b"missing")).await).len(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -1575,9 +1748,23 @@ mod tests {
     #[tokio::test]
     async fn hstrlen_existing_and_missing() {
         let session = test_session();
-        exec(&session, hset(&session, b"h", &[Bytes::from_static(b"f"), Bytes::from_static(b"hello!")])).await;
-        assert_eq!(expect_int(&exec(&session, hstrlen(&session, b"h", b"f")).await), 6);
-        assert_eq!(expect_int(&exec(&session, hstrlen(&session, b"h", b"missing")).await), 0);
+        exec(
+            &session,
+            hset(
+                &session,
+                b"h",
+                &[Bytes::from_static(b"f"), Bytes::from_static(b"hello!")],
+            ),
+        )
+        .await;
+        assert_eq!(
+            expect_int(&exec(&session, hstrlen(&session, b"h", b"f")).await),
+            6
+        );
+        assert_eq!(
+            expect_int(&exec(&session, hstrlen(&session, b"h", b"missing")).await),
+            0
+        );
     }
 
     #[tokio::test]

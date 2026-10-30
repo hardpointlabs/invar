@@ -30,7 +30,10 @@ use crate::resp::RespValue;
 // ---------------------------------------------------------------- helpers
 
 async fn run(s: &mut Session, args: &[&str]) -> Vec<RespValue> {
-    let args: Vec<Bytes> = args.iter().map(|a| Bytes::copy_from_slice(a.as_bytes())).collect();
+    let args: Vec<Bytes> = args
+        .iter()
+        .map(|a| Bytes::copy_from_slice(a.as_bytes()))
+        .collect();
     enqueue_command(s, &args).await
 }
 
@@ -44,7 +47,10 @@ fn is_committed(reply: &[RespValue]) -> bool {
 
 fn sessions(store: Arc<dyn RedisStore>) -> (Session, Session) {
     let reg = Arc::new(WatchRegistry::new());
-    (Session::new(store.clone(), reg.clone()), Session::new(store, reg))
+    (
+        Session::new(store.clone(), reg.clone()),
+        Session::new(store, reg),
+    )
 }
 
 async fn slate() -> Arc<dyn RedisStore> {
@@ -90,71 +96,131 @@ async fn watch_then(
 
 /// A -> B -> A on a string value.
 async fn aba_string(store: Arc<dyn RedisStore>) {
-    let r = watch_then(store, &[&["set", "k", "1"]], "k",
-                       &[&["set", "k", "2"], &["set", "k", "1"]], &["set", "k", "3"]).await;
+    let r = watch_then(
+        store,
+        &[&["set", "k", "1"]],
+        "k",
+        &[&["set", "k", "2"], &["set", "k", "1"]],
+        &["set", "k", "3"],
+    )
+    .await;
     assert_eq!(r, nil());
 }
 
 /// Overwrite with the identical value. Redis still aborts.
 async fn same_value_write(store: Arc<dyn RedisStore>) {
-    let r = watch_then(store, &[&["set", "k", "1"]], "k",
-                       &[&["set", "k", "1"]], &["set", "k", "3"]).await;
+    let r = watch_then(
+        store,
+        &[&["set", "k", "1"]],
+        "k",
+        &[&["set", "k", "1"]],
+        &["set", "k", "3"],
+    )
+    .await;
     assert_eq!(r, nil());
 }
 
 /// Watched key absent -> created -> deleted. The closest WATCH gets to a phantom.
 async fn existence_aba(store: Arc<dyn RedisStore>) {
-    let r = watch_then(store, &[], "k",
-                       &[&["set", "k", "x"], &["del", "k"]], &["set", "k", "3"]).await;
+    let r = watch_then(
+        store,
+        &[],
+        "k",
+        &[&["set", "k", "x"], &["del", "k"]],
+        &["set", "k", "3"],
+    )
+    .await;
     assert_eq!(r, nil());
 }
 
 /// HSET overwriting an existing field leaves the hash's field count alone.
 async fn hash_field_overwrite(store: Arc<dyn RedisStore>) {
-    let r = watch_then(store, &[&["hset", "h", "f", "1"]], "h",
-                       &[&["hset", "h", "f", "2"]], &["hset", "h", "g", "1"]).await;
+    let r = watch_then(
+        store,
+        &[&["hset", "h", "f", "1"]],
+        "h",
+        &[&["hset", "h", "f", "2"]],
+        &["hset", "h", "g", "1"],
+    )
+    .await;
     assert_eq!(r, nil());
 }
 
 /// ZADD changing an existing member's score.
 async fn zset_score_update(store: Arc<dyn RedisStore>) {
-    let r = watch_then(store, &[&["zadd", "z", "1", "m"]], "z",
-                       &[&["zadd", "z", "2", "m"]], &["zadd", "z", "1", "n"]).await;
+    let r = watch_then(
+        store,
+        &[&["zadd", "z", "1", "m"]],
+        "z",
+        &[&["zadd", "z", "2", "m"]],
+        &["zadd", "z", "1", "n"],
+    )
+    .await;
     assert_eq!(r, nil());
 }
 
 /// LSET replaces an element in place; list length unchanged.
 async fn list_lset(store: Arc<dyn RedisStore>) {
-    let r = watch_then(store, &[&["rpush", "l", "a"]], "l",
-                       &[&["lset", "l", "0", "b"]], &["rpush", "l", "c"]).await;
+    let r = watch_then(
+        store,
+        &[&["rpush", "l", "a"]],
+        "l",
+        &[&["lset", "l", "0", "b"]],
+        &["rpush", "l", "c"],
+    )
+    .await;
     assert_eq!(r, nil());
 }
 
 /// SADD then SREM of a different member: same cardinality, different contents.
 async fn set_swap_member(store: Arc<dyn RedisStore>) {
-    let r = watch_then(store, &[&["sadd", "s", "a"]], "s",
-                       &[&["sadd", "s", "b"], &["srem", "s", "a"]], &["sadd", "s", "c"]).await;
+    let r = watch_then(
+        store,
+        &[&["sadd", "s", "a"]],
+        "s",
+        &[&["sadd", "s", "b"], &["srem", "s", "a"]],
+        &["sadd", "s", "c"],
+    )
+    .await;
     assert_eq!(r, nil());
 }
 
 /// TTL-only change. EXPIRE is a write in Redis and aborts watchers.
 async fn expire_only(store: Arc<dyn RedisStore>) {
-    let r = watch_then(store, &[&["set", "k", "1"]], "k",
-                       &[&["expire", "k", "100"]], &["set", "k", "3"]).await;
+    let r = watch_then(
+        store,
+        &[&["set", "k", "1"]],
+        "k",
+        &[&["expire", "k", "100"]],
+        &["set", "k", "3"],
+    )
+    .await;
     assert_eq!(r, nil());
 }
 
 /// RENAME another key (holding the same value) onto the watched key.
 async fn rename_onto_same_value(store: Arc<dyn RedisStore>) {
-    let r = watch_then(store, &[&["set", "k", "1"], &["set", "j", "1"]], "k",
-                       &[&["rename", "j", "k"]], &["set", "k", "3"]).await;
+    let r = watch_then(
+        store,
+        &[&["set", "k", "1"], &["set", "j", "1"]],
+        "k",
+        &[&["rename", "j", "k"]],
+        &["set", "k", "3"],
+    )
+    .await;
     assert_eq!(r, nil());
 }
 
 /// FLUSHDB removes the watched key.
 async fn flushdb(store: Arc<dyn RedisStore>) {
-    let r = watch_then(store, &[&["set", "k", "1"]], "k",
-                       &[&["flushdb"]], &["set", "k", "3"]).await;
+    let r = watch_then(
+        store,
+        &[&["set", "k", "1"]],
+        "k",
+        &[&["flushdb"]],
+        &["set", "k", "3"],
+    )
+    .await;
     assert_eq!(r, nil());
 }
 
@@ -184,8 +250,14 @@ async fn own_write_same_value(store: Arc<dyn RedisStore>) {
 
 /// Same key name in a different logical db is a different key.
 async fn other_db_does_not_abort(store: Arc<dyn RedisStore>) {
-    let r = watch_then(store, &[&["set", "k", "1"]], "k",
-                       &[&["select", "1"], &["set", "k", "2"]], &["set", "k", "3"]).await;
+    let r = watch_then(
+        store,
+        &[&["set", "k", "1"]],
+        "k",
+        &[&["select", "1"], &["set", "k", "2"]],
+        &["set", "k", "3"],
+    )
+    .await;
     assert!(is_committed(&r), "got {r:?}");
 }
 
@@ -226,9 +298,18 @@ async fn aborted_exec_writes_nothing(store: Arc<dyn RedisStore>) {
     run(&mut a, &["set", "side", "1"]).await;
     run(&mut a, &["rpush", "q", "job"]).await;
     assert_eq!(run(&mut a, &["exec"]).await, nil());
-    assert_eq!(run(&mut b, &["get", "k"]).await, vec![RespValue::BulkString(Some(Bytes::from_static(b"2")))]);
-    assert_eq!(run(&mut b, &["get", "side"]).await, vec![RespValue::BulkString(None)]);
-    assert_eq!(run(&mut b, &["llen", "q"]).await, vec![RespValue::Integer(0)]);
+    assert_eq!(
+        run(&mut b, &["get", "k"]).await,
+        vec![RespValue::BulkString(Some(Bytes::from_static(b"2")))]
+    );
+    assert_eq!(
+        run(&mut b, &["get", "side"]).await,
+        vec![RespValue::BulkString(None)]
+    );
+    assert_eq!(
+        run(&mut b, &["llen", "q"]).await,
+        vec![RespValue::Integer(0)]
+    );
 }
 
 // ------------------------------------------------------- interleavings
@@ -252,12 +333,26 @@ struct PauseTx {
 
 #[async_trait]
 impl Tx for PauseTx {
-    async fn get(&self, key: &[u8]) -> Result<Item, KvError> { self.inner.get(key).await }
-    fn set(&self, entry: Entry) -> Result<(), KvError> { self.inner.set(entry) }
-    fn delete(&self, key: &[u8]) -> Result<(), KvError> { self.inner.delete(key) }
-    async fn new_range_iterator(&self, start: std::ops::Bound<&[u8]>, end: std::ops::Bound<&[u8]>)
-                                -> Result<Box<dyn KeyValueIterator>, KvError> { self.inner.new_range_iterator(start, end).await }
-    async fn new_prefix_iterator(&self, prefix: &[u8]) -> Result<Box<dyn KeyValueIterator>, KvError> {
+    async fn get(&self, key: &[u8]) -> Result<Item, KvError> {
+        self.inner.get(key).await
+    }
+    fn set(&self, entry: Entry) -> Result<(), KvError> {
+        self.inner.set(entry)
+    }
+    fn delete(&self, key: &[u8]) -> Result<(), KvError> {
+        self.inner.delete(key)
+    }
+    async fn new_range_iterator(
+        &self,
+        start: std::ops::Bound<&[u8]>,
+        end: std::ops::Bound<&[u8]>,
+    ) -> Result<Box<dyn KeyValueIterator>, KvError> {
+        self.inner.new_range_iterator(start, end).await
+    }
+    async fn new_prefix_iterator(
+        &self,
+        prefix: &[u8],
+    ) -> Result<Box<dyn KeyValueIterator>, KvError> {
         self.inner.new_prefix_iterator(prefix).await
     }
     async fn commit(self: Box<Self>) -> Result<Option<WriteHandle>, KvError> {
@@ -276,22 +371,47 @@ impl Tx for PauseTx {
 impl RedisStore for PauseStore {
     async fn begin(&self, mutating: bool, isolation: TxIsolation) -> Result<Box<dyn Tx>, KvError> {
         let tx = self.inner.begin(mutating, isolation).await?;
-        if isolation == TxIsolation::SerializableSnapshot && self.gate.armed.swap(false, Ordering::SeqCst) {
-            Ok(Box::new(PauseTx { inner: tx, gate: self.gate.clone() }))
+        if isolation == TxIsolation::SerializableSnapshot
+            && self.gate.armed.swap(false, Ordering::SeqCst)
+        {
+            Ok(Box::new(PauseTx {
+                inner: tx,
+                gate: self.gate.clone(),
+            }))
         } else {
             Ok(tx)
         }
     }
-    async fn close(&self) -> Result<(), KvError> { self.inner.close().await }
-    async fn sync(&self) -> Result<(), KvError> { self.inner.sync().await }
-    async fn destroy(&self) -> Result<(), KvError> { self.inner.destroy().await }
-    async fn drop_prefix(&self, p: &[u8]) -> Result<(), KvError> { self.inner.drop_prefix(p).await }
-    async fn await_until(&self, h: WriteHandle, d: Duration) -> Result<bool, KvError> { self.inner.await_until(h, d).await }
+    async fn close(&self) -> Result<(), KvError> {
+        self.inner.close().await
+    }
+    async fn sync(&self) -> Result<(), KvError> {
+        self.inner.sync().await
+    }
+    async fn destroy(&self) -> Result<(), KvError> {
+        self.inner.destroy().await
+    }
+    async fn drop_prefix(&self, p: &[u8]) -> Result<(), KvError> {
+        self.inner.drop_prefix(p).await
+    }
+    async fn await_until(&self, h: WriteHandle, d: Duration) -> Result<bool, KvError> {
+        self.inner.await_until(h, d).await
+    }
 }
 
 fn paused(inner: Arc<dyn RedisStore>) -> (Arc<dyn RedisStore>, Arc<Gate>) {
-    let gate = Arc::new(Gate { armed: AtomicBool::new(true), reached: Notify::new(), release: Notify::new() });
-    (Arc::new(PauseStore { inner, gate: gate.clone() }), gate)
+    let gate = Arc::new(Gate {
+        armed: AtomicBool::new(true),
+        reached: Notify::new(),
+        release: Notify::new(),
+    });
+    (
+        Arc::new(PauseStore {
+            inner,
+            gate: gate.clone(),
+        }),
+        gate,
+    )
 }
 
 /// A's EXEC passes the WATCH pre-check, then B commits a write to a watched
@@ -311,7 +431,11 @@ async fn commit_lands_mid_exec_on_read_only_watched_key(store: Arc<dyn RedisStor
     run(&mut b, &["set", "y", "99"]).await;
     gate.release.notify_one();
 
-    assert_eq!(exec.await.unwrap(), nil(), "y changed while EXEC was in flight");
+    assert_eq!(
+        exec.await.unwrap(),
+        nil(),
+        "y changed while EXEC was in flight"
+    );
 }
 
 /// The on-call write-skew example from the blog post, both clients guarded

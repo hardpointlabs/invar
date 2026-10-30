@@ -52,7 +52,9 @@ fn sha1_hex(data: &[u8]) -> String {
 fn cache_script(script: &[u8]) -> String {
     let digest = sha1_hex(script);
     let mut cache = script_cache().lock().unwrap();
-    cache.entry(digest.clone()).or_insert_with(|| Bytes::copy_from_slice(script));
+    cache
+        .entry(digest.clone())
+        .or_insert_with(|| Bytes::copy_from_slice(script));
     digest
 }
 
@@ -479,7 +481,11 @@ fn match_nodes(
                     while si + run < s.len() && class.matches(s[si + run]) {
                         run += 1;
                     }
-                    let min = if matches!(quant, Some(Quant::Plus)) { 1 } else { 0 };
+                    let min = if matches!(quant, Some(Quant::Plus)) {
+                        1
+                    } else {
+                        0
+                    };
                     if run < min {
                         return None;
                     }
@@ -695,7 +701,7 @@ pub fn evalsha(
                 is_mutating: true,
                 allowed_in_tx: true,
                 abort_in_tx: false,
-        keys: None,
+                keys: None,
             }
         }
         None => {
@@ -706,7 +712,7 @@ pub fn evalsha(
                 is_mutating: false,
                 allowed_in_tx: true,
                 abort_in_tx: false,
-        keys: None,
+                keys: None,
             }
         }
     }
@@ -716,7 +722,11 @@ struct NoscriptOp;
 
 impl DbOp for NoscriptOp {
     fn run<'a>(&'a self, _tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
-        Box::pin(async { Err(DbError::Redis("NOSCRIPT No matching script. Use EVAL.".into())) })
+        Box::pin(async {
+            Err(DbError::Redis(
+                "NOSCRIPT No matching script. Use EVAL.".into(),
+            ))
+        })
     }
 }
 
@@ -869,14 +879,14 @@ fn run_script(
         let call_fn = Callback::from_fn_with(
             &ctx,
             call_script_ctx,
-            |script_ctx, ctx, _exec, mut stack| {
-                match execute_redis_call(ctx, &mut stack, script_ctx) {
-                    Ok(value) => {
-                        stack.push_back(value);
-                        Ok(CallbackReturn::Return)
-                    }
-                    Err(err) => Err(err),
+            |script_ctx, ctx, _exec, mut stack| match execute_redis_call(
+                ctx, &mut stack, script_ctx,
+            ) {
+                Ok(value) => {
+                    stack.push_back(value);
+                    Ok(CallbackReturn::Return)
                 }
+                Err(err) => Err(err),
             },
         );
         let call_key = Value::from(ctx.intern(b"call"));
@@ -889,25 +899,25 @@ fn run_script(
         let pcall_fn = Callback::from_fn_with(
             &ctx,
             pcall_script_ctx,
-            |script_ctx, ctx, _exec, mut stack| {
-                match execute_redis_call(ctx, &mut stack, script_ctx) {
-                    Ok(value) => {
-                        stack.push_back(Value::Boolean(true));
-                        stack.push_back(value);
-                        Ok(CallbackReturn::Return)
-                    }
-                    Err(err) => {
-                        stack.push_back(Value::Boolean(false));
-                        let err_msg = match err {
-                            PicError::Lua(val) => val.0,
-                            PicError::Runtime(val) => {
-                                let msg = val.0.to_string();
-                                Value::String(ctx.intern(msg.as_bytes()))
-                            }
-                        };
-                        stack.push_back(err_msg);
-                        Ok(CallbackReturn::Return)
-                    }
+            |script_ctx, ctx, _exec, mut stack| match execute_redis_call(
+                ctx, &mut stack, script_ctx,
+            ) {
+                Ok(value) => {
+                    stack.push_back(Value::Boolean(true));
+                    stack.push_back(value);
+                    Ok(CallbackReturn::Return)
+                }
+                Err(err) => {
+                    stack.push_back(Value::Boolean(false));
+                    let err_msg = match err {
+                        PicError::Lua(val) => val.0,
+                        PicError::Runtime(val) => {
+                            let msg = val.0.to_string();
+                            Value::String(ctx.intern(msg.as_bytes()))
+                        }
+                    };
+                    stack.push_back(err_msg);
+                    Ok(CallbackReturn::Return)
                 }
             },
         );
@@ -960,9 +970,9 @@ fn run_script(
         // rely on it heavily (e.g. `tonumber(ARGV[1])`).
         let tonumber_fn = Callback::from_fn(&ctx, |ctx, _exec, mut stack| {
             if stack.is_empty() {
-                return Err(PicError::from(Value::String(ctx.intern(
-                    b"bad argument #1 to 'tonumber' (value expected)",
-                ))));
+                return Err(PicError::from(Value::String(
+                    ctx.intern(b"bad argument #1 to 'tonumber' (value expected)"),
+                )));
             }
             let val: Value = stack.consume(ctx)?;
             match val {
@@ -1036,16 +1046,16 @@ fn run_script(
                 // table.insert(table, [pos,] value)
                 let nargs = stack.len();
                 if nargs < 2 {
-                    return Err(PicError::from(Value::String(ctx.intern(
-                        b"table.insert: wrong number of arguments",
-                    ))));
+                    return Err(PicError::from(Value::String(
+                        ctx.intern(b"table.insert: wrong number of arguments"),
+                    )));
                 }
                 let tbl = match stack.get(0) {
                     Value::Table(t) => t,
                     _ => {
-                        return Err(PicError::from(Value::String(ctx.intern(
-                            b"table.insert: bad argument #1 (table expected)",
-                        ))));
+                        return Err(PicError::from(Value::String(
+                            ctx.intern(b"table.insert: bad argument #1 (table expected)"),
+                        )));
                     }
                 };
                 if nargs == 2 {
@@ -1053,15 +1063,17 @@ fn run_script(
                     let len = tbl.length();
                     let val = stack.get(1);
                     tbl.set_value(&ctx, Value::Integer(len + 1), val)
-                        .map_err(|e| PicError::from(Value::String(ctx.intern(e.to_string().as_bytes()))))?;
+                        .map_err(|e| {
+                            PicError::from(Value::String(ctx.intern(e.to_string().as_bytes())))
+                        })?;
                 } else {
                     // table.insert(tbl, pos, value)
                     let pos = match stack.get(1) {
                         Value::Integer(n) => n,
                         _ => {
-                            return Err(PicError::from(Value::String(ctx.intern(
-                                b"table.insert: bad argument #2 (number expected)",
-                            ))));
+                            return Err(PicError::from(Value::String(
+                                ctx.intern(b"table.insert: bad argument #2 (number expected)"),
+                            )));
                         }
                     };
                     let val = stack.get(2);
@@ -1079,18 +1091,18 @@ fn run_script(
                 stack.clear();
                 Ok(CallbackReturn::Return)
             });
-            table.set(ctx, "insert", insert_fn).map_err(|e| {
-                PicError::from(Value::String(ctx.intern(e.to_string().as_bytes())))
-            })?;
+            table
+                .set(ctx, "insert", insert_fn)
+                .map_err(|e| PicError::from(Value::String(ctx.intern(e.to_string().as_bytes()))))?;
 
             let remove_fn = Callback::from_fn(&ctx, |ctx, _exec, mut stack| {
                 // table.remove(tbl [, pos])
                 let tbl = match stack.get(0) {
                     Value::Table(t) => t,
                     _ => {
-                        return Err(PicError::from(Value::String(ctx.intern(
-                            b"table.remove: bad argument #1 (table expected)",
-                        ))));
+                        return Err(PicError::from(Value::String(
+                            ctx.intern(b"table.remove: bad argument #1 (table expected)"),
+                        )));
                     }
                 };
                 let len = tbl.length();
@@ -1106,24 +1118,25 @@ fn run_script(
                         PicError::from(Value::String(ctx.intern(e.to_string().as_bytes())))
                     })?;
                 }
-                tbl.set_value(&ctx, Value::Integer(len), Value::Nil).map_err(|e| {
-                    PicError::from(Value::String(ctx.intern(e.to_string().as_bytes())))
-                })?;
+                tbl.set_value(&ctx, Value::Integer(len), Value::Nil)
+                    .map_err(|e| {
+                        PicError::from(Value::String(ctx.intern(e.to_string().as_bytes())))
+                    })?;
                 stack.clear();
                 stack.push_back(removed);
                 Ok(CallbackReturn::Return)
             });
-            table.set(ctx, "remove", remove_fn).map_err(|e| {
-                PicError::from(Value::String(ctx.intern(e.to_string().as_bytes())))
-            })?;
+            table
+                .set(ctx, "remove", remove_fn)
+                .map_err(|e| PicError::from(Value::String(ctx.intern(e.to_string().as_bytes()))))?;
 
             let sort_fn = Callback::from_fn(&ctx, |ctx, _exec, mut stack| {
                 let tbl = match stack.get(0) {
                     Value::Table(t) => t,
                     _ => {
-                        return Err(PicError::from(Value::String(ctx.intern(
-                            b"table.sort: bad argument #1 (table expected)",
-                        ))));
+                        return Err(PicError::from(Value::String(
+                            ctx.intern(b"table.sort: bad argument #1 (table expected)"),
+                        )));
                     }
                 };
                 stack.clear();
@@ -1143,23 +1156,24 @@ fn run_script(
                     sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
                 });
                 for (i, v) in vals.into_iter().enumerate() {
-                    tbl.set_value(&ctx, Value::Integer(i as i64 + 1), v).map_err(|e| {
-                        PicError::from(Value::String(ctx.intern(e.to_string().as_bytes())))
-                    })?;
+                    tbl.set_value(&ctx, Value::Integer(i as i64 + 1), v)
+                        .map_err(|e| {
+                            PicError::from(Value::String(ctx.intern(e.to_string().as_bytes())))
+                        })?;
                 }
                 Ok(CallbackReturn::Return)
             });
-            table.set(ctx, "sort", sort_fn).map_err(|e| {
-                PicError::from(Value::String(ctx.intern(e.to_string().as_bytes())))
-            })?;
+            table
+                .set(ctx, "sort", sort_fn)
+                .map_err(|e| PicError::from(Value::String(ctx.intern(e.to_string().as_bytes()))))?;
 
             let concat_fn = Callback::from_fn(&ctx, |ctx, _exec, mut stack| {
                 let tbl = match stack.get(0) {
                     Value::Table(t) => t,
                     _ => {
-                        return Err(PicError::from(Value::String(ctx.intern(
-                            b"table.concat: bad argument #1 (table expected)",
-                        ))));
+                        return Err(PicError::from(Value::String(
+                            ctx.intern(b"table.concat: bad argument #1 (table expected)"),
+                        )));
                     }
                 };
                 let sep_str = match stack.get(1) {
@@ -1195,9 +1209,9 @@ fn run_script(
                 stack.push_back(Value::from(ctx.intern(&result)));
                 Ok(CallbackReturn::Return)
             });
-            table.set(ctx, "concat", concat_fn).map_err(|e| {
-                PicError::from(Value::String(ctx.intern(e.to_string().as_bytes())))
-            })?;
+            table
+                .set(ctx, "concat", concat_fn)
+                .map_err(|e| PicError::from(Value::String(ctx.intern(e.to_string().as_bytes()))))?;
         }
 
         // Add `string.match` — piccolo's core stdlib omits it, but Redis scripts
@@ -1238,9 +1252,9 @@ fn run_script(
                 }
                 Ok(CallbackReturn::Return)
             });
-            string_table.set(ctx, "match", match_fn).map_err(|e| {
-                PicError::from(Value::String(ctx.intern(e.to_string().as_bytes())))
-            })?;
+            string_table
+                .set(ctx, "match", match_fn)
+                .map_err(|e| PicError::from(Value::String(ctx.intern(e.to_string().as_bytes()))))?;
         }
 
         // Add `cmsgpack` table with `unpack` (MessagePack decoder).
@@ -1311,9 +1325,9 @@ fn run_script(
                 other => other.to_string(),
             };
             let json: serde_json::Value = serde_json::from_str(&json_str).map_err(|e| {
-                PicError::from(Value::String(ctx.intern(
-                    format!("cjson.decode: {}", e).as_bytes(),
-                )))
+                PicError::from(Value::String(
+                    ctx.intern(format!("cjson.decode: {}", e).as_bytes()),
+                ))
             })?;
             let decoded = json_to_lua(ctx, json)?;
             stack.push_back(decoded);
@@ -1374,18 +1388,18 @@ fn run_executor<'gc>(
             break;
         }
         if Instant::now() >= deadline {
-            return Err(PicError::from(Value::String(ctx.intern(
-                b"Script exceeded its execution time limit".as_slice(),
-            ))));
+            return Err(PicError::from(Value::String(
+                ctx.intern(b"Script exceeded its execution time limit".as_slice()),
+            )));
         }
         fuel.refill(FUEL_PER_TICK, FUEL_PER_TICK);
     }
     match executor.take_result::<Value>(ctx) {
         Ok(Ok(value)) => value_to_result(ctx, value),
         Ok(Err(err)) => Err(err),
-        Err(_) => Err(PicError::from(Value::String(ctx.intern(
-            b"Script did not return a value".as_slice(),
-        )))),
+        Err(_) => Err(PicError::from(Value::String(
+            ctx.intern(b"Script did not return a value".as_slice()),
+        ))),
     }
 }
 
@@ -1398,31 +1412,25 @@ fn table_from_slice<'gc>(
     for (i, value) in values.iter().enumerate() {
         let key = Value::Integer(i as i64 + 1);
         let value = Value::from(ctx.intern(value.as_ref()));
-        table.set_value(&ctx, key, value).map_err(|err| {
-            PicError::from(Value::String(ctx.intern(err.to_string().as_bytes())))
-        })?;
+        table
+            .set_value(&ctx, key, value)
+            .map_err(|err| PicError::from(Value::String(ctx.intern(err.to_string().as_bytes()))))?;
     }
     Ok(table)
 }
 
 /// Decodes a MessagePack binary payload into a piccolo Lua value.
-fn msgpack_to_lua<'gc>(
-    ctx: Context<'gc>,
-    data: &[u8],
-) -> Result<Value<'gc>, PicError<'gc>> {
+fn msgpack_to_lua<'gc>(ctx: Context<'gc>, data: &[u8]) -> Result<Value<'gc>, PicError<'gc>> {
     let val = rmpv::decode::read_value(&mut std::io::Cursor::new(data)).map_err(|e| {
-        PicError::from(Value::String(ctx.intern(
-            format!("cmsgpack.unpack: {}", e).as_bytes(),
-        )))
+        PicError::from(Value::String(
+            ctx.intern(format!("cmsgpack.unpack: {}", e).as_bytes()),
+        ))
     })?;
 
     mp_value_to_lua(ctx, val)
 }
 
-fn mp_value_to_lua<'gc>(
-    ctx: Context<'gc>,
-    val: rmpv::Value,
-) -> Result<Value<'gc>, PicError<'gc>> {
+fn mp_value_to_lua<'gc>(ctx: Context<'gc>, val: rmpv::Value) -> Result<Value<'gc>, PicError<'gc>> {
     match val {
         rmpv::Value::Nil => Ok(Value::Nil),
         rmpv::Value::Boolean(b) => Ok(Value::Boolean(b)),
@@ -1478,8 +1486,7 @@ fn piccolo_to_json<'gc>(
         Value::Boolean(b) => Ok(serde_json::Value::Bool(b)),
         Value::Integer(n) => Ok(serde_json::Value::Number(n.into())),
         Value::Number(n) => {
-            let num = serde_json::Number::from_f64(n)
-                .unwrap_or(serde_json::Number::from(0));
+            let num = serde_json::Number::from_f64(n).unwrap_or(serde_json::Number::from(0));
             Ok(serde_json::Value::Number(num))
         }
         Value::String(s) => Ok(serde_json::Value::String(
@@ -1499,16 +1506,11 @@ fn piccolo_to_json<'gc>(
                 // Object with string keys
                 let mut map = serde_json::Map::new();
                 let mut key = Value::Nil;
-                while let piccolo::table::NextValue::Found { key: k, value: v } =
-                    table.next(key)
-                {
+                while let piccolo::table::NextValue::Found { key: k, value: v } = table.next(key) {
                     let json_val = piccolo_to_json(_ctx, v)?;
                     match k {
                         Value::String(s) => {
-                            map.insert(
-                                String::from_utf8_lossy(s.as_bytes()).to_string(),
-                                json_val,
-                            );
+                            map.insert(String::from_utf8_lossy(s.as_bytes()).to_string(), json_val);
                         }
                         Value::Integer(n) => {
                             map.insert(n.to_string(), json_val);
@@ -1575,10 +1577,7 @@ fn json_to_lua<'gc>(
 /// Converts a Lua return value to [`EvalResult`] following Redis's reply rules:
 /// nil -> null, booleans -> 0/1 integers, numbers -> integers, strings -> bulk,
 /// sequential tables -> arrays (hash part -> array of interleaved value/key).
-fn value_to_result<'gc>(
-    ctx: Context<'gc>,
-    value: Value<'gc>,
-) -> Result<EvalResult, PicError<'gc>> {
+fn value_to_result<'gc>(ctx: Context<'gc>, value: Value<'gc>) -> Result<EvalResult, PicError<'gc>> {
     match value {
         Value::Nil => Ok(EvalResult::Nil),
         Value::Boolean(b) => Ok(if b {
@@ -1603,9 +1602,9 @@ fn reply_payload<'gc>(ctx: Context<'gc>, value: Value<'gc>) -> Result<Vec<u8>, P
         Value::Integer(n) => Ok(n.to_string().into_bytes()),
         Value::Number(f) => Ok(f.to_string().into_bytes()),
         Value::Boolean(b) => Ok((if b { "true" } else { "false" }).to_string().into_bytes()),
-        _ => Err(PicError::from(Value::String(ctx.intern(
-            b"table has no integer keys".as_slice(),
-        )))),
+        _ => Err(PicError::from(Value::String(
+            ctx.intern(b"table has no integer keys".as_slice()),
+        ))),
     }
 }
 
@@ -1664,14 +1663,17 @@ fn result_reply(result: &EvalResult) -> RespValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kv::kv::TxIsolation;
     use crate::testutil::test_session;
+    use kv::kv::TxIsolation;
 
     /// Runs an op through its own transaction and renders the reply.
     async fn exec(op: QueuedOp) -> RespValue {
         let session = test_session();
         let store = session.store();
-        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
+        let tx = store
+            .begin(op.is_mutating, TxIsolation::Snapshot)
+            .await
+            .expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -1809,7 +1811,10 @@ mod tests {
             &["a1", "a2", "a3"],
         ))
         .await;
-        assert_eq!(expect_bulk(&reply).as_deref(), Some(b"k1:a1:2:3".as_slice()));
+        assert_eq!(
+            expect_bulk(&reply).as_deref(),
+            Some(b"k1:a1:2:3".as_slice())
+        );
     }
 
     #[tokio::test]
@@ -1976,7 +1981,12 @@ mod tests {
 
     #[tokio::test]
     async fn string_match_single_value_when_no_captures() {
-        let reply = exec(eval_op("return string.match('hello world', 'o w')", &[], &[])).await;
+        let reply = exec(eval_op(
+            "return string.match('hello world', 'o w')",
+            &[],
+            &[],
+        ))
+        .await;
         assert_eq!(expect_bulk(&reply).as_deref(), Some(b"o w".as_slice()));
     }
 
@@ -1996,7 +2006,12 @@ mod tests {
         let reply = exec(eval_op("return string.match('color', 'colou?r')", &[], &[])).await;
         assert_eq!(expect_bulk(&reply).as_deref(), Some(b"color".as_slice()));
 
-        let reply = exec(eval_op("return string.match('colour', 'colou?r')", &[], &[])).await;
+        let reply = exec(eval_op(
+            "return string.match('colour', 'colou?r')",
+            &[],
+            &[],
+        ))
+        .await;
         assert_eq!(expect_bulk(&reply).as_deref(), Some(b"colour".as_slice()));
 
         // A string without the optional-u of "color"/"colour" does not match.

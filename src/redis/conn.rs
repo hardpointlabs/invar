@@ -375,15 +375,18 @@ impl WireOp for EchoOp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kv::kv::TxIsolation;
     use crate::common::ValueType;
     use crate::testutil::test_session;
     use kv::kv::Entry;
+    use kv::kv::TxIsolation;
 
     /// Runs a queued op through its own transaction and renders the reply.
     async fn exec(session: &Session, op: QueuedOp) -> RespValue {
         let store = session.store();
-        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
+        let tx = store
+            .begin(op.is_mutating, TxIsolation::Snapshot)
+            .await
+            .expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -396,8 +399,7 @@ mod tests {
         let store = session.store();
         let tx = store.begin(true, TxIsolation::Snapshot).await.expect("tx");
         tx.set(
-            Entry::new(session.public_key(key), b"v".to_vec())
-                .metadata(ValueType::String as u8),
+            Entry::new(session.public_key(key), b"v".to_vec()).metadata(ValueType::String as u8),
         )
         .expect("seed");
         tx.commit().await.expect("commit");
@@ -445,7 +447,7 @@ mod tests {
             is_mutating: false,
             allowed_in_tx: false,
             abort_in_tx: false,
-        keys: None,
+            keys: None,
         };
         let reply = exec(&session, op).await;
         assert_eq!(reply, RespValue::Integer(0));
@@ -493,7 +495,11 @@ mod tests {
     #[tokio::test]
     async fn module_list_is_empty_array() {
         let session = test_session();
-        let reply = exec(&session, module(&[Bytes::from_static(b"module"), Bytes::from_static(b"list")])).await;
+        let reply = exec(
+            &session,
+            module(&[Bytes::from_static(b"module"), Bytes::from_static(b"list")]),
+        )
+        .await;
         assert_eq!(reply, RespValue::Array(Some(Vec::new())));
 
         assert_eq!(
@@ -502,11 +508,13 @@ mod tests {
         );
 
         assert_eq!(
-            expect_err(&exec(&session, module(&[
-                Bytes::from_static(b"module"),
-                Bytes::from_static(b"load"),
-            ]))
-            .await),
+            expect_err(
+                &exec(
+                    &session,
+                    module(&[Bytes::from_static(b"module"), Bytes::from_static(b"load"),])
+                )
+                .await
+            ),
             Bytes::from_static(b"ERR unknown subcommand")
         );
     }

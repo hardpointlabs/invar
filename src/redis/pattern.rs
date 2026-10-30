@@ -662,7 +662,10 @@ mod tests {
             );
             matches += got as usize;
         }
-        assert!(matches > 1_000, "generator produced too few matches: {matches}");
+        assert!(
+            matches > 1_000,
+            "generator produced too few matches: {matches}"
+        );
     }
 
     fn escape(s: &[u8]) -> Vec<u8> {
@@ -712,10 +715,16 @@ mod tests {
             // Prefix / suffix forms.
             let mut prefix = escape(&hay[..end]);
             prefix.push(b'*');
-            assert!(production(&prefix, &hay, false), "pat={prefix:?} hay={hay:?}");
+            assert!(
+                production(&prefix, &hay, false),
+                "pat={prefix:?} hay={hay:?}"
+            );
             let mut suffix = vec![b'*'];
             suffix.extend(escape(&hay[start..]));
-            assert!(production(&suffix, &hay, false), "pat={suffix:?} hay={hay:?}");
+            assert!(
+                production(&suffix, &hay, false),
+                "pat={suffix:?} hay={hay:?}"
+            );
         }
     }
 
@@ -853,7 +862,14 @@ mod tests {
                     .ok()?
                     .port();
                 let child = Command::new("redis-server")
-                    .args(["--port", &port.to_string(), "--save", "", "--appendonly", "no"])
+                    .args([
+                        "--port",
+                        &port.to_string(),
+                        "--save",
+                        "",
+                        "--appendonly",
+                        "no",
+                    ])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .spawn()
@@ -973,7 +989,10 @@ mod tests {
                 assert_eq!(got, want, "pattern={pat:?}");
                 checked += want.len();
             }
-            assert!(checked > 1_000, "patterns selected suspiciously little: {checked}");
+            assert!(
+                checked > 1_000,
+                "patterns selected suspiciously little: {checked}"
+            );
 
             // Abusive nesting: Redis gives up, so must we.
             let pat = "*a".repeat(MAX_STAR_NESTING + 5).into_bytes();

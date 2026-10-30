@@ -69,10 +69,7 @@ impl MetricsRecorder for MetricsRsRecorder {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         metrics::describe_gauge!(name.to_string(), description.to_string());
-        Arc::new(MetricsRsGauge(metrics::gauge!(
-            name.to_string(),
-            &labels
-        )))
+        Arc::new(MetricsRsGauge(metrics::gauge!(name.to_string(), &labels)))
     }
 
     fn register_up_down_counter(

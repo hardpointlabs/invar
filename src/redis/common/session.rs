@@ -7,14 +7,14 @@
 //! fields. The only process-shared state is the [`WatchRegistry`], which
 //! guards itself.
 
+use bytes::Bytes;
+use kv::kv::{Entry, Error as KvError, TxIsolation, WriteHandle};
+use smallvec::{smallvec, SmallVec};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use bytes::Bytes;
 use tokio::sync::watch;
-use kv::kv::{Entry, Error as KvError, TxIsolation, WriteHandle};
-use smallvec::{smallvec, SmallVec};
 
 use crate::common::op::{DbError, DbResult, NoOp, QueuedOp, WireOp};
 use crate::common::registry::WatchRegistry;
@@ -363,9 +363,9 @@ impl Session {
             return false;
         }
         self.queue.iter().any(|op| {
-            op.keys.as_ref().is_some_and(|ks| {
-                ks.iter().any(|k| self.watched_keys.contains_key(k))
-            })
+            op.keys
+                .as_ref()
+                .is_some_and(|ks| ks.iter().any(|k| self.watched_keys.contains_key(k)))
         })
     }
 
@@ -475,8 +475,8 @@ impl Session {
             wire_op,
             is_mutating: false,
             allowed_in_tx: true,
-        abort_in_tx: false,
-        keys: None,
+            abort_in_tx: false,
+            keys: None,
         })
     }
 
@@ -624,7 +624,9 @@ impl Session {
                     self.latest_write = handle;
                     // Bump write versions for every key touched by a mutating op
                     // so that concurrent WATCH sessions detect the change at EXEC.
-                    let changed_keys: Vec<String> = self.queue.iter()
+                    let changed_keys: Vec<String> = self
+                        .queue
+                        .iter()
                         .filter(|op| op.is_mutating)
                         .flat_map(|op| op.keys.iter().flatten().cloned())
                         .collect();
@@ -644,9 +646,14 @@ impl Session {
                 Err(e) => match e {
                     KvError::Conflict => match conflict_retries.next() {
                         Some(attempt) => {
-                            let backoff = Duration::from_millis(5) * 2u32.pow(attempt.min(6) as u32)
+                            let backoff = Duration::from_millis(5)
+                                * 2u32.pow(attempt.min(6) as u32)
                                 + Duration::from_millis(rand::random::<u64>() % 10);
-                            tracing::debug!(ops = outcomes.len(), retries = attempt, "write tx conflict; retrying batch");
+                            tracing::debug!(
+                                ops = outcomes.len(),
+                                retries = attempt,
+                                "write tx conflict; retrying batch"
+                            );
                             tokio::time::sleep(backoff).await;
                         }
                         None => {
@@ -782,7 +789,10 @@ mod tests {
     #[test]
     fn conflict_retry_budget_is_spent_one_retry_at_a_time() {
         let mut retries = ConflictRetries::new(3);
-        assert_eq!((retries.next(), retries.next(), retries.next()), (Some(1), Some(2), Some(3)));
+        assert_eq!(
+            (retries.next(), retries.next(), retries.next()),
+            (Some(1), Some(2), Some(3))
+        );
         assert_eq!(retries.next(), None);
         assert_eq!(retries.next(), None, "an exhausted budget stays exhausted");
 
@@ -830,36 +840,55 @@ mod tests {
     #[test]
     fn needs_ssi_false_when_watched_key_not_in_queue() {
         let mut session = test_session();
-        session.watched_keys.insert(key_str(&session, b"other"), (0, false));
+        session
+            .watched_keys
+            .insert(key_str(&session, b"other"), (0, false));
         let op = strings::set(&session, b"foo", b"bar", None);
         session.enqueue_op(op);
-        assert!(!session.needs_ssi(), "watched key not touched by queued op → SI");
+        assert!(
+            !session.needs_ssi(),
+            "watched key not touched by queued op → SI"
+        );
     }
 
     #[test]
     fn needs_ssi_true_when_watched_key_in_queue() {
         let mut session = test_session();
-        session.watched_keys.insert(key_str(&session, b"foo"), (0, false));
+        session
+            .watched_keys
+            .insert(key_str(&session, b"foo"), (0, false));
         let op = strings::set(&session, b"foo", b"bar", None);
         session.enqueue_op(op);
-        assert!(session.needs_ssi(), "watched key touched by queued op → SSI");
+        assert!(
+            session.needs_ssi(),
+            "watched key touched by queued op → SSI"
+        );
     }
 
     #[test]
     fn needs_ssi_true_when_any_watched_key_matches() {
         let mut session = test_session();
         // watch two keys; queue an op that touches only the second one
-        session.watched_keys.insert(key_str(&session, b"unrelated"), (0, false));
-        session.watched_keys.insert(key_str(&session, b"bar"), (0, false));
+        session
+            .watched_keys
+            .insert(key_str(&session, b"unrelated"), (0, false));
+        session
+            .watched_keys
+            .insert(key_str(&session, b"bar"), (0, false));
         let op = strings::set(&session, b"bar", b"val", None);
         session.enqueue_op(op);
-        assert!(session.needs_ssi(), "one of the watched keys is touched → SSI");
+        assert!(
+            session.needs_ssi(),
+            "one of the watched keys is touched → SSI"
+        );
     }
 
     #[test]
     fn needs_ssi_cleared_after_unwatch() {
         let mut session = test_session();
-        session.watched_keys.insert(key_str(&session, b"foo"), (0, false));
+        session
+            .watched_keys
+            .insert(key_str(&session, b"foo"), (0, false));
         let op = strings::set(&session, b"foo", b"bar", None);
         session.enqueue_op(op);
         assert!(session.needs_ssi());

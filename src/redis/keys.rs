@@ -16,14 +16,16 @@ use std::ops::Bound;
 use bytes::Bytes;
 use kv::kv::{BoxFuture, Entry, Error as KvError, Item, Tx};
 
+use crate::common::namespace::{
+    self, base_type, encode_sentinel, prefix_of, with_db, ElementPrefix,
+};
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, NoOp, QueuedOp, WireOp};
-use smallvec::smallvec;
 use crate::common::session::Session;
-use crate::common::namespace::{self, base_type, encode_sentinel, prefix_of, with_db, ElementPrefix};
 use crate::common::ValueType;
 use crate::list;
 use crate::pattern::{GlobPattern, PatternMatcher};
 use crate::resp::RespValue;
+use smallvec::smallvec;
 
 /// `EXISTS key [key ...]` — returns the number of given keys that exist.
 pub fn exists(session: &Session, keys: &[Bytes]) -> QueuedOp {
@@ -88,7 +90,10 @@ pub fn rename(session: &Session, old_key: &[u8], new_key: &[u8]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
-        keys: Some(smallvec![String::from_utf8_lossy(&session.public_key(old_key)).into_owned(), String::from_utf8_lossy(&session.public_key(new_key)).into_owned()]),
+        keys: Some(smallvec![
+            String::from_utf8_lossy(&session.public_key(old_key)).into_owned(),
+            String::from_utf8_lossy(&session.public_key(new_key)).into_owned()
+        ]),
     }
 }
 
@@ -105,7 +110,10 @@ pub fn rename_nx(session: &Session, old_key: &[u8], new_key: &[u8]) -> QueuedOp 
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
-        keys: Some(smallvec![String::from_utf8_lossy(&session.public_key(old_key)).into_owned(), String::from_utf8_lossy(&session.public_key(new_key)).into_owned()]),
+        keys: Some(smallvec![
+            String::from_utf8_lossy(&session.public_key(old_key)).into_owned(),
+            String::from_utf8_lossy(&session.public_key(new_key)).into_owned()
+        ]),
     }
 }
 
@@ -328,7 +336,9 @@ impl WireOp for KeysWire {
                         .map(|n| RespValue::BulkString(Some(Bytes::copy_from_slice(n))))
                         .collect(),
                 )),
-                Err(_) => RespValue::Error(Bytes::from_static(b"ERR internal error: bad keys result")),
+                Err(_) => {
+                    RespValue::Error(Bytes::from_static(b"ERR internal error: bad keys result"))
+                }
             },
             Err(e) => err_resp(&e),
         }
@@ -418,7 +428,9 @@ impl DbOp for MoveOp {
         let (target_db, same_db) = (self.target_db, self.same_db);
         Box::pin(async move {
             if same_db {
-                return Err(DbError::Redis("source and destination objects are the same".into()));
+                return Err(DbError::Redis(
+                    "source and destination objects are the same".into(),
+                ));
             }
             let item = match tx.get(&source).await {
                 Ok(item) => item,
@@ -446,11 +458,19 @@ impl DbOp for MoveOp {
             };
             move_elements(tx, &source, base_type(item.metadata()), &from, &to).await?;
             let (value, metadata) = if to.is_explicit() {
-                encode_sentinel(namespace::payload(&item)?.to_vec(), base_type(item.metadata()), &to)
+                encode_sentinel(
+                    namespace::payload(&item)?.to_vec(),
+                    base_type(item.metadata()),
+                    &to,
+                )
             } else {
                 (item.value().to_vec(), item.metadata())
             };
-            tx.set(Entry::new(target, value).metadata(metadata).keep_ttl_of(&item))?;
+            tx.set(
+                Entry::new(target, value)
+                    .metadata(metadata)
+                    .keep_ttl_of(&item),
+            )?;
             tx.delete(&source)?;
             let result: DbResult = Box::new(1i64);
             Ok(result)
@@ -488,9 +508,17 @@ async fn rename_entry(tx: &dyn Tx, old: &[u8], new: &[u8], item: &Item) -> Resul
     let (value, metadata) = if source.is_explicit() || !has_elements(base_type(item.metadata())) {
         (item.value().to_vec(), item.metadata())
     } else {
-        encode_sentinel(item.value().to_vec(), item.metadata(), &ElementPrefix::explicit(source.to_vec()))
+        encode_sentinel(
+            item.value().to_vec(),
+            item.metadata(),
+            &ElementPrefix::explicit(source.to_vec()),
+        )
     };
-    tx.set(Entry::new(new.to_vec(), value).metadata(metadata).keep_ttl_of(item))?;
+    tx.set(
+        Entry::new(new.to_vec(), value)
+            .metadata(metadata)
+            .keep_ttl_of(item),
+    )?;
     tx.delete(old)?;
     Ok(())
 }
@@ -637,8 +665,7 @@ impl DbOp for PersistOp {
                 let result: DbResult = Box::new(0i64);
                 return Ok(result);
             }
-            let entry = Entry::new(key, item.value().to_vec())
-                .metadata(item.metadata());
+            let entry = Entry::new(key, item.value().to_vec()).metadata(item.metadata());
             tx.set(entry)?;
             let result: DbResult = Box::new(1i64);
             Ok(result)
@@ -696,7 +723,7 @@ async fn ttl_value(tx: &dyn Tx, key: &[u8], time_unit: TimeUnit) -> i64 {
             } else {
                 -1
             }
-        },
+        }
         _ => -2,
     }
 }
@@ -757,7 +784,10 @@ fn element_prefixes(base_type: u8, prefix: &[u8]) -> Vec<Vec<u8>> {
     {
         vec![[prefix, b"\0"].concat()]
     } else if base_type == ValueType::SortedSet as u8 {
-        vec![[prefix, b":score:"].concat(), [prefix, b":member:"].concat()]
+        vec![
+            [prefix, b":score:"].concat(),
+            [prefix, b":member:"].concat(),
+        ]
     } else {
         Vec::new()
     }
@@ -766,9 +796,16 @@ fn element_prefixes(base_type: u8, prefix: &[u8]) -> Vec<Vec<u8>> {
 /// Whether values of this type keep their data as separate element entries
 /// (strings, HyperLogLogs and JSON documents live in the public entry itself).
 fn has_elements(base_type: u8) -> bool {
-    [ValueType::List, ValueType::Set, ValueType::SortedSet, ValueType::Hash, ValueType::Stream, ValueType::Bloom]
-        .iter()
-        .any(|t| *t as u8 == base_type)
+    [
+        ValueType::List,
+        ValueType::Set,
+        ValueType::SortedSet,
+        ValueType::Hash,
+        ValueType::Stream,
+        ValueType::Bloom,
+    ]
+    .iter()
+    .any(|t| *t as u8 == base_type)
 }
 
 /// Re-keys every entry under `from` to live under `to` instead (keeping the
@@ -809,7 +846,10 @@ pub(crate) async fn move_elements(
     if base_type == ValueType::List as u8 {
         return list::move_nodes(tx, public_key, from, to).await;
     }
-    for (from, to) in element_prefixes(base_type, from).into_iter().zip(element_prefixes(base_type, to)) {
+    for (from, to) in element_prefixes(base_type, from)
+        .into_iter()
+        .zip(element_prefixes(base_type, to))
+    {
         move_prefix(tx, &from, &to).await?;
     }
     Ok(())
@@ -929,8 +969,14 @@ impl DbOp for ScanOp {
                 keys.push(name.to_vec());
             }
 
-            if !exhausted && keys.len() == count && (!it.next().await || it.item().is_none_or(|i| !i.key().starts_with(prefix.as_slice()))) {
-                    exhausted = true;
+            if !exhausted
+                && keys.len() == count
+                && (!it.next().await
+                    || it
+                        .item()
+                        .is_none_or(|i| !i.key().starts_with(prefix.as_slice())))
+            {
+                exhausted = true;
             }
 
             // When the page ended without exhausting the keyspace, resume from
@@ -1117,14 +1163,17 @@ impl WireOp for ScanWire {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kv::kv::TxIsolation;
     use crate::testutil::test_session;
+    use kv::kv::TxIsolation;
 
     /// Runs one op through its own transaction, committing if it mutates, and
     /// renders the reply.
     async fn exec(session: &Session, op: QueuedOp) -> RespValue {
         let store = session.store();
-        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
+        let tx = store
+            .begin(op.is_mutating, TxIsolation::Snapshot)
+            .await
+            .expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -1135,7 +1184,10 @@ mod tests {
     /// Runs a db op expecting success, returning the raw result.
     async fn exec_db(session: &Session, op: QueuedOp) -> DbResult {
         let store = session.store();
-        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
+        let tx = store
+            .begin(op.is_mutating, TxIsolation::Snapshot)
+            .await
+            .expect("tx");
         let outcome = op.db_op.run(&*tx).await.expect("op failed");
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -1155,7 +1207,10 @@ mod tests {
     /// Reads the stored public key via a fresh session on the given DB.
     async fn stored(session: &Session, db: i32, key: &[u8]) -> Option<Vec<u8>> {
         let store = session.store();
-        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
+        let tx = store
+            .begin(false, TxIsolation::Snapshot)
+            .await
+            .expect("read tx");
         match tx.get(&session.public_key_for_db(db, key)).await {
             Ok(item) => Some(item.value().to_vec()),
             Err(KvError::KeyNotFound) => None,
@@ -1238,17 +1293,30 @@ mod tests {
     /// Number of internal (`-`- or `+`-prefixed) entries currently in the store.
     async fn internal_entry_count(session: &Session) -> usize {
         // Name-derived prefixes start with `-`, namespaces with `+`.
-        crate::testutil::entries_under(session, b"-").await + crate::testutil::entries_under(session, b"+").await
+        crate::testutil::entries_under(session, b"-").await
+            + crate::testutil::entries_under(session, b"+").await
     }
 
     /// Builds a value of each compound type under `key`, so tests can check
     /// that DEL leaves nothing behind for any of them.
     fn build_ops(session: &Session, ty: &str, key: &[u8]) -> Vec<QueuedOp> {
         match ty {
-            "list" => vec![crate::list::rpush(session, key, &[bs("a"), bs("b"), bs("c")])],
-            "hash" => vec![crate::hash::hset(session, key, &[bs("f"), bs("v"), bs("g"), bs("w")])],
+            "list" => vec![crate::list::rpush(
+                session,
+                key,
+                &[bs("a"), bs("b"), bs("c")],
+            )],
+            "hash" => vec![crate::hash::hset(
+                session,
+                key,
+                &[bs("f"), bs("v"), bs("g"), bs("w")],
+            )],
             "set" => vec![crate::set::sadd(session, key, &[bs("x"), bs("y")])],
-            "zset" => vec![crate::zset::zadd(session, key, &[bs("1"), bs("a"), bs("2"), bs("b")])],
+            "zset" => vec![crate::zset::zadd(
+                session,
+                key,
+                &[bs("1"), bs("a"), bs("2"), bs("b")],
+            )],
             "stream" => vec![
                 crate::stream::xadd(session, key, false, None, None, None, &[bs("f"), bs("1")]),
                 crate::stream::xadd(session, key, false, None, None, None, &[bs("f"), bs("2")]),
@@ -1261,20 +1329,27 @@ mod tests {
     #[tokio::test]
     async fn del_removes_every_internal_entry_of_each_compound_type() {
         for ty in ["list", "hash", "set", "zset", "stream", "bloom"] {
-          for legacy in [false, true] {
-            let session = test_session();
-            for op in build_ops(&session, ty, b"k") {
-                exec(&session, op).await;
-            }
-            if legacy {
-                crate::testutil::legacy_key(&session, b"k").await;
-            }
-            assert!(internal_entry_count(&session).await > 0, "{ty}: test data must create internal entries");
+            for legacy in [false, true] {
+                let session = test_session();
+                for op in build_ops(&session, ty, b"k") {
+                    exec(&session, op).await;
+                }
+                if legacy {
+                    crate::testutil::legacy_key(&session, b"k").await;
+                }
+                assert!(
+                    internal_entry_count(&session).await > 0,
+                    "{ty}: test data must create internal entries"
+                );
 
-            let reply = exec(&session, del(&session, &[bs("k")])).await;
-            assert_eq!(expect_int(&reply), 1, "{ty}");
-            assert_eq!(internal_entry_count(&session).await, 0, "{ty} (legacy layout: {legacy}): DEL left internal entries behind");
-          }
+                let reply = exec(&session, del(&session, &[bs("k")])).await;
+                assert_eq!(expect_int(&reply), 1, "{ty}");
+                assert_eq!(
+                    internal_entry_count(&session).await,
+                    0,
+                    "{ty} (legacy layout: {legacy}): DEL left internal entries behind"
+                );
+            }
         }
     }
 
@@ -1286,13 +1361,43 @@ mod tests {
         // Explicit, different IDs: auto-generated ones from the same
         // millisecond would collide on one key and hide the leftover.
         let id = |s: &[u8]| crate::stream::parse_stream_id_arg(s).expect("valid id");
-        exec(&session, crate::stream::xadd(&session, b"st", false, None, None, id(b"1-1"), &[bs("f"), bs("old")])).await;
+        exec(
+            &session,
+            crate::stream::xadd(
+                &session,
+                b"st",
+                false,
+                None,
+                None,
+                id(b"1-1"),
+                &[bs("f"), bs("old")],
+            ),
+        )
+        .await;
         exec(&session, del(&session, &[bs("st")])).await;
-        exec(&session, crate::stream::xadd(&session, b"st", false, None, None, id(b"2-1"), &[bs("f"), bs("new")])).await;
+        exec(
+            &session,
+            crate::stream::xadd(
+                &session,
+                b"st",
+                false,
+                None,
+                None,
+                id(b"2-1"),
+                &[bs("f"), bs("new")],
+            ),
+        )
+        .await;
 
-        let reply = exec(&session, crate::stream::xrange(&session, b"st", None, None, 1000)).await;
+        let reply = exec(
+            &session,
+            crate::stream::xrange(&session, b"st", None, None, 1000),
+        )
+        .await;
         match reply {
-            RespValue::Array(Some(entries)) => assert_eq!(entries.len(), 1, "old entry resurfaced: {entries:?}"),
+            RespValue::Array(Some(entries)) => {
+                assert_eq!(entries.len(), 1, "old entry resurfaced: {entries:?}")
+            }
             other => panic!("unexpected XRANGE reply: {other:?}"),
         }
     }
@@ -1305,7 +1410,11 @@ mod tests {
         exec(&session, crate::bloom::add(&session, b"bf", b"other")).await;
 
         let reply = exec(&session, crate::bloom::exists(&session, b"bf", b"old")).await;
-        assert_eq!(reply, RespValue::Integer(0), "item from the deleted filter is still present");
+        assert_eq!(
+            reply,
+            RespValue::Integer(0),
+            "item from the deleted filter is still present"
+        );
     }
 
     /// `foo`'s list nodes share a string prefix with `foo:bar`'s; deleting one
@@ -1313,13 +1422,24 @@ mod tests {
     #[tokio::test]
     async fn del_of_a_list_leaves_a_similarly_named_list_intact() {
         let session = test_session();
-        exec(&session, crate::list::rpush(&session, b"foo", &[bs("1"), bs("2")])).await;
-        exec(&session, crate::list::rpush(&session, b"foo:bar", &[bs("3"), bs("4")])).await;
+        exec(
+            &session,
+            crate::list::rpush(&session, b"foo", &[bs("1"), bs("2")]),
+        )
+        .await;
+        exec(
+            &session,
+            crate::list::rpush(&session, b"foo:bar", &[bs("3"), bs("4")]),
+        )
+        .await;
         let neighbour = exec(&session, crate::list::lrange(&session, b"foo:bar", 0, -1)).await;
 
         exec(&session, del(&session, &[bs("foo")])).await;
 
-        assert_eq!(exec(&session, crate::list::lrange(&session, b"foo:bar", 0, -1)).await, neighbour);
+        assert_eq!(
+            exec(&session, crate::list::lrange(&session, b"foo:bar", 0, -1)).await,
+            neighbour
+        );
     }
 
     /// Pushes `values` onto list `l` and returns the session.
@@ -1343,7 +1463,11 @@ mod tests {
         assert_eq!(internal_entry_count(&s).await, 3, "RPOP");
         exec(&s, crate::list::lrem(&s, b"l", 1, b"c")).await;
         assert_eq!(internal_entry_count(&s).await, 2, "LREM");
-        exec(&s, crate::list::rpush(&s, b"l", &[bs("x"), bs("y"), bs("z")])).await;
+        exec(
+            &s,
+            crate::list::rpush(&s, b"l", &[bs("x"), bs("y"), bs("z")]),
+        )
+        .await;
         assert_eq!(internal_entry_count(&s).await, 5);
         exec(&s, crate::list::ltrim(&s, b"l", 0, 1)).await;
         assert_eq!(internal_entry_count(&s).await, 2, "LTRIM");
@@ -1370,7 +1494,11 @@ mod tests {
         // Source of RPOPLPUSH emptied; the element lives on in the destination.
         let s = list_of(&["a"]).await;
         exec(&s, crate::list::rpoplpush(&s, b"l", b"dst")).await;
-        assert_eq!(internal_entry_count(&s).await, 1, "RPOPLPUSH source emptied");
+        assert_eq!(
+            internal_entry_count(&s).await,
+            1,
+            "RPOPLPUSH source emptied"
+        );
     }
 
     /// The names in a `KEYS` reply, sorted.
@@ -1474,8 +1602,16 @@ mod tests {
             assert!(crate::testutil::entries_under(&s, &ns).await > 0, "{ty}");
 
             assert_eq!(expect_int(&exec(&s, del(&s, &[bs("k")])).await), 1, "{ty}");
-            assert_eq!(crate::testutil::entries_under(&s, &ns).await, 0, "{ty}: DEL left elements in the namespace");
-            assert_eq!(crate::testutil::stored_type_byte(&s, &s.public_key(b"k")).await, None, "{ty}");
+            assert_eq!(
+                crate::testutil::entries_under(&s, &ns).await,
+                0,
+                "{ty}: DEL left elements in the namespace"
+            );
+            assert_eq!(
+                crate::testutil::stored_type_byte(&s, &s.public_key(b"k")).await,
+                None,
+                "{ty}"
+            );
         }
     }
 
@@ -1494,13 +1630,34 @@ mod tests {
             assert_ne!(before, empty, "{ty}: test data must be visible");
 
             let reply = exec(&s, rename(&s, b"old", b"new")).await;
-            assert_eq!(reply, RespValue::SimpleString(Bytes::from_static(b"OK")), "{ty}");
+            assert_eq!(
+                reply,
+                RespValue::SimpleString(Bytes::from_static(b"OK")),
+                "{ty}"
+            );
 
-            assert_eq!(read_back(&s, ty, b"new").await, before, "{ty}: data lost by RENAME");
-            assert_eq!(read_back(&s, ty, b"old").await, empty, "{ty}: old name still has data");
-            assert_eq!(crate::testutil::entries_snapshot(&s, &ns).await, elements, "{ty}: RENAME rewrote elements");
-            let meta = crate::testutil::stored_type_byte(&s, &s.public_key(b"new")).await.unwrap();
-            assert!(crate::common::namespace::is_namespaced(meta), "{ty}: the namespace must follow the key");
+            assert_eq!(
+                read_back(&s, ty, b"new").await,
+                before,
+                "{ty}: data lost by RENAME"
+            );
+            assert_eq!(
+                read_back(&s, ty, b"old").await,
+                empty,
+                "{ty}: old name still has data"
+            );
+            assert_eq!(
+                crate::testutil::entries_snapshot(&s, &ns).await,
+                elements,
+                "{ty}: RENAME rewrote elements"
+            );
+            let meta = crate::testutil::stored_type_byte(&s, &s.public_key(b"new"))
+                .await
+                .unwrap();
+            assert!(
+                crate::common::namespace::is_namespaced(meta),
+                "{ty}: the namespace must follow the key"
+            );
         }
     }
 
@@ -1521,8 +1678,16 @@ mod tests {
 
             assert_eq!(read_back(&s, ty, b"new").await, before, "{ty}");
             assert_eq!(read_back(&s, ty, b"old").await, empty, "{ty}");
-            assert_eq!(crate::testutil::entries_snapshot(&s, &old_prefix).await, elements, "{ty}: RENAME rewrote elements");
-            assert_eq!(crate::testutil::namespace_of(&s, b"new").await, old_prefix, "{ty}: the new sentinel records the prefix the elements live under");
+            assert_eq!(
+                crate::testutil::entries_snapshot(&s, &old_prefix).await,
+                elements,
+                "{ty}: RENAME rewrote elements"
+            );
+            assert_eq!(
+                crate::testutil::namespace_of(&s, b"new").await,
+                old_prefix,
+                "{ty}: the new sentinel records the prefix the elements live under"
+            );
         }
     }
 
@@ -1541,9 +1706,23 @@ mod tests {
             exec(&s, crate::hash::hset(&s, b"old", &[bs("g"), bs("w")])).await;
 
             let fresh = exec(&s, crate::hash::hgetall(&s, b"old")).await;
-            assert_eq!(fresh, RespValue::Array(Some(vec![RespValue::BulkString(Some(bs("g"))), RespValue::BulkString(Some(bs("w")))])), "legacy={legacy}");
+            assert_eq!(
+                fresh,
+                RespValue::Array(Some(vec![
+                    RespValue::BulkString(Some(bs("g"))),
+                    RespValue::BulkString(Some(bs("w")))
+                ])),
+                "legacy={legacy}"
+            );
             let renamed = exec(&s, crate::hash::hgetall(&s, b"new")).await;
-            assert_eq!(renamed, RespValue::Array(Some(vec![RespValue::BulkString(Some(bs("f"))), RespValue::BulkString(Some(bs("v")))])), "legacy={legacy}");
+            assert_eq!(
+                renamed,
+                RespValue::Array(Some(vec![
+                    RespValue::BulkString(Some(bs("f"))),
+                    RespValue::BulkString(Some(bs("v")))
+                ])),
+                "legacy={legacy}"
+            );
         }
     }
 
@@ -1572,8 +1751,18 @@ mod tests {
         exec(&s, rename(&s, b"src", b"dst")).await;
 
         let got = exec(&s, crate::hash::hgetall(&s, b"dst")).await;
-        assert_eq!(got, RespValue::Array(Some(vec![RespValue::BulkString(Some(bs("f"))), RespValue::BulkString(Some(bs("v")))])));
-        assert_eq!(crate::testutil::entries_under(&s, &dst_ns).await, 0, "the old destination's elements must be cleared");
+        assert_eq!(
+            got,
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(bs("f"))),
+                RespValue::BulkString(Some(bs("v")))
+            ]))
+        );
+        assert_eq!(
+            crate::testutil::entries_under(&s, &dst_ns).await,
+            0,
+            "the old destination's elements must be cleared"
+        );
     }
 
     #[tokio::test]
@@ -1596,15 +1785,30 @@ mod tests {
         for ty in TYPES {
             let reply = exec(&s, key_type(&s, ty.as_bytes())).await;
             let expected = if ty == "zset" { "zset" } else { ty };
-            assert_eq!(reply, RespValue::SimpleString(Bytes::copy_from_slice(expected.as_bytes())), "{ty}");
+            assert_eq!(
+                reply,
+                RespValue::SimpleString(Bytes::copy_from_slice(expected.as_bytes())),
+                "{ty}"
+            );
         }
-        assert_eq!(expect_int(&exec(&s, exists(&s, &[bs("hash"), bs("list"), bs("nope")])).await), 2);
+        assert_eq!(
+            expect_int(&exec(&s, exists(&s, &[bs("hash"), bs("list"), bs("nope")])).await),
+            2
+        );
         // KEYS lists each namespaced key once, none of its elements.
-        assert_eq!(key_names(&s, b"*").await, ["bloom", "hash", "list", "set", "stream", "zset"]);
+        assert_eq!(
+            key_names(&s, b"*").await,
+            ["bloom", "hash", "list", "set", "stream", "zset"]
+        );
         // SCAN with a TYPE filter.
         let scan_reply = exec(&s, scan(&s, b"0", 100, None, type_byte(b"hash"))).await;
-        let RespValue::Array(Some(parts)) = scan_reply else { panic!("SCAN must reply an array") };
-        assert_eq!(parts[1], RespValue::Array(Some(vec![RespValue::BulkString(Some(bs("hash")))])));
+        let RespValue::Array(Some(parts)) = scan_reply else {
+            panic!("SCAN must reply an array")
+        };
+        assert_eq!(
+            parts[1],
+            RespValue::Array(Some(vec![RespValue::BulkString(Some(bs("hash")))]))
+        );
         // EXPIRE / TTL / PERSIST keep the value and the namespace.
         exec(&s, expire(&s, b"set", 100)).await;
         assert!((90..=100).contains(&ttl_secs(&s, b"set").await));
@@ -1615,7 +1819,9 @@ mod tests {
             build(&t, "set", b"set").await;
             read_back(&t, "set", b"set").await
         });
-        let meta = crate::testutil::stored_type_byte(&s, &s.public_key(b"set")).await.unwrap();
+        let meta = crate::testutil::stored_type_byte(&s, &s.public_key(b"set"))
+            .await
+            .unwrap();
         assert!(crate::common::namespace::is_namespaced(meta));
     }
 
@@ -1631,9 +1837,17 @@ mod tests {
 
             assert_eq!(expect_int(&exec(&s, move_op(&s, b"k", 1)).await), 1, "{ty}");
 
-            assert_eq!(internal_entry_count(&s).await, crate::testutil::entries_under(&s, b"-1:k").await, "{ty}: nothing may stay behind in db 0");
+            assert_eq!(
+                internal_entry_count(&s).await,
+                crate::testutil::entries_under(&s, b"-1:k").await,
+                "{ty}: nothing may stay behind in db 0"
+            );
             s.switch_db(1);
-            assert_eq!(read_back(&s, ty, b"k").await, before, "{ty}: data lost by MOVE");
+            assert_eq!(
+                read_back(&s, ty, b"k").await,
+                before,
+                "{ty}: data lost by MOVE"
+            );
             assert!((90..=100).contains(&ttl_secs(&s, b"k").await), "{ty}: TTL");
             s.switch_db(0);
             assert_eq!(stored(&s, 0, b"k").await, None, "{ty}");
@@ -1652,11 +1866,23 @@ mod tests {
             assert_eq!(expect_int(&exec(&s, move_op(&s, b"k", 1)).await), 1, "{ty}");
 
             // The namespace's db number follows the key, so FLUSHDB of db 0 cannot destroy it.
-            assert_eq!(crate::testutil::entries_under(&s, &ns).await, 0, "{ty}: elements left in db 0's namespace");
+            assert_eq!(
+                crate::testutil::entries_under(&s, &ns).await,
+                0,
+                "{ty}: elements left in db 0's namespace"
+            );
             let moved = crate::common::namespace::with_db(&ns, 1).unwrap();
-            assert_eq!(crate::testutil::entries_under(&s, &moved).await, elements, "{ty}");
+            assert_eq!(
+                crate::testutil::entries_under(&s, &moved).await,
+                elements,
+                "{ty}"
+            );
             s.switch_db(1);
-            assert_eq!(read_back(&s, ty, b"k").await, before, "{ty}: data lost by MOVE");
+            assert_eq!(
+                read_back(&s, ty, b"k").await,
+                before,
+                "{ty}: data lost by MOVE"
+            );
         }
     }
 
@@ -1672,12 +1898,25 @@ mod tests {
             seed_string(&other, b"k", b"already here").await;
         }
         assert_eq!(expect_int(&exec(&s, move_op(&s, b"k", 1)).await), 0);
-        assert_eq!(read_back(&s, "hash", b"k").await, before, "a refused MOVE must leave the source alone");
+        assert_eq!(
+            read_back(&s, "hash", b"k").await,
+            before,
+            "a refused MOVE must leave the source alone"
+        );
         assert_eq!(stored(&s, 1, b"k").await, Some(b"already here".to_vec()));
 
         let reply = exec(&s, move_op(&s, b"k", 0)).await;
-        assert_eq!(reply, RespValue::Error(Bytes::from_static(b"ERR source and destination objects are the same")));
-        assert_eq!(read_back(&s, "hash", b"k").await, before, "MOVE to the same db must not delete the key");
+        assert_eq!(
+            reply,
+            RespValue::Error(Bytes::from_static(
+                b"ERR source and destination objects are the same"
+            ))
+        );
+        assert_eq!(
+            read_back(&s, "hash", b"k").await,
+            before,
+            "MOVE to the same db must not delete the key"
+        );
 
         assert_eq!(expect_int(&exec(&s, move_op(&s, b"missing", 1)).await), 0);
     }
@@ -1705,7 +1944,10 @@ mod tests {
 
     /// Remaining TTL of `key` in seconds, as `TTL` reports it (-1 = none).
     async fn ttl_secs(session: &Session, key: &[u8]) -> i64 {
-        *exec_db(session, ttl(session, key)).await.downcast::<i64>().unwrap()
+        *exec_db(session, ttl(session, key))
+            .await
+            .downcast::<i64>()
+            .unwrap()
     }
 
     /// Runs `setup`, gives `key` a 100s TTL, runs `mutate` and asserts the
@@ -1718,13 +1960,22 @@ mod tests {
     ) {
         exec(session, setup).await;
         exec(session, expire(session, key, 100)).await;
-        assert!((90..=100).contains(&ttl_secs(session, key).await), "setup should leave a TTL");
+        assert!(
+            (90..=100).contains(&ttl_secs(session, key).await),
+            "setup should leave a TTL"
+        );
 
         let reply = exec(session, mutate).await;
-        assert!(!matches!(reply, RespValue::Error(_)), "mutation failed: {reply:?}");
+        assert!(
+            !matches!(reply, RespValue::Error(_)),
+            "mutation failed: {reply:?}"
+        );
 
         let remaining = ttl_secs(session, key).await;
-        assert!((90..=100).contains(&remaining), "TTL was lost or changed: {remaining}");
+        assert!(
+            (90..=100).contains(&remaining),
+            "TTL was lost or changed: {remaining}"
+        );
     }
 
     #[tokio::test]
@@ -1732,36 +1983,114 @@ mod tests {
         use crate::strings;
         let s = test_session();
         seed_string(&s, b"n", b"5").await;
-        assert_mutation_keeps_ttl(&s, b"n", strings::increment(&s, b"n", 1), strings::increment(&s, b"n", 2)).await;
+        assert_mutation_keeps_ttl(
+            &s,
+            b"n",
+            strings::increment(&s, b"n", 1),
+            strings::increment(&s, b"n", 2),
+        )
+        .await;
         seed_string(&s, b"n2", b"5").await;
-        assert_mutation_keeps_ttl(&s, b"n2", strings::increment(&s, b"n2", 0), strings::increment(&s, b"n2", -3)).await;
+        assert_mutation_keeps_ttl(
+            &s,
+            b"n2",
+            strings::increment(&s, b"n2", 0),
+            strings::increment(&s, b"n2", -3),
+        )
+        .await;
         seed_string(&s, b"a", b"x").await;
-        assert_mutation_keeps_ttl(&s, b"a", strings::append(&s, b"a", b"y"), strings::append(&s, b"a", b"z")).await;
+        assert_mutation_keeps_ttl(
+            &s,
+            b"a",
+            strings::append(&s, b"a", b"y"),
+            strings::append(&s, b"a", b"z"),
+        )
+        .await;
         seed_string(&s, b"r", b"hello").await;
-        assert_mutation_keeps_ttl(&s, b"r", strings::set_range(&s, b"r", 0, b"j"), strings::set_range(&s, b"r", 1, b"u")).await;
+        assert_mutation_keeps_ttl(
+            &s,
+            b"r",
+            strings::set_range(&s, b"r", 0, b"j"),
+            strings::set_range(&s, b"r", 1, b"u"),
+        )
+        .await;
         seed_string(&s, b"f", b"1.5").await;
-        assert_mutation_keeps_ttl(&s, b"f", strings::incr_by_float(&s, b"f", 0.0), strings::incr_by_float(&s, b"f", 1.0)).await;
+        assert_mutation_keeps_ttl(
+            &s,
+            b"f",
+            strings::incr_by_float(&s, b"f", 0.0),
+            strings::incr_by_float(&s, b"f", 1.0),
+        )
+        .await;
         seed_string(&s, b"b", b"\x00").await;
-        assert_mutation_keeps_ttl(&s, b"b", crate::bitmap::set_bit(&s, b"b", 1, 1), crate::bitmap::set_bit(&s, b"b", 2, 1)).await;
-        assert_mutation_keeps_ttl(&s, b"hll", crate::hll::pfadd(&s, b"hll", &[bs("a")]), crate::hll::pfadd(&s, b"hll", &[bs("b"),  bs("c")])).await;
+        assert_mutation_keeps_ttl(
+            &s,
+            b"b",
+            crate::bitmap::set_bit(&s, b"b", 1, 1),
+            crate::bitmap::set_bit(&s, b"b", 2, 1),
+        )
+        .await;
+        assert_mutation_keeps_ttl(
+            &s,
+            b"hll",
+            crate::hll::pfadd(&s, b"hll", &[bs("a")]),
+            crate::hll::pfadd(&s, b"hll", &[bs("b"), bs("c")]),
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn compound_updates_keep_the_ttl() {
         let s = test_session();
-        assert_mutation_keeps_ttl(&s, b"h", crate::hash::hset(&s, b"h", &[bs("f"),  bs("v")]), crate::hash::hset(&s, b"h", &[bs("g"),  bs("w")])).await;
-        assert_mutation_keeps_ttl(&s, b"st", crate::set::sadd(&s, b"st", &[bs("x")]), crate::set::sadd(&s, b"st", &[bs("y")])).await;
-        assert_mutation_keeps_ttl(&s, b"z", crate::zset::zadd(&s, b"z", &[bs("1"),  bs("a")]), crate::zset::zadd(&s, b"z", &[bs("2"),  bs("b")])).await;
-        assert_mutation_keeps_ttl(&s, b"l", crate::list::rpush(&s, b"l", &[bs("a")]), crate::list::rpush(&s, b"l", &[bs("b")])).await;
-        assert_mutation_keeps_ttl(&s, b"l2", crate::list::lpush(&s, b"l2", &[bs("a")]), crate::list::lpush(&s, b"l2", &[bs("b")])).await;
+        assert_mutation_keeps_ttl(
+            &s,
+            b"h",
+            crate::hash::hset(&s, b"h", &[bs("f"), bs("v")]),
+            crate::hash::hset(&s, b"h", &[bs("g"), bs("w")]),
+        )
+        .await;
+        assert_mutation_keeps_ttl(
+            &s,
+            b"st",
+            crate::set::sadd(&s, b"st", &[bs("x")]),
+            crate::set::sadd(&s, b"st", &[bs("y")]),
+        )
+        .await;
+        assert_mutation_keeps_ttl(
+            &s,
+            b"z",
+            crate::zset::zadd(&s, b"z", &[bs("1"), bs("a")]),
+            crate::zset::zadd(&s, b"z", &[bs("2"), bs("b")]),
+        )
+        .await;
+        assert_mutation_keeps_ttl(
+            &s,
+            b"l",
+            crate::list::rpush(&s, b"l", &[bs("a")]),
+            crate::list::rpush(&s, b"l", &[bs("b")]),
+        )
+        .await;
+        assert_mutation_keeps_ttl(
+            &s,
+            b"l2",
+            crate::list::lpush(&s, b"l2", &[bs("a")]),
+            crate::list::lpush(&s, b"l2", &[bs("b")]),
+        )
+        .await;
         assert_mutation_keeps_ttl(
             &s,
             b"x",
-            crate::stream::xadd(&s, b"x", false, None, None, None, &[bs("f"),  bs("1")]),
-            crate::stream::xadd(&s, b"x", false, None, None, None, &[bs("f"),  bs("2")]),
+            crate::stream::xadd(&s, b"x", false, None, None, None, &[bs("f"), bs("1")]),
+            crate::stream::xadd(&s, b"x", false, None, None, None, &[bs("f"), bs("2")]),
         )
         .await;
-        assert_mutation_keeps_ttl(&s, b"bf", crate::bloom::add(&s, b"bf", b"one"), crate::bloom::add(&s, b"bf", b"two")).await;
+        assert_mutation_keeps_ttl(
+            &s,
+            b"bf",
+            crate::bloom::add(&s, b"bf", b"one"),
+            crate::bloom::add(&s, b"bf", b"two"),
+        )
+        .await;
     }
 
     /// Commands that replace the value are the ones that clear an expiry.
@@ -1929,7 +2258,16 @@ mod tests {
 
         let (cursor, keys) = run_scan(&session, b"0", 10, None).await;
         assert_eq!(cursor, b"0".to_vec());
-        assert_eq!(keys, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec(), b"e".to_vec()]);
+        assert_eq!(
+            keys,
+            vec![
+                b"a".to_vec(),
+                b"b".to_vec(),
+                b"c".to_vec(),
+                b"d".to_vec(),
+                b"e".to_vec()
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1955,8 +2293,10 @@ mod tests {
 
         let store = session.store();
         let tx = store.begin(true, TxIsolation::Snapshot).await.expect("tx");
-        tx.set(Entry::new(b"-0:internal".to_vec(), b"v".to_vec()).metadata(ValueType::String as u8))
-            .expect("seed internal");
+        tx.set(
+            Entry::new(b"-0:internal".to_vec(), b"v".to_vec()).metadata(ValueType::String as u8),
+        )
+        .expect("seed internal");
         tx.commit().await.expect("commit");
 
         let (cursor, keys) = run_scan(&session, b"0", 10, None).await;
@@ -1982,10 +2322,8 @@ mod tests {
         seed_string(&session, b"s", b"v").await;
         let store = session.store();
         let tx = store.begin(true, TxIsolation::Snapshot).await.expect("tx");
-        tx.set(
-            Entry::new(session.public_key(b"l"), b"v".to_vec()).metadata(ValueType::List as u8),
-        )
-        .expect("seed list");
+        tx.set(Entry::new(session.public_key(b"l"), b"v".to_vec()).metadata(ValueType::List as u8))
+            .expect("seed list");
         tx.commit().await.expect("commit");
 
         let reply = exec(

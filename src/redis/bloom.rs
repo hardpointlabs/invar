@@ -36,9 +36,11 @@ use std::collections::HashMap;
 use bytes::Bytes;
 use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 
+use crate::common::namespace::{
+    self, new_namespace, resolve_prefix, resolve_prefix_for_write, ElementPrefix,
+};
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use crate::common::session::Session;
-use crate::common::namespace::{self, new_namespace, resolve_prefix, resolve_prefix_for_write, ElementPrefix};
 use crate::common::ValueType;
 use crate::resp::RespValue;
 
@@ -962,14 +964,17 @@ impl WireOp for InfoWire {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kv::kv::TxIsolation;
     use crate::testutil::test_session;
+    use kv::kv::TxIsolation;
 
     /// Runs a batch of ops through a single writable transaction and renders
     /// each reply (the unit-test equivalent of `kvs.Update` in the Go tests).
     async fn run_ops(session: &Session, ops: Vec<QueuedOp>) -> Vec<RespValue> {
         let store = session.store();
-        let tx = store.begin(true, TxIsolation::Snapshot).await.expect("write tx");
+        let tx = store
+            .begin(true, TxIsolation::Snapshot)
+            .await
+            .expect("write tx");
         let mut replies = Vec::with_capacity(ops.len());
         for op in ops {
             let outcome = op.db_op.run(&*tx).await;
@@ -986,7 +991,10 @@ mod tests {
         R: Send + 'static,
     {
         let store = session.store();
-        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
+        let tx = store
+            .begin(false, TxIsolation::Snapshot)
+            .await
+            .expect("read tx");
         let value = f(&*tx).await;
         drop(tx);
         value
@@ -1023,7 +1031,9 @@ mod tests {
 
     /// The prefix a command would use for the filter at `meta_key`.
     async fn prefix_for(tx: &dyn Tx, meta_key: &[u8], page_prefix: &[u8]) -> ElementPrefix {
-        resolve_prefix_for_write(tx, meta_key, page_prefix).await.expect("prefix")
+        resolve_prefix_for_write(tx, meta_key, page_prefix)
+            .await
+            .expect("prefix")
     }
 
     fn items(range: std::ops::Range<u32>) -> Vec<Bytes> {
@@ -1031,10 +1041,17 @@ mod tests {
     }
 
     /// Runs the op on a legacy twin and on the namespaced one; replies must match.
-    async fn both(legacy: &Session, ns: &Session, build: impl Fn(&Session) -> QueuedOp) -> RespValue {
+    async fn both(
+        legacy: &Session,
+        ns: &Session,
+        build: impl Fn(&Session) -> QueuedOp,
+    ) -> RespValue {
         let a = crate::testutil::exec(legacy, build(legacy)).await;
         let b = crate::testutil::exec(ns, build(ns)).await;
-        assert_eq!(a, b, "a namespaced bloom filter must answer exactly like a legacy one");
+        assert_eq!(
+            a, b,
+            "a namespaced bloom filter must answer exactly like a legacy one"
+        );
         a
     }
 
@@ -1051,7 +1068,10 @@ mod tests {
         // Reads: items that were added and items that were not.
         both(&legacy, &ns, |s| exists(s, b"bf", b"item-7")).await;
         both(&legacy, &ns, |s| exists(s, b"bf", b"never-added")).await;
-        both(&legacy, &ns, |s| mexists(s, b"bf", &[items(0..3), items(900..903)].concat())).await;
+        both(&legacy, &ns, |s| {
+            mexists(s, b"bf", &[items(0..3), items(900..903)].concat())
+        })
+        .await;
         both(&legacy, &ns, |s| info(s, b"bf")).await;
 
         // Writes.
@@ -1059,21 +1079,41 @@ mod tests {
         both(&legacy, &ns, |s| add(s, b"bf", b"item-7")).await;
         both(&legacy, &ns, |s| madd(s, b"bf", &items(200..260))).await;
         both(&legacy, &ns, |s| {
-            insert(s, b"bf", InsertInfo {
-                capacity: 0, error: 0.0, expansion: 0, no_create: true, non_scaling: false,
-                items: items(300..310),
-            })
+            insert(
+                s,
+                b"bf",
+                InsertInfo {
+                    capacity: 0,
+                    error: 0.0,
+                    expansion: 0,
+                    no_create: true,
+                    non_scaling: false,
+                    items: items(300..310),
+                },
+            )
         })
         .await;
-        both(&legacy, &ns, |s| mexists(s, b"bf", &[items(0..3), items(200..203), items(300..303)].concat())).await;
+        both(&legacy, &ns, |s| {
+            mexists(
+                s,
+                b"bf",
+                &[items(0..3), items(200..203), items(300..303)].concat(),
+            )
+        })
+        .await;
         both(&legacy, &ns, |s| info(s, b"bf")).await;
         both(&legacy, &ns, |s| reserve(s, b"bf", 0.01, 100, 2, false)).await; // the key exists
 
         // The pages live under the namespace, none under the name-derived prefix,
         // and the meta entry still records it.
-        assert_eq!(crate::testutil::entries_under(&ns, &ns.private_key(b"bf")).await, 0);
+        assert_eq!(
+            crate::testutil::entries_under(&ns, &ns.private_key(b"bf")).await,
+            0
+        );
         assert!(crate::testutil::entries_under(&ns, &ns_b).await > 0);
-        let meta = crate::testutil::stored_type_byte(&ns, &ns.public_key(b"bf")).await.unwrap();
+        let meta = crate::testutil::stored_type_byte(&ns, &ns.public_key(b"bf"))
+            .await
+            .unwrap();
         assert_eq!(meta, TYPE_BLOOM | crate::common::namespace::NAMESPACE_FLAG);
     }
 
@@ -1084,16 +1124,36 @@ mod tests {
         crate::testutil::exec(&s, add(&s, b"by_add", b"a")).await;
         crate::testutil::exec(&s, madd(&s, b"by_madd", &items(0..3))).await;
         crate::testutil::exec(&s, reserve(&s, b"by_reserve", 0.01, 100, 2, false)).await;
-        crate::testutil::exec(&s, insert(&s, b"by_insert", InsertInfo {
-            capacity: 0, error: 0.0, expansion: 0, no_create: false, non_scaling: false, items: items(0..3),
-        })).await;
+        crate::testutil::exec(
+            &s,
+            insert(
+                &s,
+                b"by_insert",
+                InsertInfo {
+                    capacity: 0,
+                    error: 0.0,
+                    expansion: 0,
+                    no_create: false,
+                    non_scaling: false,
+                    items: items(0..3),
+                },
+            ),
+        )
+        .await;
         let mut seen = std::collections::HashSet::new();
         for key in ["by_add", "by_madd", "by_reserve", "by_insert"] {
             let ns = crate::testutil::namespace_of(&s, key.as_bytes()).await;
             assert!(seen.insert(ns.clone()), "{key}: namespaces must be unique");
-            assert_eq!(crate::testutil::entries_under(&s, &s.private_key(key.as_bytes())).await, 0, "{key}: nothing under the name");
+            assert_eq!(
+                crate::testutil::entries_under(&s, &s.private_key(key.as_bytes())).await,
+                0,
+                "{key}: nothing under the name"
+            );
             if key != "by_reserve" {
-                assert!(crate::testutil::entries_under(&s, &ns).await > 0, "{key}: pages live in the namespace");
+                assert!(
+                    crate::testutil::entries_under(&s, &ns).await > 0,
+                    "{key}: pages live in the namespace"
+                );
             }
         }
     }
@@ -1105,7 +1165,10 @@ mod tests {
         crate::testutil::exec(&s, crate::keys::expire(&s, b"bf", 100)).await;
         crate::testutil::exec(&s, add(&s, b"bf", b"b")).await;
         let ttl = crate::testutil::exec(&s, crate::keys::ttl(&s, b"bf")).await;
-        assert!(matches!(ttl, RespValue::Integer(n) if (90..=100).contains(&n)), "ttl was {ttl:?}");
+        assert!(
+            matches!(ttl, RespValue::Integer(n) if (90..=100).contains(&n)),
+            "ttl was {ttl:?}"
+        );
     }
 
     #[tokio::test]
@@ -1351,13 +1414,21 @@ mod tests {
 
         // Add 20 items — enough to overflow the tiny initial filter.
         let store = session.store();
-        let tx = store.begin(true, TxIsolation::Snapshot).await.expect("write tx");
+        let tx = store
+            .begin(true, TxIsolation::Snapshot)
+            .await
+            .expect("write tx");
         let meta_key = session.public_key(b"bf");
         let page_prefix = session.private_key(b"bf");
         for i in 0u8..20 {
-            add_one(&*tx, &meta_key, &prefix_for(&*tx, &meta_key, &page_prefix).await, &[i])
-                .await
-                .expect("add");
+            add_one(
+                &*tx,
+                &meta_key,
+                &prefix_for(&*tx, &meta_key, &page_prefix).await,
+                &[i],
+            )
+            .await
+            .expect("add");
         }
         tx.commit().await.expect("commit");
 
@@ -1374,9 +1445,14 @@ mod tests {
                 let page_prefix = session.private_key(b"bf");
                 let item = [i];
                 Box::pin(async move {
-                    exists_one(tx, &meta_key, &prefix_for(tx, &meta_key, &page_prefix).await, &item)
-                        .await
-                        .expect("exists")
+                    exists_one(
+                        tx,
+                        &meta_key,
+                        &prefix_for(tx, &meta_key, &page_prefix).await,
+                        &item,
+                    )
+                    .await
+                    .expect("exists")
                 })
             })
             .await;
@@ -1390,13 +1466,21 @@ mod tests {
         run_ops(&session, vec![reserve(&session, b"bf", 0.01, 5, 2, true)]).await;
 
         let store = session.store();
-        let tx = store.begin(true, TxIsolation::Snapshot).await.expect("write tx");
+        let tx = store
+            .begin(true, TxIsolation::Snapshot)
+            .await
+            .expect("write tx");
         let meta_key = session.public_key(b"bf");
         let page_prefix = session.private_key(b"bf");
         for i in 0u8..100 {
-            add_one(&*tx, &meta_key, &prefix_for(&*tx, &meta_key, &page_prefix).await, &[i])
-                .await
-                .expect("add");
+            add_one(
+                &*tx,
+                &meta_key,
+                &prefix_for(&*tx, &meta_key, &page_prefix).await,
+                &[i],
+            )
+            .await
+            .expect("add");
         }
         tx.commit().await.expect("commit");
 
@@ -1410,7 +1494,11 @@ mod tests {
         // meta, so `add_one` treats it as absent and overwrites it with a
         // fresh filter — mirroring the Go behavior exactly.
         let session = test_session();
-        run_ops(&session, vec![crate::strings::set(&session, b"k", b"hi", None)]).await;
+        run_ops(
+            &session,
+            vec![crate::strings::set(&session, b"k", b"hi", None)],
+        )
+        .await;
         let replies = run_ops(&session, vec![add(&session, b"k", b"item")]).await;
         assert_eq!(expect_int(&replies), 1);
     }
@@ -1560,30 +1648,51 @@ mod tests {
         let items = pseudo_random_items(40);
 
         let store = session.store();
-        let tx = store.begin(true, TxIsolation::Snapshot).await.expect("write tx");
+        let tx = store
+            .begin(true, TxIsolation::Snapshot)
+            .await
+            .expect("write tx");
         let meta_key = session.public_key(b"bf");
         let page_prefix = session.private_key(b"bf");
         // First add per item is new (1); a repeat in the same session must be a
         // no-op (0) — mirroring Go's duplicate property.
         for (i, item) in items.iter().enumerate() {
-            let r = add_one(&*tx, &meta_key, &prefix_for(&*tx, &meta_key, &page_prefix).await, item)
-                .await
-                .expect("add");
+            let r = add_one(
+                &*tx,
+                &meta_key,
+                &prefix_for(&*tx, &meta_key, &page_prefix).await,
+                item,
+            )
+            .await
+            .expect("add");
             assert_eq!(r, 1, "first add of item {i} must be new");
         }
         for item in &items {
-            let r = add_one(&*tx, &meta_key, &prefix_for(&*tx, &meta_key, &page_prefix).await, item)
-                .await
-                .expect("add");
+            let r = add_one(
+                &*tx,
+                &meta_key,
+                &prefix_for(&*tx, &meta_key, &page_prefix).await,
+                item,
+            )
+            .await
+            .expect("add");
             assert_eq!(r, 0, "repeat add must be a no-op");
         }
         tx.commit().await.expect("commit");
 
-        let read_tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
+        let read_tx = store
+            .begin(false, TxIsolation::Snapshot)
+            .await
+            .expect("read tx");
         for item in &items {
-            let present = exists_one(&*read_tx, &meta_key, &prefix_for(&*read_tx, &meta_key, &page_prefix).await, item)
-                .await
-                .expect("exists");
+            let present = exists_one(
+                &*read_tx,
+                &meta_key,
+                &prefix_for(&*read_tx, &meta_key, &page_prefix).await,
+                item,
+            )
+            .await
+            .expect("exists");
             assert!(present, "false negative for {item:?}");
         }
         drop(read_tx);
@@ -1604,30 +1713,51 @@ mod tests {
         let page_prefix = session.private_key(b"bf");
         let item = |i: usize| vec![(i >> 8) as u8, i as u8, (i & 0xff) as u8];
         {
-            let tx = store.begin(true, TxIsolation::Snapshot).await.expect("write tx");
+            let tx = store
+                .begin(true, TxIsolation::Snapshot)
+                .await
+                .expect("write tx");
             for i in 0..n {
-                add_one(&*tx, &meta_key, &prefix_for(&*tx, &meta_key, &page_prefix).await, &item(i))
-                    .await
-                    .expect("add");
+                add_one(
+                    &*tx,
+                    &meta_key,
+                    &prefix_for(&*tx, &meta_key, &page_prefix).await,
+                    &item(i),
+                )
+                .await
+                .expect("add");
             }
             tx.commit().await.expect("commit");
         }
 
-        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
+        let tx = store
+            .begin(false, TxIsolation::Snapshot)
+            .await
+            .expect("read tx");
         let mut false_positives = 0usize;
         for i in n..n * 2 {
-            if exists_one(&*tx, &meta_key, &prefix_for(&*tx, &meta_key, &page_prefix).await, &item(i))
-                .await
-                .expect("exists")
+            if exists_one(
+                &*tx,
+                &meta_key,
+                &prefix_for(&*tx, &meta_key, &page_prefix).await,
+                &item(i),
+            )
+            .await
+            .expect("exists")
             {
                 false_positives += 1;
             }
         }
         let mut missed = 0usize;
         for i in 0..n {
-            if !exists_one(&*tx, &meta_key, &prefix_for(&*tx, &meta_key, &page_prefix).await, &item(i))
-                .await
-                .expect("exists")
+            if !exists_one(
+                &*tx,
+                &meta_key,
+                &prefix_for(&*tx, &meta_key, &page_prefix).await,
+                &item(i),
+            )
+            .await
+            .expect("exists")
             {
                 missed += 1;
             }

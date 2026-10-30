@@ -82,9 +82,11 @@ impl FromStr for ListenAddr {
         if let Ok(addr) = s.parse::<SocketAddr>() {
             return Ok(ListenAddr::Tcp(addr));
         }
-        let mut addrs = s
-            .to_socket_addrs()
-            .map_err(|e| format!("couldn't resolve '{s}' (expected host:port or a socket path containing '/'): {e}"))?;
+        let mut addrs = s.to_socket_addrs().map_err(|e| {
+            format!(
+                "couldn't resolve '{s}' (expected host:port or a socket path containing '/'): {e}"
+            )
+        })?;
         addrs
             .next()
             .map(ListenAddr::Tcp)
@@ -209,7 +211,8 @@ impl RedisListener {
         let pubsub = self.pubsub.clone();
         let conflict_retry_count = self.conflict_retry_count;
         tokio::spawn(async move {
-            let result = handle_connection(socket, store, registry, pubsub, conflict_retry_count).await;
+            let result =
+                handle_connection(socket, store, registry, pubsub, conflict_retry_count).await;
             crate::server::conn_closed();
             if let Err(e) = result {
                 tracing::error!("invar: connection error: {e}");
@@ -396,7 +399,8 @@ async fn handle_connection<S: ClientStream>(
                     } else {
                         match name_lower.as_slice() {
                             b"subscribe" => {
-                                handle_subscribe(&mut framed, &mut subs, &args[1..], false, false).await?;
+                                handle_subscribe(&mut framed, &mut subs, &args[1..], false, false)
+                                    .await?;
                             }
                             b"psubscribe" => {
                                 handle_psubscribe(&mut framed, &mut subs, &args[1..]).await?;
@@ -404,7 +408,8 @@ async fn handle_connection<S: ClientStream>(
                             b"ssubscribe" => {
                                 // SSUBSCRIBE is treated the same as SUBSCRIBE in
                                 // single-node mode.
-                                handle_subscribe(&mut framed, &mut subs, &args[1..], false, true).await?;
+                                handle_subscribe(&mut framed, &mut subs, &args[1..], false, true)
+                                    .await?;
                             }
                             b"unsubscribe" | b"punsubscribe" | b"sunsubscribe" => {
                                 // Called outside subscribe mode with no subscriptions;
@@ -416,11 +421,15 @@ async fn handle_connection<S: ClientStream>(
                                 } else {
                                     b"unsubscribe".as_ref()
                                 };
-                                framed.send(RespValue::Array(Some(vec![
-                                    RespValue::BulkString(Some(Bytes::copy_from_slice(kind_byte))),
-                                    RespValue::BulkString(None),
-                                    RespValue::Integer(0),
-                                ]))).await?;
+                                framed
+                                    .send(RespValue::Array(Some(vec![
+                                        RespValue::BulkString(Some(Bytes::copy_from_slice(
+                                            kind_byte,
+                                        ))),
+                                        RespValue::BulkString(None),
+                                        RespValue::Integer(0),
+                                    ])))
+                                    .await?;
                             }
                             _ => {
                                 // Normal command dispatch. Once a command
@@ -508,7 +517,10 @@ async fn handle_subscribe_mode_command<S: ClientStream>(
             // PING in subscribe mode replies with a push-style array, not the
             // plain +PONG, when no message is given; with a message it echoes
             // the message. This matches real Redis RESP2 subscribe-mode PING.
-            let payload = args.get(1).cloned().unwrap_or_else(|| Bytes::from_static(b""));
+            let payload = args
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| Bytes::from_static(b""));
             framed
                 .send(RespValue::Array(Some(vec![
                     RespValue::BulkString(Some(Bytes::from_static(b"pong"))),
@@ -853,9 +865,8 @@ mod tests {
         drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
         assert!(path.exists());
 
-        let handle = tokio::spawn(
-            RedisListener::new(ListenAddr::Unix(path.clone()), test_store()).serve(),
-        );
+        let handle =
+            tokio::spawn(RedisListener::new(ListenAddr::Unix(path.clone()), test_store()).serve());
         let mut client = loop {
             match tokio::net::UnixStream::connect(&path).await {
                 Ok(c) => break c,
@@ -890,7 +901,10 @@ mod tests {
     // Pub/Sub integration tests
     // ----------------------------------------------------------------
 
-    async fn spawn_listener() -> (std::net::SocketAddr, tokio::task::JoinHandle<std::io::Result<()>>) {
+    async fn spawn_listener() -> (
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<std::io::Result<()>>,
+    ) {
         let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = probe.local_addr().unwrap();
         drop(probe);
@@ -957,8 +971,9 @@ mod tests {
         .await
         .unwrap();
         match next_reply(conn).await {
-            RespValue::BulkString(Some(body)) => String::from_utf8_lossy(&body)
-                .contains(&format!("addr={addr} ")),
+            RespValue::BulkString(Some(body)) => {
+                String::from_utf8_lossy(&body).contains(&format!("addr={addr} "))
+            }
             other => panic!("unexpected CLIENT LIST reply: {other:?}"),
         }
     }
@@ -1054,8 +1069,14 @@ mod tests {
         let confirm = next_reply(&mut sub).await;
         match &confirm {
             RespValue::Array(Some(v)) => {
-                assert_eq!(v[0], RespValue::BulkString(Some(Bytes::from_static(b"subscribe"))));
-                assert_eq!(v[1], RespValue::BulkString(Some(Bytes::from_static(b"news"))));
+                assert_eq!(
+                    v[0],
+                    RespValue::BulkString(Some(Bytes::from_static(b"subscribe")))
+                );
+                assert_eq!(
+                    v[1],
+                    RespValue::BulkString(Some(Bytes::from_static(b"news")))
+                );
                 assert_eq!(v[2], RespValue::Integer(1));
             }
             _ => panic!("unexpected reply: {confirm:?}"),
@@ -1071,9 +1092,18 @@ mod tests {
         let msg = next_reply(&mut sub).await;
         match &msg {
             RespValue::Array(Some(v)) => {
-                assert_eq!(v[0], RespValue::BulkString(Some(Bytes::from_static(b"message"))));
-                assert_eq!(v[1], RespValue::BulkString(Some(Bytes::from_static(b"news"))));
-                assert_eq!(v[2], RespValue::BulkString(Some(Bytes::from_static(b"breaking"))));
+                assert_eq!(
+                    v[0],
+                    RespValue::BulkString(Some(Bytes::from_static(b"message")))
+                );
+                assert_eq!(
+                    v[1],
+                    RespValue::BulkString(Some(Bytes::from_static(b"news")))
+                );
+                assert_eq!(
+                    v[2],
+                    RespValue::BulkString(Some(Bytes::from_static(b"breaking")))
+                );
             }
             _ => panic!("unexpected message push: {msg:?}"),
         }
@@ -1100,8 +1130,14 @@ mod tests {
         let confirm = next_reply(&mut sub).await;
         match &confirm {
             RespValue::Array(Some(v)) => {
-                assert_eq!(v[0], RespValue::BulkString(Some(Bytes::from_static(b"psubscribe"))));
-                assert_eq!(v[1], RespValue::BulkString(Some(Bytes::from_static(b"news.*"))));
+                assert_eq!(
+                    v[0],
+                    RespValue::BulkString(Some(Bytes::from_static(b"psubscribe")))
+                );
+                assert_eq!(
+                    v[1],
+                    RespValue::BulkString(Some(Bytes::from_static(b"news.*")))
+                );
                 assert_eq!(v[2], RespValue::Integer(1));
             }
             _ => panic!("unexpected: {confirm:?}"),
@@ -1117,10 +1153,22 @@ mod tests {
         let msg = next_reply(&mut sub).await;
         match &msg {
             RespValue::Array(Some(v)) => {
-                assert_eq!(v[0], RespValue::BulkString(Some(Bytes::from_static(b"pmessage"))));
-                assert_eq!(v[1], RespValue::BulkString(Some(Bytes::from_static(b"news.*"))));
-                assert_eq!(v[2], RespValue::BulkString(Some(Bytes::from_static(b"news.sports"))));
-                assert_eq!(v[3], RespValue::BulkString(Some(Bytes::from_static(b"goal"))));
+                assert_eq!(
+                    v[0],
+                    RespValue::BulkString(Some(Bytes::from_static(b"pmessage")))
+                );
+                assert_eq!(
+                    v[1],
+                    RespValue::BulkString(Some(Bytes::from_static(b"news.*")))
+                );
+                assert_eq!(
+                    v[2],
+                    RespValue::BulkString(Some(Bytes::from_static(b"news.sports")))
+                );
+                assert_eq!(
+                    v[3],
+                    RespValue::BulkString(Some(Bytes::from_static(b"goal")))
+                );
             }
             _ => panic!("unexpected: {msg:?}"),
         }
@@ -1237,7 +1285,10 @@ mod tests {
         let pong = next_reply(&mut sub).await;
         match &pong {
             RespValue::Array(Some(v)) => {
-                assert_eq!(v[0], RespValue::BulkString(Some(Bytes::from_static(b"pong"))));
+                assert_eq!(
+                    v[0],
+                    RespValue::BulkString(Some(Bytes::from_static(b"pong")))
+                );
                 // payload is empty
                 assert_eq!(v[1], RespValue::BulkString(Some(Bytes::from_static(b""))));
             }
@@ -1312,7 +1363,10 @@ mod tests {
             RespValue::Array(Some(v)) => {
                 // [channel, count]
                 assert_eq!(v.len(), 2);
-                assert_eq!(v[0], RespValue::BulkString(Some(Bytes::from_static(b"sports"))));
+                assert_eq!(
+                    v[0],
+                    RespValue::BulkString(Some(Bytes::from_static(b"sports")))
+                );
                 assert_eq!(v[1], RespValue::Integer(2));
             }
             _ => panic!("expected array, got {ns_reply:?}"),

@@ -42,13 +42,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 
+use crate::common::namespace::{
+    self, base_type, new_namespace, resolve_prefix, resolve_prefix_for_write, ElementPrefix,
+};
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
-use smallvec::{smallvec, SmallVec};
 use crate::common::session::Session;
-use crate::common::namespace::{self, base_type, new_namespace, resolve_prefix, resolve_prefix_for_write, ElementPrefix};
 use crate::common::ValueType;
 use crate::pattern::{GlobPattern, PatternMatcher};
 use crate::resp::RespValue;
+use smallvec::{smallvec, SmallVec};
 
 /// Metadata type byte stamped on every set entry (sentinel and members),
 /// matching `ValueType::Set`.
@@ -162,7 +164,14 @@ async fn write_sentinel(
     count: u32,
     prefix: &ElementPrefix,
 ) -> Result<(), DbError> {
-    namespace::write_sentinel(tx, public_key, count.to_be_bytes().to_vec(), TYPE_SET, prefix).await
+    namespace::write_sentinel(
+        tx,
+        public_key,
+        count.to_be_bytes().to_vec(),
+        TYPE_SET,
+        prefix,
+    )
+    .await
 }
 
 /// Loads every member of a set into a set, mirroring Go's `loadSetMembers`.
@@ -177,7 +186,9 @@ async fn load_set_members(
         return Ok(HashSet::new());
     }
     let node_prefix = resolve_prefix(tx, public_key, node_prefix).await?;
-    let mut it = tx.new_prefix_iterator(&members_prefix(&node_prefix)).await?;
+    let mut it = tx
+        .new_prefix_iterator(&members_prefix(&node_prefix))
+        .await?;
     let mut members = HashSet::new();
     while it.next().await {
         if let Some(item) = it.item() {
@@ -198,7 +209,9 @@ async fn load_set_members(
 /// clear a destination before writing its new result.
 async fn clear_set(tx: &dyn Tx, public_key: &[u8], node_prefix: &[u8]) -> Result<(), DbError> {
     let node_prefix = resolve_prefix(tx, public_key, node_prefix).await?;
-    let mut it = tx.new_prefix_iterator(&members_prefix(&node_prefix)).await?;
+    let mut it = tx
+        .new_prefix_iterator(&members_prefix(&node_prefix))
+        .await?;
     let mut keys = Vec::new();
     while it.next().await {
         if let Some(item) = it.item() {
@@ -232,11 +245,8 @@ async fn store_set_result(
     let dest_prefix = new_namespace(dest_node_prefix)?;
     for member in members {
         tx.set(
-            Entry::new(
-                internal_member_key(&dest_prefix, member),
-                member.clone(),
-            )
-            .metadata(TYPE_SET),
+            Entry::new(internal_member_key(&dest_prefix, member), member.clone())
+                .metadata(TYPE_SET),
         )?;
     }
     write_sentinel(tx, dest_public_key, members.len() as u32, &dest_prefix).await?;
@@ -371,7 +381,10 @@ pub fn smove(session: &Session, src: &[u8], dst: &[u8], member: &[u8]) -> Queued
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
-        keys: Some(smallvec![String::from_utf8_lossy(&session.public_key(src)).into_owned(), String::from_utf8_lossy(&session.public_key(dst)).into_owned()]),
+        keys: Some(smallvec![
+            String::from_utf8_lossy(&session.public_key(src)).into_owned(),
+            String::from_utf8_lossy(&session.public_key(dst)).into_owned()
+        ]),
     }
 }
 
@@ -424,7 +437,10 @@ pub fn sdiffstore(session: &Session, dest: &[u8], keys: &[Bytes]) -> QueuedOp {
         keys: Some({
             let mut ks = SmallVec::<[String; 2]>::new();
             ks.push(String::from_utf8_lossy(&session.public_key(dest)).into_owned());
-            ks.extend(keys.iter().map(|k| String::from_utf8_lossy(&session.public_key(k)).into_owned()));
+            ks.extend(
+                keys.iter()
+                    .map(|k| String::from_utf8_lossy(&session.public_key(k)).into_owned()),
+            );
             ks
         }),
     }
@@ -442,7 +458,10 @@ pub fn sinterstore(session: &Session, dest: &[u8], keys: &[Bytes]) -> QueuedOp {
         keys: Some({
             let mut ks = SmallVec::<[String; 2]>::new();
             ks.push(String::from_utf8_lossy(&session.public_key(dest)).into_owned());
-            ks.extend(keys.iter().map(|k| String::from_utf8_lossy(&session.public_key(k)).into_owned()));
+            ks.extend(
+                keys.iter()
+                    .map(|k| String::from_utf8_lossy(&session.public_key(k)).into_owned()),
+            );
             ks
         }),
     }
@@ -460,7 +479,10 @@ pub fn sunionstore(session: &Session, dest: &[u8], keys: &[Bytes]) -> QueuedOp {
         keys: Some({
             let mut ks = SmallVec::<[String; 2]>::new();
             ks.push(String::from_utf8_lossy(&session.public_key(dest)).into_owned());
-            ks.extend(keys.iter().map(|k| String::from_utf8_lossy(&session.public_key(k)).into_owned()));
+            ks.extend(
+                keys.iter()
+                    .map(|k| String::from_utf8_lossy(&session.public_key(k)).into_owned()),
+            );
             ks
         }),
     }
@@ -796,8 +818,11 @@ impl DbOp for SMoveOp {
                 let present = match set_count(tx, &src_public_key).await? {
                     None => false,
                     Some(_) => {
-                        let src_prefix = resolve_prefix(tx, &src_public_key, &src_node_prefix).await?;
-                        tx.get(&internal_member_key(&src_prefix, &member)).await.is_ok()
+                        let src_prefix =
+                            resolve_prefix(tx, &src_public_key, &src_node_prefix).await?;
+                        tx.get(&internal_member_key(&src_prefix, &member))
+                            .await
+                            .is_ok()
                     }
                 };
                 let result: DbResult = Box::new(present);
@@ -823,7 +848,8 @@ impl DbOp for SMoveOp {
                 write_sentinel(tx, &src_public_key, src_remaining, &src_prefix).await?;
             }
 
-            let dst_prefix = resolve_prefix_for_write(tx, &dst_public_key, &dst_node_prefix).await?;
+            let dst_prefix =
+                resolve_prefix_for_write(tx, &dst_public_key, &dst_node_prefix).await?;
             let dst_internal = internal_member_key(&dst_prefix, &member);
             match tx.get(&dst_internal).await {
                 Ok(_) => {}
@@ -1100,7 +1126,9 @@ impl DbOp for SScanOp {
                 Err(e) => return Err(e),
             }
             // Load all members into sorted order.
-            let mut it = tx.new_prefix_iterator(&members_prefix(&node_prefix)).await?;
+            let mut it = tx
+                .new_prefix_iterator(&members_prefix(&node_prefix))
+                .await?;
             let mut all_members: Vec<Vec<u8>> = Vec::new();
             while it.next().await {
                 if let Some(item) = it.item() {
@@ -1187,15 +1215,18 @@ impl WireOp for SScanWire {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kv::kv::TxIsolation;
     use crate::testutil::test_session;
+    use kv::kv::TxIsolation;
 
     /// Runs one op through its own transaction and commits if it mutates,
     /// then renders the reply (the unit-test equivalent of Go's
     /// `kvs.Update`/`kvs.Read` calls).
     async fn exec(session: &Session, op: QueuedOp) -> RespValue {
         let store = session.store();
-        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
+        let tx = store
+            .begin(op.is_mutating, TxIsolation::Snapshot)
+            .await
+            .expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -1206,7 +1237,10 @@ mod tests {
     /// Loads the members stored under `key` for direct inspection.
     async fn load(session: &Session, key: &[u8]) -> HashSet<Vec<u8>> {
         let store = session.store();
-        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
+        let tx = store
+            .begin(false, TxIsolation::Snapshot)
+            .await
+            .expect("read tx");
         let public_key = session.public_key(key);
         let node_prefix = session.private_key(key);
         let members = load_set_members(&*tx, &public_key, &node_prefix)
@@ -1267,7 +1301,10 @@ mod tests {
     // --- namespaced layout (RFC 0001) ---
 
     fn bs(parts: &[&str]) -> Vec<Bytes> {
-        parts.iter().map(|p| Bytes::copy_from_slice(p.as_bytes())).collect()
+        parts
+            .iter()
+            .map(|p| Bytes::copy_from_slice(p.as_bytes()))
+            .collect()
     }
 
     /// Unordered replies (SMEMBERS, SUNION, ...) are compared sorted.
@@ -1282,10 +1319,17 @@ mod tests {
     }
 
     /// Runs the op on a legacy twin and on the namespaced one; replies must match.
-    async fn both(legacy: &Session, namespaced: &Session, build: impl Fn(&Session) -> QueuedOp) -> RespValue {
+    async fn both(
+        legacy: &Session,
+        namespaced: &Session,
+        build: impl Fn(&Session) -> QueuedOp,
+    ) -> RespValue {
         let a = sorted_reply(crate::testutil::exec(legacy, build(legacy)).await);
         let b = sorted_reply(crate::testutil::exec(namespaced, build(namespaced)).await);
-        assert_eq!(a, b, "a namespaced set must answer exactly like a legacy one");
+        assert_eq!(
+            a, b,
+            "a namespaced set must answer exactly like a legacy one"
+        );
         a
     }
 
@@ -1336,8 +1380,16 @@ mod tests {
         // are gone and the result is a new set, in a namespace of its own.
         both(&legacy, &ns, |s| sunionstore(s, b"d", &bs(&["a", "b"]))).await;
         both(&legacy, &ns, |s| smembers(s, b"d")).await;
-        assert_eq!(crate::testutil::entries_under(&ns, &ns_d).await, 0, "the old destination's elements must be cleared");
-        assert_ne!(crate::testutil::namespace_of(&ns, b"d").await, ns_d, "a stored result is a new set");
+        assert_eq!(
+            crate::testutil::entries_under(&ns, &ns_d).await,
+            0,
+            "the old destination's elements must be cleared"
+        );
+        assert_ne!(
+            crate::testutil::namespace_of(&ns, b"d").await,
+            ns_d,
+            "a stored result is a new set"
+        );
         both(&legacy, &ns, |s| sinterstore(s, b"d", &bs(&["a", "c"]))).await;
         both(&legacy, &ns, |s| sdiffstore(s, b"d", &bs(&["b", "a"]))).await;
         both(&legacy, &ns, |s| smembers(s, b"d")).await;
@@ -1346,27 +1398,42 @@ mod tests {
         let before = both(&legacy, &ns, |s| scard(s, b"b")).await;
         crate::testutil::exec(&ns, spop(&ns, b"b")).await;
         crate::testutil::exec(&legacy, spop(&legacy, b"b")).await;
-        let (RespValue::Integer(before), RespValue::Integer(after)) = (before, crate::testutil::exec(&ns, scard(&ns, b"b")).await) else {
+        let (RespValue::Integer(before), RespValue::Integer(after)) =
+            (before, crate::testutil::exec(&ns, scard(&ns, b"b")).await)
+        else {
             panic!("SCARD must reply integers")
         };
         assert_eq!(after, before - 1);
 
         // Nothing under the name-derived prefixes of namespaced sets; sentinel still flagged.
         for k in [&b"a"[..], b"b", b"d"] {
-            assert_eq!(crate::testutil::entries_under(&ns, &ns.private_key(k)).await, 0);
-            let meta = crate::testutil::stored_type_byte(&ns, &ns.public_key(k)).await.unwrap();
+            assert_eq!(
+                crate::testutil::entries_under(&ns, &ns.private_key(k)).await,
+                0
+            );
+            let meta = crate::testutil::stored_type_byte(&ns, &ns.public_key(k))
+                .await
+                .unwrap();
             assert_eq!(meta, TYPE_SET | crate::common::namespace::NAMESPACE_FLAG);
         }
 
         // Emptying a namespaced set removes the sentinel and every member.
         let rest = both(&legacy, &ns, |s| smembers(s, b"a")).await;
-        let RespValue::Array(Some(rest)) = rest else { panic!("SMEMBERS must reply an array") };
+        let RespValue::Array(Some(rest)) = rest else {
+            panic!("SMEMBERS must reply an array")
+        };
         let rest: Vec<Bytes> = rest
             .into_iter()
-            .map(|m| match m { RespValue::BulkString(Some(b)) => b, other => panic!("{other:?}") })
+            .map(|m| match m {
+                RespValue::BulkString(Some(b)) => b,
+                other => panic!("{other:?}"),
+            })
             .collect();
         both(&legacy, &ns, |s| srem(s, b"a", &rest)).await;
-        assert_eq!(crate::testutil::stored_type_byte(&ns, &ns.public_key(b"a")).await, None);
+        assert_eq!(
+            crate::testutil::stored_type_byte(&ns, &ns.public_key(b"a")).await,
+            None
+        );
         assert_eq!(crate::testutil::entries_under(&ns, &ns_a).await, 0);
     }
 
@@ -1382,10 +1449,16 @@ mod tests {
         crate::testutil::exec(&s, sdiffstore(&s, b"by_diff", &bs(&["src", "by_sadd"]))).await;
 
         let mut seen = std::collections::HashSet::new();
-        for key in ["src", "by_sadd", "by_smove", "by_union", "by_inter", "by_diff"] {
+        for key in [
+            "src", "by_sadd", "by_smove", "by_union", "by_inter", "by_diff",
+        ] {
             let ns = crate::testutil::namespace_of(&s, key.as_bytes()).await;
             assert!(crate::testutil::entries_under(&s, &ns).await > 0, "{key}");
-            assert_eq!(crate::testutil::entries_under(&s, &s.private_key(key.as_bytes())).await, 0, "{key}: nothing under the name");
+            assert_eq!(
+                crate::testutil::entries_under(&s, &s.private_key(key.as_bytes())).await,
+                0,
+                "{key}: nothing under the name"
+            );
             assert!(seen.insert(ns), "{key}: namespaces must be unique");
         }
     }
@@ -1399,7 +1472,9 @@ mod tests {
         crate::testutil::exec(&s, sadd(&s, b"s", &bs(&["new"]))).await;
         assert_eq!(
             crate::testutil::exec(&s, smembers(&s, b"s")).await,
-            RespValue::Array(Some(vec![RespValue::BulkString(Some(Bytes::from_static(b"new")))]))
+            RespValue::Array(Some(vec![RespValue::BulkString(Some(Bytes::from_static(
+                b"new"
+            )))]))
         );
     }
 
@@ -1410,7 +1485,10 @@ mod tests {
         crate::testutil::exec(&s, crate::keys::expire(&s, b"a", 100)).await;
         crate::testutil::exec(&s, sadd(&s, b"a", &bs(&["2"]))).await;
         let ttl = crate::testutil::exec(&s, crate::keys::ttl(&s, b"a")).await;
-        assert!(matches!(ttl, RespValue::Integer(n) if (90..=100).contains(&n)), "ttl was {ttl:?}");
+        assert!(
+            matches!(ttl, RespValue::Integer(n) if (90..=100).contains(&n)),
+            "ttl was {ttl:?}"
+        );
     }
 
     #[tokio::test]
@@ -1858,7 +1936,11 @@ mod tests {
     async fn wrong_type_operations_error() {
         let session = test_session();
         let key = b"strkey";
-        exec(&session, crate::strings::set(&session, key, b"plainstring", None)).await;
+        exec(
+            &session,
+            crate::strings::set(&session, key, b"plainstring", None),
+        )
+        .await;
 
         for op in [
             sadd(&session, key, &[Bytes::from_static(b"m")]),
