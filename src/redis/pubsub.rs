@@ -42,11 +42,9 @@
 //!
 //! ## Pattern matching
 //!
-//! `PSUBSCRIBE` / pattern-side `PUBLISH` use [`redis_glob_match`], a faithful
-//! port of Redis's `stringmatchlen()` from `src/util.c`.  It supports `*`
-//! (any sequence of bytes), `?` (any single byte), `[...]` character-class
-//! ranges, and `\`-escaping.  It operates on raw `&[u8]` so it is
-//! byte-correct for binary channel names.
+//! `PSUBSCRIBE` / pattern-side `PUBLISH` use [`GlobPattern`](crate::pattern::GlobPattern),
+//! Redis's glob dialect.  Channel names are matched case-sensitively, as in
+//! Redis.
 
 use std::sync::Arc;
 
@@ -57,6 +55,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamMap;
 use crate::common::{op, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use crate::common::op::NoOp;
+use crate::pattern::{GlobPattern, PatternMatcher};
 use crate::RespValue;
 
 /// Capacity of each per-channel/per-pattern broadcast channel.  Slow consumers
@@ -173,7 +172,7 @@ impl PubSubRegistry {
         // Pattern-matching channels.
         self.patterns.iter().for_each(|entry| {
             let pattern = entry.key();
-            if redis_glob_match(pattern, channel, true) {
+            if GlobPattern::new(pattern.clone()).is_match(channel) {
                 let count = entry.value().receiver_count() as i64;
                 if count > 0 {
                     let msg = PubSubMsg {
@@ -200,12 +199,11 @@ impl PubSubRegistry {
     }
 
     fn active_channels_val(&self, pattern: Option<&[u8]>) -> Vec<Bytes> {
+        let matcher = pattern.map(|pat| GlobPattern::new(Bytes::copy_from_slice(pat)));
         self.channels
             .iter()
             .filter(|e| e.value().receiver_count() > 0)
-            .filter(|e| {
-                pattern.is_none_or(|pat| redis_glob_match(pat, e.key(), true))
-            })
+            .filter(|e| matcher.as_ref().is_none_or(|m| m.is_match(e.key())))
             .map(|e| e.key().clone())
             .collect()
     }
@@ -472,146 +470,6 @@ pub fn pmessage_resp(
 }
 
 // ---------------------------------------------------------------------------
-// Redis glob pattern matcher
-// ---------------------------------------------------------------------------
-
-/// Matches `string` against a Redis glob `pattern`.
-///
-/// This is a byte-level port of Redis's `stringmatchlen()` (`src/util.c`),
-/// quirks included, so `KEYS`, `SCAN MATCH` and the pub/sub pattern commands
-/// agree with it on what a pattern means. Supported syntax:
-///
-/// - `*`  — matches any sequence of bytes (including empty)
-/// - `?`  — matches exactly one byte
-/// - `[abc]` / `[a-z]` — character class; only `^` negates (`!` is an
-///   ordinary member). A reversed range such as `[z-a]` is read as `[a-z]`.
-/// - `\x` — escapes the next character literally
-///
-/// As in Redis, an empty string is matched only by an empty pattern or one
-/// made of `*`s, and callers that want "everything" must special-case a lone
-/// `*`. Backtracking is bounded the same way Redis bounds it, so a pattern
-/// such as `*a*a*a*a*b` cannot take exponential time.
-///
-/// If `nocase` is `true` the comparison is ASCII-case-insensitive.
-pub fn redis_glob_match(pattern: &[u8], string: &[u8], nocase: bool) -> bool {
-    let mut skip_longer_matches = false;
-    glob_match(pattern, string, nocase, &mut skip_longer_matches, 0)
-}
-
-/// Longest chain of nested `*` expansions tried before giving up (as Redis).
-const GLOB_MAX_NESTING: usize = 1000;
-
-fn glob_match(
-    mut pat: &[u8],
-    mut s: &[u8],
-    nocase: bool,
-    skip_longer_matches: &mut bool,
-    nesting: usize,
-) -> bool {
-    // Protection against abusive patterns.
-    if nesting > GLOB_MAX_NESTING {
-        return false;
-    }
-    let fold = |b: u8| if nocase { b.to_ascii_lowercase() } else { b };
-
-    while !pat.is_empty() && !s.is_empty() {
-        match pat[0] {
-            b'*' => {
-                while pat.len() > 1 && pat[1] == b'*' {
-                    pat = &pat[1..];
-                }
-                if pat.len() == 1 {
-                    return true;
-                }
-                while !s.is_empty() {
-                    if glob_match(&pat[1..], s, nocase, skip_longer_matches, nesting + 1) {
-                        return true;
-                    }
-                    if *skip_longer_matches {
-                        return false;
-                    }
-                    s = &s[1..];
-                }
-                // The rest of the pattern matches nowhere in the rest of the
-                // string, so no earlier `*` can help by consuming more.
-                *skip_longer_matches = true;
-                return false;
-            }
-            b'?' => {
-                s = &s[1..];
-                pat = &pat[1..];
-            }
-            b'[' => {
-                pat = &pat[1..];
-                let negate = pat.first() == Some(&b'^');
-                if negate {
-                    pat = &pat[1..];
-                }
-                let mut matched = false;
-                loop {
-                    match pat.first().copied() {
-                        Some(b'\\') if pat.len() >= 2 => {
-                            // An escaped member; Redis compares it case-sensitively.
-                            pat = &pat[1..];
-                            if pat[0] == s[0] {
-                                matched = true;
-                            }
-                            pat = &pat[1..];
-                        }
-                        Some(b']') => {
-                            pat = &pat[1..];
-                            break;
-                        }
-                        // Unterminated class: stop at the end of the pattern.
-                        None => break,
-                        Some(first) => {
-                            if pat.len() >= 3 && pat[1] == b'-' {
-                                let (mut start, mut end) = (first, pat[2]);
-                                if start > end {
-                                    std::mem::swap(&mut start, &mut end);
-                                }
-                                let c = fold(s[0]);
-                                if c >= fold(start) && c <= fold(end) {
-                                    matched = true;
-                                }
-                                pat = &pat[3..];
-                            } else {
-                                if fold(first) == fold(s[0]) {
-                                    matched = true;
-                                }
-                                pat = &pat[1..];
-                            }
-                        }
-                    }
-                }
-                if matched == negate {
-                    return false;
-                }
-                s = &s[1..];
-            }
-            c => {
-                // `\x` matches `x`; a trailing lone `\` matches itself.
-                if c == b'\\' && pat.len() >= 2 {
-                    pat = &pat[1..];
-                }
-                if fold(pat[0]) != fold(s[0]) {
-                    return false;
-                }
-                s = &s[1..];
-                pat = &pat[1..];
-            }
-        }
-        if s.is_empty() {
-            while pat.first() == Some(&b'*') {
-                pat = &pat[1..];
-            }
-            break;
-        }
-    }
-    pat.is_empty() && s.is_empty()
-}
-
-// ---------------------------------------------------------------------------
 
 struct NumSubOp {
     registry: Arc<PubSubRegistry>,
@@ -715,176 +573,6 @@ impl WireOp for ChannelsOp {
 mod tests {
     use super::*;
 
-    // ---- Pattern matcher unit tests ----
-
-    fn m(pat: &str, s: &str) -> bool {
-        redis_glob_match(pat.as_bytes(), s.as_bytes(), false)
-    }
-
-    fn mi(pat: &str, s: &str) -> bool {
-        redis_glob_match(pat.as_bytes(), s.as_bytes(), true)
-    }
-
-    #[test]
-    fn star_matches_anything_but_the_empty_string() {
-        // Redis's matcher never matches the empty string against `*`; KEYS and
-        // SCAN special-case a lone `*` themselves, pub/sub does not (a `*`
-        // pattern subscriber gets nothing published to the empty channel).
-        assert!(!m("*", ""));
-        assert!(m("*", "hello"));
-        assert!(m("*", "hello world"));
-        assert!(m("h*llo", "hllo"));
-        assert!(m("h*llo", "heeeello"));
-        assert!(!m("h*llo", "world"));
-    }
-
-    #[test]
-    fn question_mark_matches_single_byte() {
-        assert!(m("h?llo", "hello"));
-        assert!(!m("h?llo", "hllo"));
-        assert!(!m("h?llo", "heello"));
-        assert!(m("?", "a"));
-        assert!(!m("?", ""));
-        assert!(!m("?", "ab"));
-    }
-
-    #[test]
-    fn character_class_basic() {
-        assert!(m("[abc]", "a"));
-        assert!(m("[abc]", "b"));
-        assert!(m("[abc]", "c"));
-        assert!(!m("[abc]", "d"));
-        assert!(!m("[abc]", ""));
-        assert!(!m("[abc]", "ab")); // class matches exactly one char
-    }
-
-    #[test]
-    fn character_class_range() {
-        assert!(m("[a-z]", "a"));
-        assert!(m("[a-z]", "z"));
-        assert!(m("[a-z]", "m"));
-        assert!(!m("[a-z]", "A"));
-        assert!(!m("[a-z]", "0"));
-        assert!(m("[0-9]", "5"));
-        assert!(!m("[0-9]", "a"));
-    }
-
-    #[test]
-    fn character_class_negation_caret() {
-        assert!(!m("[^abc]", "a"));
-        assert!(!m("[^abc]", "b"));
-        assert!(m("[^abc]", "d"));
-        assert!(m("[^a-z]", "A"));
-        assert!(!m("[^a-z]", "m"));
-    }
-
-    #[test]
-    fn bang_is_an_ordinary_class_member_not_a_negation() {
-        // Only `^` negates in Redis: `[!a]` is the set {'!', 'a'}.
-        assert!(m("[!a]", "!"));
-        assert!(m("[!a]", "a"));
-        assert!(!m("[!a]", "b"));
-    }
-
-    #[test]
-    fn reversed_ranges_are_swapped_and_malformed_ranges_follow_redis() {
-        assert!(m("[z-a]", "m"));
-        assert!(!m("[z-a]", "0"));
-        // `[a-]` is read as the range 'a'..']' (swapped to ']'..'a'), so it
-        // matches 'a' and the bytes between ']' and 'a'.
-        assert!(m("[a-]", "a"));
-        assert!(m("[a-]", "_"));
-        assert!(!m("[a-]", "b"));
-        // An unterminated class takes what it has and then the pattern ends
-        // (checked against redis-server 8.6.2).
-        assert!(m("a[b", "ab"));
-        assert!(m("[a", "a"));
-        assert!(!m("[", "a"));
-        assert!(!m("a[", "ab"));
-    }
-
-    #[test]
-    fn trailing_stars_match_once_the_string_is_used_up() {
-        assert!(m("ab**", "ab"));
-        assert!(m("a*b*", "ab"));
-        assert!(!m("**", ""));
-    }
-
-    /// Without Redis's `skipLongerMatches` bound this takes exponential time.
-    #[test]
-    fn pathological_patterns_are_matched_in_bounded_time() {
-        let start = std::time::Instant::now();
-        let long = "a".repeat(64);
-        assert!(!m("a*a*a*a*a*a*a*a*a*a*a*a*b", &long));
-        assert!(start.elapsed() < std::time::Duration::from_secs(1), "took {:?}", start.elapsed());
-    }
-
-    #[test]
-    fn backslash_escaping() {
-        assert!(m("h\\*llo", "h*llo"));
-        assert!(!m("h\\*llo", "hello"));
-        assert!(m("h\\?llo", "h?llo"));
-        assert!(!m("h\\?llo", "hello"));
-        assert!(m("\\[a\\]", "[a]"));
-    }
-
-    #[test]
-    fn multiple_stars_collapse() {
-        assert!(m("a**b", "ab"));
-        assert!(m("a**b", "aXb"));
-        assert!(m("a***b", "aXXXb"));
-        assert!(!m("a***b", "axyz"));
-    }
-
-    #[test]
-    fn empty_pattern_matches_only_empty_string() {
-        assert!(m("", ""));
-        assert!(!m("", "a"));
-    }
-
-    #[test]
-    fn exact_literal_match() {
-        assert!(m("hello", "hello"));
-        assert!(!m("hello", "hell"));
-        assert!(!m("hello", "helloo"));
-    }
-
-    #[test]
-    fn mixed_wildcards() {
-        assert!(m("h?llo*world", "helloworld"));
-        assert!(m("h?llo*world", "hello big world"));
-        assert!(!m("h?llo*world", "hello"));
-    }
-
-    #[test]
-    fn nocase_flag() {
-        assert!(mi("hello", "HELLO"));
-        assert!(mi("H?LLO", "hello"));
-        assert!(mi("[A-Z]", "a"));
-        assert!(!mi("[A-Z]", "0"));
-    }
-
-    #[test]
-    fn redis_real_world_patterns() {
-        // From Redis's own test suite.
-        assert!(m("foo*", "foobar"));
-        assert!(m("foo*", "foo"));
-        assert!(!m("foo*", "foa"));
-        assert!(m("*bar*", "foobar"));
-        assert!(m("*bar*", "bar"));
-        assert!(m("*bar*", "barfoo"));
-        assert!(!m("*bar*", "foo"));
-        assert!(m("foo*bar", "fooXbar"));
-        assert!(m("foo*bar", "foobar"));
-        assert!(!m("foo*bar", "foobaz"));
-    }
-
-    #[test]
-    fn star_at_start_and_end() {
-        assert!(m("*x*", "axb"));
-        assert!(!m("*x*", "abc"));
-    }
-
     // ---- Registry integration tests ----
 
     #[tokio::test]
@@ -987,6 +675,23 @@ mod tests {
         assert_eq!(foo.len(), 2);
         assert!(foo.contains(&Bytes::from_static(b"foo")));
         assert!(foo.contains(&Bytes::from_static(b"foobar")));
+    }
+
+    /// Issue #118: Redis matches channel names case-sensitively.
+    #[tokio::test]
+    async fn pattern_matching_is_case_sensitive() {
+        let reg = Arc::new(PubSubRegistry::new());
+        let mut rx = reg.subscribe_pattern(Bytes::from_static(b"News.*"));
+        let _ch = reg.subscribe_channel(Bytes::from_static(b"news.sport"));
+
+        // Only the exact-channel subscriber is reached, not the pattern one.
+        assert_eq!(reg.publish(b"news.sport", Bytes::from_static(b"x")), 1);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(reg.publish(b"News.sport", Bytes::from_static(b"x")), 1);
+        assert!(rx.try_recv().is_ok());
+
+        assert!(reg.active_channels_val(Some(b"News.*")).is_empty());
+        assert_eq!(reg.active_channels_val(Some(b"news.*")).len(), 1);
     }
 
     #[tokio::test]
