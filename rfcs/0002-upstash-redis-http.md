@@ -46,6 +46,55 @@ clients for Go, Rust and Dart exist but are unreviewed here; a protocol implemen
 and to the documentation should serve them, but this RFC does not claim to have verified them. See *Compatibility
 claims* below.
 
+## Legal and licensing posture
+
+This section records the project's intent and the facts behind it. It is not legal advice; the project's maintainers
+(and counsel, if they wish) own the conclusion.
+
+**Implementing a wire protocol.** Invar already speaks the Redis protocol without being Redis, and this RFC proposes the
+same thing for the Upstash REST protocol: a separately written server that accepts the same requests and returns the
+same responses so that existing clients interoperate. Re-implementing an interface for interoperability, without copying
+the original implementation, is long-standing industry practice. The RFC describes *behaviour* (endpoints, headers,
+encodings, status codes); it does not reproduce Upstash's server code, because none of it was consulted, and none of
+the SDK code is to be reproduced in Invar.
+
+**What was read, and under what terms.**
+
+| Source | License | Use made of it |
+|---|---|---|
+| `upstash/redis-js` | MIT (Copyright Upstash, Inc.) | read to discover the API surface; no code copied |
+| `upstash/redis-python` | MIT (Copyright Upstash, Inc.) | read to discover the API surface; no code copied |
+| `upstash/docs` | **no license file in the repository**, so default copyright applies | read for facts about the API; the RFC paraphrases rather than reproduces, and quotes only identifiers (header names, paths, error strings) |
+
+Note that the SDKs are **MIT-licensed, not public domain**. MIT permits reading, using and even copying the code, but
+requires that the copyright and permission notice travel with any copy of "substantial portions". Invar's position is
+stricter than MIT requires: no SDK code is copied or adapted into Invar. Ideas, facts about wire behaviour, and short
+identifiers needed for interoperability are not reproduced *expression*.
+
+**Rules for implementers.**
+
+1. Implement from this RFC, not from SDK source. Where the RFC is silent, ask or run the Appendix A probes; do not
+   settle the question by transliterating SDK code.
+2. Do not vendor the SDKs, copy their tests, or copy docs prose into the repository. Using an SDK as a *dependency* of
+   the Deno integration tests (`npm:@upstash/redis`) is ordinary use under MIT and keeps its license attached. The
+   upstream test suites may be *run* against Invar (see Testing) but not checked in.
+3. Test fixtures and expected responses are written for Invar, in Invar's own words and data.
+4. If any MIT-licensed material is ever copied, retain its notice in the file and add it to a third-party notices file
+   in the same change.
+
+**Trademark.** "Upstash" is presumed to be a trademark of Upstash, Inc. and nothing here grants any right to it.
+
+* Invar is not affiliated with, endorsed by, or sponsored by Upstash, Inc. The user-facing documentation for this
+  feature must say so.
+* The name is used only *nominatively*, to say what Invar is compatible with ("compatible with the Upstash Redis REST
+  protocol and its SDKs"), never as the name of Invar, a flag, an environment variable, a binary, a crate or a logo. For
+  that reason the proposed flags are `--http-addr`/`--http-token` and not `--upstash-*`, and the module is
+  `src/redis/http`, not `upstash`.
+* Protocol identifiers that must appear on the wire for clients to work (`Upstash-Encoding`, `Upstash-Sync-Token`, the
+  `UPSTASH_REDIS_REST_*` variable names users already have) are used because interoperability requires them; they are
+  names of interface elements, not branding of ours. Documentation prefers "Redis-over-HTTP" as the feature name.
+* No Upstash logos, styling or copy appear in docs, test output, or the UI.
+
 # Guide Implementation
 
 Start Invar with the HTTP listener enabled:
@@ -199,8 +248,8 @@ available through the base64 encoding below.
 
 #### `Upstash-Encoding: base64`
 
-When the request carries `Upstash-Encoding: base64`, "all strings in the response will be base64 encoded, except for
-the `"OK"` response" **[D]**. Both SDKs decode recursively through nested arrays and leave integers and `null` alone;
+When the request carries `Upstash-Encoding: base64`, every string in the response is base64 encoded except the `OK`
+status reply **[D]**. Both SDKs decode recursively through nested arrays and leave integers and `null` alone;
 **error strings are not decoded** **[S]**. The Python SDK **sends this header by default** (`rest_encoding="base64"`),
 so a Python client will not work unless it is implemented correctly **[S]**.
 
@@ -234,8 +283,8 @@ body must be JSON for every error the server generates, including 401/405 [I]. A
 oversized request, 429 for quota, 5xx) is not documented [?]. The documented trigger for the 413-like case is the
 message `ERR max request size exceeded` **[D]** (troubleshooting page), whose HTTP status is [?].
 
-A single-command request whose command returns a Redis error is `400` with `{"error": …}` **[D]**: "command execution
-fails" is listed under `400`. A pipeline always returns `200` with one `{"result"}` or `{"error"}` object per command, in
+A single-command request whose command returns a Redis error is `400` with `{"error": …}` **[D]** (the docs list a failed
+command execution under `400`). A pipeline always returns `200` with one `{"result"}` or `{"error"}` object per command, in
 order **[D, S]**.
 
 ### Pipelines (`/pipeline`)
@@ -441,8 +490,8 @@ constant time. It must not be logged.
 
 > **Open Question (decision):** Authentication. A single mandatory bearer token (proposed). Should a **read-only token**
 > be supported, given that browser/edge use is the main reason the protocol exists? If so, the read-only/write
-> classification of every command needs an owner, because Upstash also restricts "powerful read commands (e.g. `SCAN`,
-> `KEYS`)" for that token **[D]**, and the full list is not documented.
+> classification of every command needs an owner, because Upstash also restricts some powerful read commands (it names `SCAN` and
+> `KEYS`) for that token **[D]**, and the full list is not documented.
 
 > **Open Question (decision):** Dependency. Adding `hyper`, `hyper-util`, `base64` and `percent-encoding`. Acceptable?
 
