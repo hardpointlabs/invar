@@ -110,6 +110,16 @@ pub async fn dispatch_noscript(session: &mut Session, args: &[Bytes]) -> Option<
             session.unwatch();
             Some(vec![ok_resp()])
         }
+        b"reset" => {
+            if args.len() != 1 {
+                return Some(vec![error(
+                    session,
+                    "ERR wrong number of arguments for 'reset' command",
+                )]);
+            }
+            session.reset();
+            Some(vec![RespValue::SimpleString(Bytes::from_static(b"RESET"))])
+        }
         _ => None,
     }
 }

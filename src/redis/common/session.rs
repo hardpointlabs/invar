@@ -20,7 +20,7 @@ use crate::common::op::{DbError, DbResult, NoOp, QueuedOp, WireOp};
 use crate::common::registry::WatchRegistry;
 use crate::common::store::RedisStore;
 use crate::pubsub::PubSubRegistry;
-use crate::resp::RespValue;
+use crate::resp::{Protocol, RespValue};
 
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -141,6 +141,9 @@ pub struct Session {
     /// The peer address of the socket, reported by `CLIENT INFO`/`CLIENT
     /// LIST`. `None` when the session was built without a socket (tests).
     peer_addr: Option<std::net::SocketAddr>,
+    /// The wire protocol negotiated with `HELLO`. The listener copies it onto
+    /// the codec before sending each command's replies.
+    protocol: Protocol,
     store: Arc<dyn RedisStore>,
     registry: Arc<WatchRegistry>,
     pubsub: Arc<PubSubRegistry>,
@@ -181,6 +184,7 @@ impl Session {
             lib_name: String::new(),
             lib_ver: String::new(),
             peer_addr: None,
+            protocol: Protocol::Resp2,
             store,
             registry,
             pubsub,
@@ -259,6 +263,28 @@ impl Session {
     /// Records the peer address of the connection socket.
     pub fn set_peer_addr(&mut self, addr: std::net::SocketAddr) {
         self.peer_addr = Some(addr);
+    }
+
+    /// The wire protocol negotiated for this connection (RESP2 until the
+    /// client sends `HELLO 3`).
+    pub fn protocol(&self) -> Protocol {
+        self.protocol
+    }
+
+    /// Sets the wire protocol replies are rendered in.
+    pub fn set_protocol(&mut self, protocol: Protocol) {
+        self.protocol = protocol;
+    }
+
+    /// Implements the session half of `RESET`: back to RESP2, DB 0 and no
+    /// client name, with any `MULTI` block and `WATCH`es discarded.
+    /// Subscriptions belong to the listener and are dropped there.
+    pub fn reset(&mut self) {
+        self.protocol = Protocol::Resp2;
+        self.current_db = 0;
+        self.client_name.clear();
+        let _ = self.exit_multi(true);
+        self.unwatch();
     }
 
     /// Enters a `MULTI` block.

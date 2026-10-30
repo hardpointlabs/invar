@@ -13,7 +13,7 @@ use std::time::Instant;
 use crate::common::op::{DbError, DbResult, DefaultWire, NoOp, QueuedOp, WireOp};
 use crate::common::session::Session;
 use crate::common::DbOp;
-use crate::resp::RespValue;
+use crate::resp::{Protocol, RespValue};
 use crate::{conn, RedisStore};
 use bytes::Bytes;
 use kv::kv::{BoxFuture, Tx};
@@ -399,24 +399,53 @@ fn info_string() -> String {
     b
 }
 
-/// Negotiates the RESP protocol version. Invar only speaks RESP2, so a
-/// request for any other version (including RESP3) is refused with a NOPROTO
-/// error, which is what a RESP2-only server is expected to do and lets clients
-/// such as ioredis fall back cleanly to RESP2.
+/// Whether `HELLO 3` is honoured. While the RESP3 command audit (RFC 0002,
+/// step 3) is incomplete this stays `false` outside unit tests, so clients get
+/// `NOPROTO` and fall back to RESP2 (which is what lets ioredis, and therefore
+/// BullMQ, work). The session and listener plumbing is exercised in tests,
+/// where it is on. Flipping this is the last step of the rollout.
+const RESP3_ENABLED: bool = cfg!(test);
+
+/// Negotiates the RESP protocol version: `HELLO 2` selects RESP2 and, once
+/// [`RESP3_ENABLED`], `HELLO 3` selects RESP3. Any other version is refused
+/// with a NOPROTO error, which lets RESP2-only clients such as ioredis fall
+/// back cleanly. A bare `HELLO` replies in the current protocol without
+/// changing it. The new protocol takes effect for the reply to this very
+/// command: the listener syncs it onto the codec before sending.
 pub fn hello(session: &mut Session, args: &[Bytes]) -> QueuedOp {
-    let reply = hello_reply(session, args);
+    hello_with(session, args, RESP3_ENABLED)
+}
+
+/// `HELLO` with the RESP3 gate passed explicitly, so tests can exercise both
+/// sides of it.
+fn hello_with(session: &mut Session, args: &[Bytes], resp3_enabled: bool) -> QueuedOp {
+    // `HELLO` changes session state, so it is refused inside `MULTI` (in
+    // either protocol) before it can touch anything. The transaction guard in
+    // `enqueue_command` turns `allowed_in_tx: false` into the error reply and
+    // dirties the transaction.
+    let allowed_in_tx = !session.in_multi();
+    let reply = if allowed_in_tx {
+        hello_reply(session, args, resp3_enabled)
+    } else {
+        RespValue::Null
+    };
     QueuedOp {
         db_op: Box::new(NoOp),
         wire_op: Box::new(FixedReply { reply }),
         is_mutating: false,
-        allowed_in_tx: true,
+        allowed_in_tx,
         abort_in_tx: false,
         keys: None,
     }
 }
 
-fn hello_reply(session: &mut Session, args: &[Bytes]) -> RespValue {
-    let mut proto: i64 = 2;
+fn hello_reply(session: &mut Session, args: &[Bytes], resp3_enabled: bool) -> RespValue {
+    // A bare `HELLO` reports the current protocol without changing it.
+    let mut proto: i64 = match session.protocol() {
+        Protocol::Resp2 => 2,
+        Protocol::Resp3 => 3,
+    };
+    let mut setname = None;
     let mut rest = &args[1..];
     while let Some(token) = rest.first() {
         let token_upper: Vec<u8> = token.iter().map(u8::to_ascii_uppercase).collect();
@@ -433,7 +462,7 @@ fn hello_reply(session: &mut Session, args: &[Bytes]) -> RespValue {
                 if rest.len() < 2 {
                     return err("ERR wrong number of arguments for 'hello' command");
                 }
-                session.set_client_name(String::from_utf8_lossy(&rest[1]).into_owned());
+                setname = Some(String::from_utf8_lossy(&rest[1]).into_owned());
                 rest = &rest[2..];
             }
             _ => {
@@ -445,27 +474,34 @@ fn hello_reply(session: &mut Session, args: &[Bytes]) -> RespValue {
             }
         }
     }
-    if proto != 2 {
-        return RespValue::Error(Bytes::from_static(b"NOPROTO unsupported protocol version"));
+    let protocol = match proto {
+        2 => Protocol::Resp2,
+        3 if resp3_enabled => Protocol::Resp3,
+        _ => {
+            return RespValue::Error(Bytes::from_static(b"NOPROTO unsupported protocol version"));
+        }
+    };
+    // Only apply anything once the whole command has validated, so a refused
+    // `HELLO` leaves the session untouched.
+    if let Some(name) = setname {
+        session.set_client_name(name);
     }
+    session.set_protocol(protocol);
 
+    let bulk = |s: &'static [u8]| RespValue::BulkString(Some(Bytes::from_static(s)));
     let id = session.id().to_string();
-    RespValue::Array(Some(vec![
-        RespValue::BulkString(Some(Bytes::from_static(b"server"))),
-        RespValue::BulkString(Some(Bytes::from_static(b"redis"))),
-        RespValue::BulkString(Some(Bytes::from_static(b"version"))),
-        RespValue::BulkString(Some(Bytes::from(conn::VERSION))),
-        RespValue::BulkString(Some(Bytes::from_static(b"proto"))),
-        RespValue::Integer(2),
-        RespValue::BulkString(Some(Bytes::from_static(b"id"))),
-        RespValue::BulkString(Some(Bytes::from(id))),
-        RespValue::BulkString(Some(Bytes::from_static(b"mode"))),
-        RespValue::BulkString(Some(Bytes::from_static(b"standalone"))),
-        RespValue::BulkString(Some(Bytes::from_static(b"role"))),
-        RespValue::BulkString(Some(Bytes::from_static(b"master"))),
-        RespValue::BulkString(Some(Bytes::from_static(b"modules"))),
-        RespValue::Array(Some(Vec::new())),
-    ]))
+    RespValue::Map(vec![
+        (bulk(b"server"), bulk(b"redis")),
+        (
+            bulk(b"version"),
+            RespValue::BulkString(Some(Bytes::from(conn::VERSION))),
+        ),
+        (bulk(b"proto"), RespValue::Integer(proto)),
+        (bulk(b"id"), RespValue::BulkString(Some(Bytes::from(id)))),
+        (bulk(b"mode"), bulk(b"standalone")),
+        (bulk(b"role"), bulk(b"master")),
+        (bulk(b"modules"), RespValue::Array(Some(Vec::new()))),
+    ])
 }
 
 /// Implements the `CLIENT` subcommand family: per-connection bookkeeping that
@@ -680,6 +716,8 @@ mod tests {
     fn hello_no_args_replies_resp2_map() {
         let mut session = test_session();
         let reply = exec(hello(&mut session, &cmd(&[b"HELLO"])));
+        let mut reply = reply;
+        crate::resp::downgrade_to_resp2(&mut reply);
         match &reply {
             RespValue::Array(Some(items)) => {
                 assert_eq!(items.len(), 14);
@@ -715,13 +753,80 @@ mod tests {
     }
 
     #[test]
-    fn hello_rejects_resp3() {
+    fn hello_rejects_resp3_while_gated() {
         let mut session = test_session();
-        let reply = exec(hello(&mut session, &cmd(&[b"HELLO", b"3"])));
+        session.set_client_name("keep".into());
+        let reply = exec(hello_with(
+            &mut session,
+            &cmd(&[b"HELLO", b"3", b"SETNAME", b"new"]),
+            false,
+        ));
         assert_eq!(
             reply,
             RespValue::Error(Bytes::from_static(b"NOPROTO unsupported protocol version"))
         );
+        assert_eq!(session.protocol(), Protocol::Resp2);
+        assert_eq!(
+            session.client_name(),
+            "keep",
+            "refused HELLO must not apply SETNAME"
+        );
+    }
+
+    #[test]
+    fn hello_3_replies_map_and_sets_protocol() {
+        let mut session = test_session();
+        let reply = exec(hello(&mut session, &cmd(&[b"HELLO", b"3"])));
+        assert_eq!(session.protocol(), Protocol::Resp3);
+        match &reply {
+            RespValue::Map(pairs) => {
+                assert_eq!(pairs.len(), 7);
+                let get = |k: &'static [u8]| {
+                    pairs
+                        .iter()
+                        .find(|(key, _)| *key == RespValue::BulkString(Some(Bytes::from_static(k))))
+                        .map(|(_, v)| v.clone())
+                        .unwrap()
+                };
+                assert_eq!(get(b"proto"), RespValue::Integer(3));
+                assert_eq!(get(b"modules"), RespValue::Array(Some(Vec::new())));
+            }
+            other => panic!("expected map, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hello_2_returns_to_resp2_and_bare_hello_keeps_protocol() {
+        let mut session = test_session();
+        exec(hello(&mut session, &cmd(&[b"HELLO", b"3"])));
+
+        let reply = exec(hello(&mut session, &cmd(&[b"HELLO"])));
+        assert_eq!(session.protocol(), Protocol::Resp3);
+        assert!(matches!(&reply, RespValue::Map(p) if p[2].1 == RespValue::Integer(3)));
+
+        let reply = exec(hello(&mut session, &cmd(&[b"HELLO", b"2"])));
+        assert_eq!(session.protocol(), Protocol::Resp2);
+        assert!(matches!(&reply, RespValue::Map(p) if p[2].1 == RespValue::Integer(2)));
+    }
+
+    #[test]
+    fn hello_unknown_version_is_noproto_even_when_enabled() {
+        let mut session = test_session();
+        for v in [&b"4"[..], b"1", b"0"] {
+            let reply = exec(hello(&mut session, &cmd(&[b"HELLO", v])));
+            assert!(matches!(&reply, RespValue::Error(e) if e.starts_with(b"NOPROTO")));
+        }
+        assert_eq!(session.protocol(), Protocol::Resp2);
+    }
+
+    #[test]
+    fn hello_in_multi_is_not_allowed_and_does_not_mutate() {
+        let mut session = test_session();
+        session.enter_multi();
+        let op = hello(&mut session, &cmd(&[b"HELLO", b"3", b"SETNAME", b"queued"]));
+        assert!(!op.allowed_in_tx);
+        assert_eq!(session.protocol(), Protocol::Resp2);
+        assert_eq!(session.client_name(), "");
     }
 
     #[test]
@@ -741,8 +846,8 @@ mod tests {
         ));
         assert_eq!(session.client_name(), "bull:conn");
         match &reply {
-            RespValue::Array(Some(items)) => assert_eq!(items[5], RespValue::Integer(2)),
-            other => panic!("expected array, got {other:?}"),
+            RespValue::Map(pairs) => assert_eq!(pairs[2].1, RespValue::Integer(2)),
+            other => panic!("expected map, got {other:?}"),
         }
     }
 

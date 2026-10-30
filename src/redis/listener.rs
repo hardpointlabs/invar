@@ -393,6 +393,7 @@ async fn handle_connection<S: ClientStream>(
                         // Inside MULTI: route through dispatch_command which will
                         // dirty the transaction and return an error.
                         let replies = enqueue_command(&mut session, &args).await;
+                        sync_protocol(&mut framed, &session);
                         for reply in replies {
                             framed.send(reply).await?;
                         }
@@ -451,6 +452,10 @@ async fn handle_connection<S: ClientStream>(
                                         }
                                     } => return Ok(()),
                                 };
+                                // HELLO/RESET may have changed the protocol;
+                                // apply it before sending so that this very
+                                // batch (e.g. the reply to HELLO 3) uses it.
+                                sync_protocol(&mut framed, &session);
                                 for reply in replies {
                                     framed.send(reply).await?;
                                 }
@@ -536,9 +541,12 @@ async fn handle_subscribe_mode_command<S: ClientStream>(
         }
         b"reset" => {
             // TODO: full RESET implementation (out of scope for this pass).
-            // For now, unsubscribe everything and reply +RESET.
+            // For now, unsubscribe everything, reset the session and reply
+            // +RESET.
             subs.unsubscribe_all_channels();
             subs.unsubscribe_all_patterns();
+            session.reset();
+            sync_protocol(framed, session);
             session.request_close();
             framed
                 .send(RespValue::SimpleString(Bytes::from_static(b"RESET")))
@@ -700,6 +708,12 @@ async fn handle_punsubscribe<S: ClientStream>(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Copies the session's negotiated protocol onto the codec. Replies already
+/// sent are never re-encoded; the protocol is only read when a reply is sent.
+fn sync_protocol<S>(framed: &mut Framed<S, RespDecoder>, session: &Session) {
+    framed.codec_mut().set_protocol(session.protocol());
+}
 
 /// Extracts a `Vec<Bytes>` of bulk strings from a RESP array's elements.
 /// Returns `None` if any element is not a bulk/simple string.
@@ -1544,5 +1558,164 @@ mod tests {
         }
 
         handle.abort();
+    }
+
+    // --- RESP3 negotiation (RFC 0002, step 2) ---
+
+    /// Starts a listener on a free port and returns a raw client socket.
+    async fn raw_client() -> tokio::net::TcpStream {
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+        tokio::spawn(RedisListener::new(addr, test_store()).serve());
+        connect_retry(addr).await
+    }
+
+    /// Sends `parts` and asserts the server's next bytes are exactly
+    /// `expected`.
+    async fn expect_bytes(c: &mut tokio::net::TcpStream, parts: &[&[u8]], expected: &[u8]) {
+        use tokio::io::AsyncReadExt;
+        send_cmd(c, parts).await;
+        let mut got = vec![0u8; expected.len()];
+        tokio::time::timeout(Duration::from_secs(5), c.read_exact(&mut got))
+            .await
+            .expect("timeout waiting for reply")
+            .expect("read failed");
+        assert_eq!(
+            String::from_utf8_lossy(&got),
+            String::from_utf8_lossy(expected)
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_defaults_to_resp2() {
+        let mut c = raw_client().await;
+        expect_bytes(&mut c, &[b"GET", b"missing"], b"$-1\r\n").await;
+    }
+
+    #[tokio::test]
+    async fn hello_3_reply_is_a_map_and_nulls_become_underscore() {
+        use tokio::io::AsyncReadExt;
+        let mut c = raw_client().await;
+        send_cmd(&mut c, &[b"HELLO", b"3"]).await;
+        let mut head = [0u8; 4];
+        tokio::time::timeout(Duration::from_secs(5), c.read_exact(&mut head))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&head, b"%7\r\n", "the reply to HELLO 3 is itself a map");
+        // Drain the remainder of the map, then check a null.
+        let mut rest = vec![0u8; 8192];
+        let _ = tokio::time::timeout(Duration::from_millis(200), c.read(&mut rest)).await;
+        expect_bytes(&mut c, &[b"GET", b"missing"], b"_\r\n").await;
+    }
+
+    #[tokio::test]
+    async fn hello_2_after_hello_3_returns_to_resp2() {
+        let c = raw_client().await;
+        let mut framed = Framed::new(c, RespDecoder::new());
+        framed.send(array_cmd(&[b"HELLO", b"3"])).await.unwrap();
+        assert!(matches!(next_reply(&mut framed).await, RespValue::Map(_)));
+        framed.send(array_cmd(&[b"GET", b"k"])).await.unwrap();
+        assert_eq!(next_reply(&mut framed).await, RespValue::Null);
+
+        framed.send(array_cmd(&[b"HELLO", b"2"])).await.unwrap();
+        match next_reply(&mut framed).await {
+            RespValue::Array(Some(items)) => {
+                assert_eq!(items.len(), 14, "HELLO 2 replies with the flat array");
+                assert_eq!(items[5], RespValue::Integer(2));
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+        framed.send(array_cmd(&[b"GET", b"k"])).await.unwrap();
+        assert_eq!(next_reply(&mut framed).await, RespValue::BulkString(None));
+    }
+
+    #[tokio::test]
+    async fn hello_inside_multi_is_rejected_in_both_protocols() {
+        for proto in [&b"2"[..], b"3"] {
+            let mut c = raw_client().await;
+            if proto == b"3" {
+                let mut framed = Framed::new(c, RespDecoder::new());
+                framed.send(array_cmd(&[b"HELLO", b"3"])).await.unwrap();
+                next_reply(&mut framed).await;
+                c = framed.into_inner();
+            }
+            let mut framed = Framed::new(c, RespDecoder::new());
+            framed.send(array_cmd(&[b"MULTI"])).await.unwrap();
+            next_reply(&mut framed).await;
+            framed
+                .send(array_cmd(&[b"HELLO", b"3", b"SETNAME", b"x"]))
+                .await
+                .unwrap();
+            assert!(matches!(
+                next_reply(&mut framed).await,
+                RespValue::Error(e) if e.starts_with(b"Command not allowed inside a transaction")
+            ));
+            // The rejection dirties the transaction, like any refused command.
+            framed.send(array_cmd(&[b"EXEC"])).await.unwrap();
+            assert!(matches!(next_reply(&mut framed).await, RespValue::Error(_)));
+            framed
+                .send(array_cmd(&[b"CLIENT", b"GETNAME"]))
+                .await
+                .unwrap();
+            let name = next_reply(&mut framed).await;
+            assert!(
+                matches!(name, RespValue::BulkString(None) | RespValue::Null),
+                "HELLO inside MULTI must not apply SETNAME, got {name:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reset_returns_connection_to_resp2() {
+        let c = raw_client().await;
+        let mut framed = Framed::new(c, RespDecoder::new());
+        framed.send(array_cmd(&[b"HELLO", b"3"])).await.unwrap();
+        next_reply(&mut framed).await;
+        framed.send(array_cmd(&[b"RESET"])).await.unwrap();
+        assert_eq!(
+            next_reply(&mut framed).await,
+            RespValue::SimpleString(Bytes::from_static(b"RESET"))
+        );
+        framed.send(array_cmd(&[b"GET", b"k"])).await.unwrap();
+        assert_eq!(next_reply(&mut framed).await, RespValue::BulkString(None));
+    }
+
+    #[tokio::test]
+    async fn subscribe_mode_restrictions_are_identical_under_resp3() {
+        let mut errors = Vec::new();
+        for resp3 in [false, true] {
+            let c = raw_client().await;
+            let mut framed = Framed::new(c, RespDecoder::new());
+            if resp3 {
+                framed.send(array_cmd(&[b"HELLO", b"3"])).await.unwrap();
+                next_reply(&mut framed).await;
+            }
+            framed
+                .send(array_cmd(&[b"SUBSCRIBE", b"ch"]))
+                .await
+                .unwrap();
+            next_reply(&mut framed).await;
+            framed.send(array_cmd(&[b"SET", b"a", b"b"])).await.unwrap();
+            errors.push(next_reply(&mut framed).await);
+            // RESET is allowed while subscribed and drops back to RESP2.
+            framed.send(array_cmd(&[b"RESET"])).await.unwrap();
+            assert_eq!(
+                next_reply(&mut framed).await,
+                RespValue::SimpleString(Bytes::from_static(b"RESET"))
+            );
+        }
+        assert!(matches!(errors[0], RespValue::Error(_)));
+        assert_eq!(errors[0], errors[1]);
+    }
+
+    fn array_cmd(parts: &[&[u8]]) -> RespValue {
+        RespValue::Array(Some(
+            parts
+                .iter()
+                .map(|p| RespValue::BulkString(Some(Bytes::copy_from_slice(p))))
+                .collect(),
+        ))
     }
 }
