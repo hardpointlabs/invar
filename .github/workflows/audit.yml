@@ -1,0 +1,77 @@
+name: audit
+
+# Scheduled out-of-band dependency audit. Deliberately separate from ci.yml so
+# newly published advisories never hold up PRs. On failure, a Claude agent
+# attempts a remedial PR.
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: audit
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write # OIDC: Claude GitHub App token exchange + AWS role assumption
+
+jobs:
+  audit:
+    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+    steps:
+      - uses: useblacksmith/checkout@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false # use Blacksmith's caching instead
+      - uses: taiki-e/install-action@cargo-audit
+
+      - name: Audit dependencies
+        id: audit
+        run: cargo audit
+        continue-on-error: true
+
+      - name: Assume AWS role via OIDC
+        if: steps.audit.outcome == 'failure'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.CLAUDE_BEDROCK_ROLE_ARN }}
+          aws-region: ${{ vars.CLAUDE_BEDROCK_REGION }}
+
+      - name: Claude remediation
+        if: steps.audit.outcome == 'failure'
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          use_bedrock: "true"
+          prompt: |
+            Investigate the cargo audit failure (run `cargo audit` yourself to see it).
+
+            Follow CLAUDE.md for project conventions.
+
+            Only remediate upstream dependency vulnerabilities.
+            Make the smallest safe changes possible.
+
+            This workflow runs hourly. Before doing anything, check for an
+            existing open pull request that already addresses the same
+            advisories (`gh pr list --state open`); if there is one, stop
+            without opening another.
+
+            If remediation is possible, create a branch and
+            open a pull request with a detailed explanation.
+            If it is not possible (e.g. no upstream fix is released yet),
+            make no changes and explain why in your final output.
+
+            Do not merge the PR or modify audit policy.
+          claude_args: >-
+            --max-turns 25
+            --model ${{ vars.CLAUDE_BEDROCK_MODEL }}
+            --allowedTools "Bash(cargo:*),Bash(git:*),Bash(gh pr list:*),Bash(gh pr create:*),Bash(gh pr view:*)"
+
+      # Keep the run red so an unresolved advisory stays visible in the Actions tab.
+      - name: Fail run if audit failed
+        if: steps.audit.outcome == 'failure'
+        run: exit 1
