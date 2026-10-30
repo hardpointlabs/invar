@@ -16,7 +16,7 @@ concurrency:
 permissions:
   contents: write
   pull-requests: write
-  id-token: write # OIDC: Claude GitHub App token exchange + AWS role assumption
+  id-token: write # OIDC: Claude GitHub App token + Anthropic workload identity federation
 
 jobs:
   audit:
@@ -33,20 +33,15 @@ jobs:
         run: cargo audit
         continue-on-error: true
 
-      - name: Assume AWS role via OIDC
-        if: steps.audit.outcome == 'failure'
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.CLAUDE_BEDROCK_ROLE_ARN }}
-          aws-region: ${{ vars.CLAUDE_BEDROCK_REGION }}
-
       - name: Claude remediation
         if: steps.audit.outcome == 'failure'
         uses: anthropics/claude-code-action@v1
         env:
           GH_TOKEN: ${{ github.token }}
         with:
-          use_bedrock: "true"
+          anthropic_federation_rule_id: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          anthropic_organization_id: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+          anthropic_service_account_id: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
           prompt: |
             Investigate the cargo audit failure (run `cargo audit` yourself to see it).
 
@@ -68,7 +63,6 @@ jobs:
             Do not merge the PR or modify audit policy.
           claude_args: >-
             --max-turns 25
-            --model ${{ vars.CLAUDE_BEDROCK_MODEL }}
             --allowedTools "Bash(cargo:*),Bash(git:*),Bash(gh pr list:*),Bash(gh pr create:*),Bash(gh pr view:*)"
 
       # Keep the run red so an unresolved advisory stays visible in the Actions tab.
