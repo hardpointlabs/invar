@@ -236,7 +236,9 @@ When the path is `/` (empty) and the method is `POST`, the body is always the JS
 | integer | number |
 | array | array of the above, recursively |
 
-Invar is RESP2-only, so no other reply types need mapping.
+This is the RESP2 reply model on purpose: the Upstash API is RESP2-shaped (the SDKs turn flat `[k, v, k, v, …]` arrays into
+objects themselves), so a reply must reach this table in its RESP2 form even once Invar can produce RESP3 types. See
+*Interaction with RESP3* below.
 
 *Failure*: `{"error": "<message>"}`, where the message is the Redis error text without the leading `-`, including its
 error-code prefix **[D]**: `ERR wrong number of arguments for 'get' command`, `WRONGPASS invalid password`. The
@@ -261,7 +263,7 @@ successful result, status or bulk, is base64 encoded (standard alphabet, padded)
 
 #### `Upstash-Response-Format: resp2`
 
-Returns the raw RESP2 bytes of the reply, `Content-Type: application/octet-stream`. Any value other than `json` or
+Returns the raw RESP2 bytes of the reply (the RESP2 encoder, whatever the server speaks elsewhere), `Content-Type: application/octet-stream`. Any value other than `json` or
 `resp2` is `400`; combining `resp2` with `Upstash-Encoding: base64` is `400`; the option does not apply to `/multi-exec`
 **[D]**. No SDK uses it. The documentation's own curl examples spell the header `Upstash-Reponse-Format` (sic); the
 prose and the table spell it `Upstash-Response-Format`, which is taken as correct. For `/pipeline` the body is the
@@ -385,6 +387,29 @@ hyper service  ->  parse (path | json | pipeline | multi-exec)
 * **Restricted commands** are filtered before dispatch, as above, and counted as an enqueue-time error in
   `/multi-exec`.
 
+### Interaction with RESP3 (RFC 0002)
+
+[RFC 0002](0002-resp3-support.md) (in flight) extends `RespValue` with `Null`, `Boolean`, `Double`, `Map`, `Set`, `Push`
+and optionally `Verbatim`, and makes the *encoder* downgrade them to today's RESP2 shapes on RESP2 connections. It also
+exposes that downgrade as a function. This RFC depends on that design in one way:
+
+* **HTTP replies are always RESP2-shaped.** Each `RespValue` from `enqueue_command` is passed through RESP2 downgrade
+  (map to flat array, set to array, double to a bulk string rendered as `ZSCORE` is today, boolean to `0`/`1`, push to
+  array, verbatim to bulk string, all nulls to `null`) and only then through the JSON table above. The JSON mapper must
+  not match on the RESP3 variants itself; it calls the shared downgrade, so the rules exist once.
+* **HTTP sessions stay on RESP2.** `HELLO` and `RESET` are denied over HTTP (see *Command availability*), so
+  `session.protocol` is never changed from its RESP2 default and commands never see a RESP3 connection.
+* **No dependency on the command audit.** The audit changes which variants commands *emit*; because HTTP downgrades
+  every reply, it needs only RFC 0002's codec work (its step 1: variants, protocol-aware encoder, shared downgrade) and
+  nothing from the `NOPROTO` flip.
+* **Sequencing.** Preferably RFC 0002's step 1 lands first, so the HTTP mapper is written once against the final
+  `RespValue`. If this RFC lands first, its mapper is an exhaustive match over the five RESP2 variants and RFC 0002's
+  step 1 must update it. Either order works, but HTTP integration tests covering `HGETALL`, `ZRANGE ... WITHSCORES`,
+  `SMEMBERS` and `ZSCORE` should exist before RFC 0002's command audit (its step 3) changes reply shapes, because they
+  are what would catch a RESP3 shape leaking into JSON.
+* SSE events are built from the pub/sub registry's messages, not from the `Push` frames the RESP listener sends, and
+  are unaffected.
+
 ### Shared state with the RESP listener
 
 `RedisListener` currently owns the `WatchRegistry` and `PubSubRegistry` privately. The HTTP listener needs clones of
@@ -434,6 +459,8 @@ in-flight SSE streams).
   SDK is driven against a daemon started with `--http-addr` by `run-tests.sh`. Cases: every endpoint,
   SDK defaults (base64 off), `responseEncoding: "base64"`, auto-pipelining, `multi()`, `Script.exec()` falling back from
   `EVALSHA` to `EVAL`, `subscribe`, and a raw-`fetch` file for status codes and path-form behaviour the SDK never sends.
+* **RESP2-shape guard** (see *Interaction with RESP3*): SDK-level tests that `hgetall`, `zrange` with scores,
+  `smembers` and `zscore` return the same values before and after RFC 0002's command audit.
 * **Cross-listener tests**: write over HTTP and read over RESP, `PUBLISH` over HTTP received by a RESP subscriber, an
   HTTP write invalidating a RESP `WATCH`.
 * **Python SDK** is not exercised by the Deno suite. A CI job running a small `upstash-redis` script against the daemon
