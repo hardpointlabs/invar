@@ -721,7 +721,7 @@ pub fn zrange(session: &Session, key: &[u8], start: i64, stop: i64, with_scores:
             with_scores,
             reverse: false,
         }),
-        wire_op: Box::new(BulkArrayWire),
+        wire_op: Box::new(ScoredArrayWire { with_scores }),
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
@@ -745,7 +745,7 @@ pub fn zrevrange(
             with_scores,
             reverse: true,
         }),
-        wire_op: Box::new(BulkArrayWire),
+        wire_op: Box::new(ScoredArrayWire { with_scores }),
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
@@ -843,7 +843,7 @@ pub fn zrangebyscore(
             has_limit,
             reverse: false,
         }),
-        wire_op: Box::new(BulkArrayWire),
+        wire_op: Box::new(ScoredArrayWire { with_scores }),
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
@@ -876,7 +876,7 @@ pub fn zrevrangebyscore(
             has_limit,
             reverse: true,
         }),
-        wire_op: Box::new(BulkArrayWire),
+        wire_op: Box::new(ScoredArrayWire { with_scores }),
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
@@ -1007,14 +1007,19 @@ pub fn zremrangebylex(session: &Session, key: &[u8], min_str: &str, max_str: &st
 }
 
 /// `ZPOPMIN key [count]` — removes and returns the lowest-score members.
-pub fn zpopmin(session: &Session, key: &[u8], count: usize) -> QueuedOp {
+/// Without a `count` the reply is a flat `[member, score]`; with one it is
+/// pairs on RESP3 (all flat on RESP2).
+pub fn zpopmin(session: &Session, key: &[u8], count: Option<usize>) -> QueuedOp {
     QueuedOp {
         db_op: Box::new(ZPopOp {
             node: NodeRef::new(session, key),
-            count,
+            count: count.unwrap_or(1),
             want_min: true,
         }),
-        wire_op: Box::new(MemberScoreArrayWire { with_scores: true }),
+        wire_op: Box::new(MemberScoreArrayWire {
+            with_scores: true,
+            paired: count.is_some(),
+        }),
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
@@ -1023,14 +1028,17 @@ pub fn zpopmin(session: &Session, key: &[u8], count: usize) -> QueuedOp {
 }
 
 /// `ZPOPMAX key [count]` — removes and returns the highest-score members.
-pub fn zpopmax(session: &Session, key: &[u8], count: usize) -> QueuedOp {
+pub fn zpopmax(session: &Session, key: &[u8], count: Option<usize>) -> QueuedOp {
     QueuedOp {
         db_op: Box::new(ZPopOp {
             node: NodeRef::new(session, key),
-            count,
+            count: count.unwrap_or(1),
             want_min: false,
         }),
-        wire_op: Box::new(MemberScoreArrayWire { with_scores: true }),
+        wire_op: Box::new(MemberScoreArrayWire {
+            with_scores: true,
+            paired: count.is_some(),
+        }),
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
@@ -1064,6 +1072,7 @@ pub fn zrandmember(session: &Session, key: &[u8], count: i64) -> QueuedOp {
         }),
         wire_op: Box::new(MemberScoreArrayWire {
             with_scores: count < 0,
+            paired: true,
         }),
         is_mutating: false,
         allowed_in_tx: true,
@@ -1084,7 +1093,7 @@ pub fn zdiff(session: &Session, with_scores: bool, keys: &[Bytes]) -> QueuedOp {
             with_scores,
             SetOpKind::Diff,
         )),
-        wire_op: Box::new(BulkArrayWire),
+        wire_op: Box::new(ScoredArrayWire { with_scores }),
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
@@ -1138,7 +1147,7 @@ pub fn zinter(
             with_scores,
             SetOpKind::Inter,
         )),
-        wire_op: Box::new(BulkArrayWire),
+        wire_op: Box::new(ScoredArrayWire { with_scores }),
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
@@ -1198,7 +1207,7 @@ pub fn zunion(
             with_scores,
             SetOpKind::Union,
         )),
-        wire_op: Box::new(BulkArrayWire),
+        wire_op: Box::new(ScoredArrayWire { with_scores }),
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
@@ -2425,8 +2434,8 @@ impl WireOp for NullableIntWire {
     }
 }
 
-/// Replies `ZSCORE`/`ZINCRBY`: a bulk serialized float, or null for a missing
-/// member.
+/// Replies `ZSCORE`/`ZINCRBY`: a double (a bulk serialized float on RESP2),
+/// or null for a missing member.
 enum ScoreWire {
     Nullable,
     Plain,
@@ -2437,11 +2446,11 @@ impl WireOp for ScoreWire {
         match result {
             Ok(res) => match res.downcast::<Option<f64>>() {
                 Ok(boxed) => match *boxed {
-                    Some(score) => RespValue::BulkString(Some(Bytes::from(format_f64(score)))),
+                    Some(score) => RespValue::Double(score),
                     None => RespValue::BulkString(None),
                 },
                 Err(res) => match res.downcast::<f64>() {
-                    Ok(score) => RespValue::BulkString(Some(Bytes::from(format_f64(*score)))),
+                    Ok(score) => RespValue::Double(*score),
                     Err(_) => internal_error(),
                 },
             },
@@ -2470,9 +2479,55 @@ impl WireOp for BulkArrayWire {
     }
 }
 
-/// Replies an array of member [/ score] pairs from a `Vec<MemberScore>`.
+/// A score as the double it was formatted from by [`flatten_members`]. The
+/// text round-trips exactly; should it ever not parse, the bulk string is
+/// kept rather than losing the value.
+fn score_value(text: &[u8]) -> RespValue {
+    match std::str::from_utf8(text)
+        .ok()
+        .and_then(|t| t.parse::<f64>().ok())
+    {
+        Some(score) => RespValue::Double(score),
+        None => RespValue::BulkString(Some(Bytes::copy_from_slice(text))),
+    }
+}
+
+/// Replies a range-style result from [`flatten_members`]: plain members, or
+/// with scores `[member, score]` pairs (flat on RESP2).
+struct ScoredArrayWire {
+    with_scores: bool,
+}
+
+impl WireOp for ScoredArrayWire {
+    fn reply(&self, result: Result<DbResult, DbError>) -> RespValue {
+        if !self.with_scores {
+            return BulkArrayWire.reply(result);
+        }
+        match result {
+            Ok(res) => match res.downcast::<Vec<Vec<u8>>>() {
+                Ok(flat) => RespValue::Pairs(
+                    flat.chunks_exact(2)
+                        .map(|p| {
+                            (
+                                RespValue::BulkString(Some(Bytes::copy_from_slice(&p[0]))),
+                                score_value(&p[1]),
+                            )
+                        })
+                        .collect(),
+                ),
+                Err(_) => internal_error(),
+            },
+            Err(e) => err_resp(&e),
+        }
+    }
+}
+
+/// Replies an array of member [/ score] from a `Vec<MemberScore>`. Scores
+/// are doubles. With `paired` they come as `[member, score]` pairs (flat on
+/// RESP2); otherwise as one flat array.
 struct MemberScoreArrayWire {
     with_scores: bool,
+    paired: bool,
 }
 
 impl WireOp for MemberScoreArrayWire {
@@ -2480,18 +2535,26 @@ impl WireOp for MemberScoreArrayWire {
         match result {
             Ok(res) => match res.downcast::<Vec<MemberScore>>() {
                 Ok(boxed) => {
-                    let mut items = Vec::with_capacity(boxed.len() * 2);
-                    for e in boxed.iter() {
-                        items.push(RespValue::BulkString(Some(Bytes::copy_from_slice(
-                            &e.member,
-                        ))));
-                        if self.with_scores {
-                            items.push(RespValue::BulkString(Some(Bytes::from(format_f64(
-                                e.score,
-                            )))));
+                    let member = |e: &MemberScore| {
+                        RespValue::BulkString(Some(Bytes::copy_from_slice(&e.member)))
+                    };
+                    if self.with_scores && self.paired {
+                        RespValue::Pairs(
+                            boxed
+                                .iter()
+                                .map(|e| (member(e), RespValue::Double(e.score)))
+                                .collect(),
+                        )
+                    } else {
+                        let mut items = Vec::with_capacity(boxed.len() * 2);
+                        for e in boxed.iter() {
+                            items.push(member(e));
+                            if self.with_scores {
+                                items.push(RespValue::Double(e.score));
+                            }
                         }
+                        RespValue::Array(Some(items))
                     }
-                    RespValue::Array(Some(items))
                 }
                 Err(_) => internal_error(),
             },
@@ -2500,7 +2563,7 @@ impl WireOp for MemberScoreArrayWire {
     }
 }
 
-/// Replies `ZMSCORE`: an array of bulk scores or nulls, in member order.
+/// Replies `ZMSCORE`: an array of doubles or nulls, in member order.
 struct ZMScoreWire;
 
 impl WireOp for ZMScoreWire {
@@ -2512,9 +2575,7 @@ impl WireOp for ZMScoreWire {
                         .scores
                         .iter()
                         .map(|s| match s {
-                            Some(score) => {
-                                RespValue::BulkString(Some(Bytes::from(format_f64(*score))))
-                            }
+                            Some(score) => RespValue::Double(*score),
                             None => RespValue::BulkString(None),
                         })
                         .collect(),
@@ -2550,12 +2611,12 @@ impl WireOp for ZAddWire {
 // --- Blocking pops ---
 
 /// The reply for a successful `BZPOPMIN`/`BZPOPMAX`: a 3-element array of
-/// `[key, member, score]`.
+/// `[key, member, score]`, the score being a double.
 fn bzpop_reply_value(p: PopResult) -> RespValue {
     RespValue::Array(Some(vec![
         RespValue::BulkString(Some(Bytes::from(p.key))),
         RespValue::BulkString(Some(Bytes::from(p.member))),
-        RespValue::BulkString(Some(Bytes::from(format_f64(p.score)))),
+        RespValue::Double(p.score),
     ]))
 }
 
@@ -2705,6 +2766,11 @@ mod tests {
     /// Runs one op through its own transaction and commits if it mutates, then
     /// renders the reply (the unit-test equivalent of Go's `kvs.Update`/`Read`).
     async fn exec(session: &Session, op: QueuedOp) -> RespValue {
+        crate::testutil::resp2(exec_raw(session, op).await)
+    }
+
+    /// Like [`exec`], but leaves the RESP3 types in the reply.
+    async fn exec_raw(session: &Session, op: QueuedOp) -> RespValue {
         let store = session.store();
         let tx = store
             .begin(op.is_mutating, TxIsolation::Snapshot)
@@ -2720,6 +2786,10 @@ mod tests {
     /// Like [`exec`] but takes owned data so it can be spawned as a `'static`
     /// task (needed for blocking-pop tests).
     async fn exec_owned(op: QueuedOp, store: Arc<dyn RedisStore>) -> RespValue {
+        crate::testutil::resp2(exec_owned_raw(op, store).await)
+    }
+
+    async fn exec_owned_raw(op: QueuedOp, store: Arc<dyn RedisStore>) -> RespValue {
         let tx = store
             .begin(op.is_mutating, TxIsolation::Snapshot)
             .await
@@ -2847,8 +2917,8 @@ mod tests {
         both(&legacy, &ns, |s| zincrby(s, b"a", 1.0, b"brand-new")).await;
         both(&legacy, &ns, |s| zrem(s, b"a", &bs(&["d", "nope"]))).await;
         both(&legacy, &ns, |s| zrange(s, b"a", 0, -1, true)).await;
-        both(&legacy, &ns, |s| zpopmin(s, b"a", 1)).await;
-        both(&legacy, &ns, |s| zpopmax(s, b"a", 1)).await;
+        both(&legacy, &ns, |s| zpopmin(s, b"a", Some(1))).await;
+        both(&legacy, &ns, |s| zpopmax(s, b"a", Some(1))).await;
         both(&legacy, &ns, |s| zremrangebyscore(s, b"a", "-inf", "3")).await;
         both(&legacy, &ns, |s| zremrangebyrank(s, b"a", 0, 0)).await;
         both(&legacy, &ns, |s| zrange(s, b"a", 0, -1, true)).await;
@@ -3416,12 +3486,12 @@ mod tests {
     async fn zpopmin_and_max() {
         let session = test_session();
         zadd_pairs(&session, b"z", &[("a", 1.0), ("b", 2.0), ("c", 3.0)]).await;
-        let reply = exec(&session, zpopmin(&session, b"z", 2)).await;
+        let reply = exec(&session, zpopmin(&session, b"z", Some(2))).await;
         assert_eq!(
             expect_array(&reply),
             vec![b"a".to_vec(), b"1".to_vec(), b"b".to_vec(), b"2".to_vec()]
         );
-        let reply = exec(&session, zpopmax(&session, b"z", 1)).await;
+        let reply = exec(&session, zpopmax(&session, b"z", Some(1))).await;
         assert_eq!(expect_array(&reply), vec![b"c".to_vec(), b"3".to_vec()]);
         assert_eq!(
             exec(&session, zcard(&session, b"z")).await,
@@ -3614,7 +3684,7 @@ mod tests {
             ),
             zcard(&session, b"strkey"),
             zrange(&session, b"strkey", 0, -1, false),
-            zpopmin(&session, b"strkey", 1),
+            zpopmin(&session, b"strkey", Some(1)),
         ] {
             let err = expect_error(&exec(&session, op).await);
             assert_eq!(

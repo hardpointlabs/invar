@@ -1641,10 +1641,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                     ),
                 );
             }
-            let mut count = 1usize;
+            let mut count = None;
             if args.len() >= 3 {
                 match parse_i64(&args[2]) {
-                    Some(v) if v >= 0 => count = v as usize,
+                    Some(v) if v >= 0 => count = Some(v as usize),
                     _ => {
                         return error_op(session, "ERR value is not an integer or out of range");
                     }
@@ -3077,6 +3077,102 @@ mod tests {
         assert_wire(&mut s, &["smembers", "nope"], "*0\r\n", "~0\r\n").await;
         let u = dispatch_raw(&mut s, &["sunion", "s1", "s2"]).await;
         assert!(matches!(&u[0], RespValue::Set(items) if items.len() == 2));
+    }
+
+    #[tokio::test]
+    async fn zset_reply_shapes_per_protocol() {
+        let mut s = test_session();
+        dispatch(&mut s, &["zadd", "z", "1", "a", "2", "b"]).await;
+
+        // Doubles.
+        assert_wire(&mut s, &["zscore", "z", "a"], "$1\r\n1\r\n", ",1\r\n").await;
+        assert_wire(&mut s, &["zscore", "z", "nope"], "$-1\r\n", "_\r\n").await;
+        assert_wire(
+            &mut s,
+            &["zmscore", "z", "a", "nope"],
+            "*2\r\n$1\r\n1\r\n$-1\r\n",
+            "*2\r\n,1\r\n_\r\n",
+        )
+        .await;
+        assert_wire(
+            &mut s,
+            &["zincrby", "z", "0.5", "a"],
+            "$3\r\n1.5\r\n",
+            ",1.5\r\n",
+        )
+        .await;
+        dispatch(&mut s, &["zadd", "z", "1", "a"]).await;
+
+        // WITHSCORES: pairs on RESP3, flat on RESP2; plain members unchanged.
+        let flat = "*4\r\n$1\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n$1\r\n2\r\n";
+        let pairs = "*2\r\n*2\r\n$1\r\na\r\n,1\r\n*2\r\n$1\r\nb\r\n,2\r\n";
+        assert_wire(
+            &mut s,
+            &["zrange", "z", "0", "-1", "withscores"],
+            flat,
+            pairs,
+        )
+        .await;
+        assert_wire(
+            &mut s,
+            &["zrangebyscore", "z", "-inf", "+inf", "withscores"],
+            flat,
+            pairs,
+        )
+        .await;
+        let plain = "*2\r\n$1\r\na\r\n$1\r\nb\r\n";
+        assert_wire(&mut s, &["zrange", "z", "0", "-1"], plain, plain).await;
+        let rev_flat = "*4\r\n$1\r\nb\r\n$1\r\n2\r\n$1\r\na\r\n$1\r\n1\r\n";
+        let rev_pairs = "*2\r\n*2\r\n$1\r\nb\r\n,2\r\n*2\r\n$1\r\na\r\n,1\r\n";
+        assert_wire(
+            &mut s,
+            &["zrevrange", "z", "0", "-1", "withscores"],
+            rev_flat,
+            rev_pairs,
+        )
+        .await;
+        assert_wire(
+            &mut s,
+            &["zrevrangebyscore", "z", "+inf", "-inf", "withscores"],
+            rev_flat,
+            rev_pairs,
+        )
+        .await;
+
+        // Set operations with scores, and ZRANDMEMBER (single member, so
+        // deterministic).
+        dispatch(&mut s, &["zadd", "r", "1", "only"]).await;
+        let one_flat = "*2\r\n$4\r\nonly\r\n$1\r\n1\r\n";
+        let one_pairs = "*1\r\n*2\r\n$4\r\nonly\r\n,1\r\n";
+        for cmd in ["zunion", "zinter", "zdiff"] {
+            assert_wire(&mut s, &[cmd, "1", "r", "withscores"], one_flat, one_pairs).await;
+        }
+        assert_wire(&mut s, &["zrandmember", "r", "-1"], one_flat, one_pairs).await;
+
+        // Pops: without a count a single flat [member, score]; with one, pairs.
+        assert_wire(
+            &mut s,
+            &["zpopmin", "z"],
+            "*2\r\n$1\r\na\r\n$1\r\n1\r\n",
+            "*2\r\n$1\r\na\r\n,1\r\n",
+        )
+        .await;
+        assert_wire(
+            &mut s,
+            &["zpopmax", "z", "1"],
+            "*2\r\n$1\r\nb\r\n$1\r\n2\r\n",
+            "*1\r\n*2\r\n$1\r\nb\r\n,2\r\n",
+        )
+        .await;
+        assert_wire(&mut s, &["zpopmin", "z", "5"], "*0\r\n", "*0\r\n").await;
+        dispatch(&mut s, &["zadd", "z", "7", "m"]).await;
+        assert_wire(
+            &mut s,
+            &["bzpopmin", "z", "0"],
+            "*3\r\n$1\r\nz\r\n$1\r\nm\r\n$1\r\n7\r\n",
+            "*3\r\n$1\r\nz\r\n$1\r\nm\r\n,7\r\n",
+        )
+        .await;
     }
 
     /// RESET wipes the session clean: protocol, DB, name, MULTI and WATCH.
