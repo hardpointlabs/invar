@@ -162,7 +162,8 @@ fn resp_to_piccolo<'gc>(ctx: Context<'gc>, resp: RespValue) -> Value<'gc> {
         | RespValue::Double(_)
         | RespValue::Map(_)
         | RespValue::Set(_)
-        | RespValue::Push(_) => {
+        | RespValue::Push(_)
+        | RespValue::Pairs(_) => {
             let mut resp = resp;
             downgrade_to_resp2(&mut resp);
             resp_to_piccolo(ctx, resp)

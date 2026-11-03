@@ -79,6 +79,10 @@ pub enum RespValue {
     Set(Vec<RespValue>),
     /// RESP3 out-of-band push. Renders as an array on a RESP2 connection.
     Push(Vec<RespValue>),
+    /// An array of two-element arrays in RESP3 (`ZRANGE ... WITHSCORES`,
+    /// `HRANDFIELD ... WITHVALUES`), which RESP2 flattens to `2n` elements.
+    /// Encode-only: a decoder sees it as an array of arrays.
+    Pairs(Vec<(RespValue, RespValue)>),
 }
 
 /// The wire protocol a connection speaks. RESP2 is the default; a connection
@@ -472,7 +476,7 @@ pub fn downgrade_to_resp2(value: &mut RespValue) {
         RespValue::Double(d) => {
             *value = RespValue::BulkString(Some(Bytes::from(format_f64(*d))));
         }
-        RespValue::Map(pairs) => {
+        RespValue::Map(pairs) | RespValue::Pairs(pairs) => {
             let mut flat = Vec::with_capacity(pairs.len() * 2);
             for (mut k, mut v) in std::mem::take(pairs) {
                 downgrade_to_resp2(&mut k);
@@ -557,6 +561,16 @@ fn encode_value(value: &RespValue, protocol: Protocol, dst: &mut BytesMut) {
             for (k, v) in pairs {
                 encode_value(k, protocol, dst);
                 encode_value(v, protocol, dst);
+            }
+        }
+        RespValue::Pairs(pairs) => {
+            dst.extend_from_slice(b"*");
+            dst.extend_from_slice(pairs.len().to_string().as_bytes());
+            dst.extend_from_slice(b"\r\n");
+            for (a, b) in pairs {
+                dst.extend_from_slice(b"*2\r\n");
+                encode_value(a, protocol, dst);
+                encode_value(b, protocol, dst);
             }
         }
         RespValue::Set(items) => encode_aggregate(b'~', items, protocol, dst),
@@ -1190,6 +1204,12 @@ mod tests {
                 b"*2\r\n$1\r\na\r\n:1\r\n",
                 b"%1\r\n$1\r\na\r\n:1\r\n",
             ),
+            (
+                RespValue::Pairs(vec![(bulk(b"a"), RespValue::Double(1.5))]),
+                b"*2\r\n$1\r\na\r\n$3\r\n1.5\r\n",
+                b"*1\r\n*2\r\n$1\r\na\r\n,1.5\r\n",
+            ),
+            (RespValue::Pairs(vec![]), b"*0\r\n", b"*0\r\n"),
             (
                 RespValue::Set(vec![bulk(b"a")]),
                 b"*1\r\n$1\r\na\r\n",
