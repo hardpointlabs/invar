@@ -9,8 +9,8 @@
 //! await point.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::oneshot;
@@ -165,7 +165,12 @@ impl WatchRegistry {
 
     /// Returns the current write version of `key` (0 if never written).
     pub fn get_version(&self, key: &str) -> u64 {
-        self.write_versions.lock().unwrap().get(key).copied().unwrap_or(0)
+        self.write_versions
+            .lock()
+            .unwrap()
+            .get(key)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Bumps the write version of each key in `keys` after a successful commit.
@@ -552,15 +557,12 @@ mod tests {
         let registry = Arc::new(WatchRegistry::new());
         let r = registry.clone();
         let keys = vec![key()];
-        let handle =
-            tokio::spawn(async move { r.block_stream(&keys, None).await });
+        let handle = tokio::spawn(async move { r.block_stream(&keys, None).await });
         tokio::time::sleep(Duration::from_millis(10)).await;
 
         let mut claim = registry.try_claim(&key()).expect("waiter registered");
         assert!(claim.is_stream());
-        claim.set_result(BlockResult::Stream(StreamResult {
-            public_key: key(),
-        }));
+        claim.set_result(BlockResult::Stream(StreamResult { public_key: key() }));
         claim.wake();
 
         let delivered = handle.await.unwrap().expect("blocked client woke");

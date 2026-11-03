@@ -61,12 +61,18 @@ pub(crate) struct ElementPrefix {
 impl ElementPrefix {
     /// The prefix derived from the key's name, for a sentinel that records none.
     pub(crate) fn legacy(bytes: Vec<u8>) -> Self {
-        Self { bytes, explicit: false }
+        Self {
+            bytes,
+            explicit: false,
+        }
     }
 
     /// A prefix recorded in (or about to be recorded in) a sentinel.
     pub(crate) fn explicit(bytes: Vec<u8>) -> Self {
-        Self { bytes, explicit: true }
+        Self {
+            bytes,
+            explicit: true,
+        }
     }
 
     pub(crate) fn is_explicit(&self) -> bool {
@@ -88,7 +94,10 @@ fn corrupt() -> DbError {
 
 /// Splits the value of a namespaced sentinel into `(payload, prefix)`.
 fn split_trailer(value: &[u8]) -> Result<(&[u8], &[u8]), DbError> {
-    let len_at = value.len().checked_sub(TRAILER_LEN_SIZE).ok_or_else(corrupt)?;
+    let len_at = value
+        .len()
+        .checked_sub(TRAILER_LEN_SIZE)
+        .ok_or_else(corrupt)?;
     let len = u32::from_be_bytes(value[len_at..].try_into().expect("4 bytes")) as usize;
     let prefix_at = len_at.checked_sub(len).ok_or_else(corrupt)?;
     Ok((&value[..prefix_at], &value[prefix_at..len_at]))
@@ -107,7 +116,9 @@ pub(crate) fn payload(item: &Item) -> Result<&[u8], DbError> {
 /// it records, or `legacy` (derived from the key's name) when it records none.
 pub(crate) fn prefix_of(item: &Item, legacy: &[u8]) -> Result<ElementPrefix, DbError> {
     if is_namespaced(item.metadata()) {
-        Ok(ElementPrefix::explicit(split_trailer(item.value())?.1.to_vec()))
+        Ok(ElementPrefix::explicit(
+            split_trailer(item.value())?.1.to_vec(),
+        ))
     } else {
         Ok(ElementPrefix::legacy(legacy.to_vec()))
     }
@@ -139,8 +150,13 @@ const NAMESPACE_ID_LEN: usize = 16;
 /// (`-<db>:<name>`) of the key being created; it only supplies the db number.
 pub(crate) fn new_namespace(legacy: &[u8]) -> Result<ElementPrefix, DbError> {
     // `-<db>:...` -> `+<db>:`
-    let colon = legacy.iter().position(|&b| b == b':').ok_or_else(corrupt_prefix)?;
-    let db = legacy.get(1..colon).filter(|d| !d.is_empty() && d.iter().all(u8::is_ascii_digit));
+    let colon = legacy
+        .iter()
+        .position(|&b| b == b':')
+        .ok_or_else(corrupt_prefix)?;
+    let db = legacy
+        .get(1..colon)
+        .filter(|d| !d.is_empty() && d.iter().all(u8::is_ascii_digit));
     let db = db.ok_or_else(corrupt_prefix)?;
     let mut prefix = Vec::with_capacity(colon + 1 + NAMESPACE_ID_LEN);
     prefix.push(b'+');
@@ -189,7 +205,11 @@ pub(crate) async fn resolve_prefix(
 
 /// Encodes a sentinel: `payload`, plus a trailer and the flag when `prefix`
 /// is explicit. Returns the value and the type byte to store it with.
-pub(crate) fn encode_sentinel(mut payload: Vec<u8>, type_byte: u8, prefix: &ElementPrefix) -> (Vec<u8>, u8) {
+pub(crate) fn encode_sentinel(
+    mut payload: Vec<u8>,
+    type_byte: u8,
+    prefix: &ElementPrefix,
+) -> (Vec<u8>, u8) {
     if !prefix.is_explicit() {
         return (payload, type_byte);
     }
@@ -242,7 +262,10 @@ mod tests {
         assert_eq!(base_type(meta), 4);
         assert!(is_namespaced(meta));
         let (payload, recorded) = split_trailer(&value).unwrap();
-        assert_eq!((payload, recorded), (&[0u8, 0, 0, 7][..], &b"+0:abcdefgh"[..]));
+        assert_eq!(
+            (payload, recorded),
+            (&[0u8, 0, 0, 7][..], &b"+0:abcdefgh"[..])
+        );
 
         let legacy = ElementPrefix::legacy(b"-0:name".to_vec());
         assert_eq!(encode_sentinel(vec![1, 2], 4, &legacy), (vec![1, 2], 4));

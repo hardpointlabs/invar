@@ -18,11 +18,11 @@ use bytes::Bytes;
 use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
-use smallvec::SmallVec;
 use crate::common::session::Session;
 use crate::common::set_keeping_ttl;
 use crate::common::ValueType;
 use crate::resp::RespValue;
+use smallvec::SmallVec;
 
 /// Number of register-index bits (p), giving 2^14 registers.
 const HLL_P: u32 = 14;
@@ -39,8 +39,7 @@ const HLL_REGISTER_MAX: u32 = (1 << HLL_BITS) - 1;
 /// Bytes of the `HYLL` header preceding the registers.
 const HLL_HDR_SIZE: usize = 16;
 /// Total on-disk size of a dense sketch: header plus packed registers.
-const HLL_DENSE_SIZE: usize =
-    HLL_HDR_SIZE + (HLL_REGISTERS * HLL_BITS as usize).div_ceil(8);
+const HLL_DENSE_SIZE: usize = HLL_HDR_SIZE + (HLL_REGISTERS * HLL_BITS as usize).div_ceil(8);
 /// The only encoding this port writes (dense).
 const HLL_DENSE: u8 = 0;
 /// The bias-correction constant for the estimator (the nearest f64 to
@@ -360,7 +359,11 @@ pub fn pfmerge(session: &Session, dest: &[u8], sources: &[Bytes]) -> QueuedOp {
         keys: Some({
             let mut ks = SmallVec::<[String; 2]>::new();
             ks.push(String::from_utf8_lossy(&session.public_key(dest)).into_owned());
-            ks.extend(sources.iter().map(|k| String::from_utf8_lossy(&session.public_key(k)).into_owned()));
+            ks.extend(
+                sources
+                    .iter()
+                    .map(|k| String::from_utf8_lossy(&session.public_key(k)).into_owned()),
+            );
             ks
         }),
     }
@@ -525,7 +528,9 @@ impl WireOp for IntWire {
         match result {
             Ok(res) => match res.downcast::<i64>() {
                 Ok(value) => RespValue::Integer(*value),
-                Err(_) => RespValue::Error(Bytes::from_static(b"ERR internal error: bad int result")),
+                Err(_) => {
+                    RespValue::Error(Bytes::from_static(b"ERR internal error: bad int result"))
+                }
             },
             Err(e) => err_resp(&e),
         }
@@ -540,7 +545,9 @@ impl WireOp for CountWire {
         match result {
             Ok(res) => match res.downcast::<u64>() {
                 Ok(count) => RespValue::Integer(*count as i64),
-                Err(_) => RespValue::Error(Bytes::from_static(b"ERR internal error: bad count result")),
+                Err(_) => {
+                    RespValue::Error(Bytes::from_static(b"ERR internal error: bad count result"))
+                }
             },
             Err(e) => err_resp(&e),
         }
@@ -550,8 +557,8 @@ impl WireOp for CountWire {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kv::kv::TxIsolation;
     use crate::testutil::test_session;
+    use kv::kv::TxIsolation;
 
     fn expect_int(reply: &RespValue) -> i64 {
         match reply {
@@ -568,7 +575,10 @@ mod tests {
     /// renders the reply.
     async fn exec(session: &Session, op: QueuedOp) -> RespValue {
         let store = session.store();
-        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
+        let tx = store
+            .begin(op.is_mutating, TxIsolation::Snapshot)
+            .await
+            .expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -579,7 +589,10 @@ mod tests {
     /// Reads the raw stored value at key (any metadata), or None if missing.
     async fn stored(session: &Session, key: &[u8]) -> Option<Vec<u8>> {
         let store = session.store();
-        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
+        let tx = store
+            .begin(false, TxIsolation::Snapshot)
+            .await
+            .expect("read tx");
         match tx.get(&session.public_key(key)).await {
             Ok(item) => Some(item.value().to_vec()),
             Err(KvError::KeyNotFound) => None,
@@ -741,7 +754,10 @@ mod tests {
         let c_expected = hll_count(&mut separate);
 
         let diff = i64::try_from(c_merged).unwrap() - i64::try_from(c_expected).unwrap();
-        assert!(diff.abs() <= 2, "merged {c_merged} too far from {c_expected}");
+        assert!(
+            diff.abs() <= 2,
+            "merged {c_merged} too far from {c_expected}"
+        );
     }
 
     #[test]
@@ -825,16 +841,28 @@ mod tests {
         .await;
         assert_eq!(expect_int(&reply), 1);
 
-        let reply = exec(&session, pfadd(&session, b"hll_a", &[Bytes::from_static(b"hello")])).await;
+        let reply = exec(
+            &session,
+            pfadd(&session, b"hll_a", &[Bytes::from_static(b"hello")]),
+        )
+        .await;
         assert_eq!(expect_int(&reply), 0);
 
         let reply = exec(&session, pfcount(&session, &[Bytes::from_static(b"hll_a")])).await;
         assert!(expect_int(&reply) > 0);
 
-        let reply = exec(&session, pfcount(&session, &[Bytes::from_static(b"hll_empty")])).await;
+        let reply = exec(
+            &session,
+            pfcount(&session, &[Bytes::from_static(b"hll_empty")]),
+        )
+        .await;
         assert_eq!(expect_int(&reply), 0);
 
-        let reply = exec(&session, pfcount(&session, &[Bytes::from_static(b"hll_nonexist")])).await;
+        let reply = exec(
+            &session,
+            pfcount(&session, &[Bytes::from_static(b"hll_nonexist")]),
+        )
+        .await;
         assert_eq!(expect_int(&reply), 0);
     }
 
@@ -843,9 +871,17 @@ mod tests {
         let session = test_session();
         let items = pseudo_random_items(25);
         for (i, item) in items.iter().enumerate() {
-            let first = exec(&session, pfadd(&session, b"hll", &[Bytes::copy_from_slice(item)])).await;
+            let first = exec(
+                &session,
+                pfadd(&session, b"hll", &[Bytes::copy_from_slice(item)]),
+            )
+            .await;
             assert_eq!(expect_int(&first), 1, "first add of item {i} must be new");
-            let second = exec(&session, pfadd(&session, b"hll", &[Bytes::copy_from_slice(item)])).await;
+            let second = exec(
+                &session,
+                pfadd(&session, b"hll", &[Bytes::copy_from_slice(item)]),
+            )
+            .await;
             assert_eq!(expect_int(&second), 0, "repeat add must be a no-op");
         }
         let reply = exec(&session, pfcount(&session, &[Bytes::from_static(b"hll")])).await;
@@ -888,11 +924,8 @@ mod tests {
         )
         .await;
         let count = expect_int(&reply);
-        let a = expect_int(&exec(
-            &session,
-            pfcount(&session, &[Bytes::from_static(b"hll_a")]),
-        )
-        .await);
+        let a =
+            expect_int(&exec(&session, pfcount(&session, &[Bytes::from_static(b"hll_a")])).await);
         assert!(count >= a, "multi-key count {count} below single {a}");
     }
 
@@ -921,11 +954,17 @@ mod tests {
         .await;
         expect_ok(&reply);
 
-        let reply = exec(&session, pfcount(&session, &[Bytes::from_static(b"hll_merged")])).await;
+        let reply = exec(
+            &session,
+            pfcount(&session, &[Bytes::from_static(b"hll_merged")]),
+        )
+        .await;
         assert_eq!(expect_int(&reply), 2);
 
         // The stored merged value must still be a valid sketch.
-        assert!(is_valid_hll(&stored(&session, b"hll_merged").await.unwrap()));
+        assert!(is_valid_hll(
+            &stored(&session, b"hll_merged").await.unwrap()
+        ));
     }
 
     #[tokio::test]
@@ -933,7 +972,11 @@ mod tests {
         let session = test_session();
         // A plain string under a source key is skipped, and the dest is
         // still created as an empty sketch.
-        exec(&session, crate::strings::set(&session, b"notahll", b"plain", None)).await;
+        exec(
+            &session,
+            crate::strings::set(&session, b"notahll", b"plain", None),
+        )
+        .await;
         let reply = exec(
             &session,
             pfmerge(&session, b"hll_merged", &[Bytes::from_static(b"missing")]),
@@ -951,13 +994,25 @@ mod tests {
     #[tokio::test]
     async fn pfadd_on_invalid_key_leaves_it_untouched() {
         let session = test_session();
-        exec(&session, crate::strings::set(&session, b"notahll", b"plain", None)).await;
+        exec(
+            &session,
+            crate::strings::set(&session, b"notahll", b"plain", None),
+        )
+        .await;
 
-        let reply = exec(&session, pfadd(&session, b"notahll", &[Bytes::from_static(b"x")])).await;
+        let reply = exec(
+            &session,
+            pfadd(&session, b"notahll", &[Bytes::from_static(b"x")]),
+        )
+        .await;
         assert_eq!(expect_int(&reply), 0);
         assert_eq!(stored(&session, b"notahll").await, Some(b"plain".to_vec()));
 
-        let reply = exec(&session, pfcount(&session, &[Bytes::from_static(b"notahll")])).await;
+        let reply = exec(
+            &session,
+            pfcount(&session, &[Bytes::from_static(b"notahll")]),
+        )
+        .await;
         assert_eq!(expect_int(&reply), 0);
     }
 }

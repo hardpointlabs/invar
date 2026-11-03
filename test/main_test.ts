@@ -1,4 +1,4 @@
-import { createClient, type RedisClientType } from "redis";
+import { createClient, RESP_TYPES } from "redis-resp3";
 import { assertEquals, assertExists } from "@std/assert";
 
 interface TestCase {
@@ -9,6 +9,68 @@ interface TestCase {
   version: string;
   description: string;
   setup?: string[][];
+  // Optional overrides for RESP3 connections, for the commands whose reply
+  // shape differs there (maps, sets, doubles, pairs, a single null). Omitted
+  // means the RESP2 expectation holds on both protocols.
+  expected_resp3?: unknown;
+  type_resp3?: string;
+}
+
+// Every case runs once per protocol, each time on a fresh connection that
+// negotiated that protocol with HELLO.
+const PROTOCOLS = [2, 3] as const;
+type Protocol = (typeof PROTOCOLS)[number];
+
+type Client = Awaited<ReturnType<typeof connect>>;
+
+// RESP3 maps and sets are surfaced as Map and Set so a test can tell them
+// apart from the arrays RESP2 sends. Doubles arrive as JS numbers (RESP2 sends
+// a bulk string, so a double is distinguishable by type too).
+async function connect(resp: Protocol) {
+  const base = createClient({
+    url: "redis://localhost:6379",
+    RESP: resp,
+    socket: { reconnectStrategy: false },
+  });
+  await base.connect();
+  return resp === 3
+    ? base.withTypeMapping({ [RESP_TYPES.MAP]: Map, [RESP_TYPES.SET]: Set })
+    : base.withTypeMapping({});
+}
+
+function effectiveCase(testCase: TestCase, resp: Protocol): TestCase {
+  if (resp === 3 && "expected_resp3" in testCase) {
+    return {
+      ...testCase,
+      expected: testCase.expected_resp3,
+      type: testCase.type_resp3 ?? testCase.type,
+    };
+  }
+  return testCase;
+}
+
+// Structural comparison for RESP3 expectations. JSON can't spell a Map or a
+// Set, so expectations tag them: {"$map": [[k, v], ...]} and {"$set": [...]}.
+// Maps compare by key (hash order is not part of the contract), sets ignore
+// order, arrays are ordered, and numbers must be actual numbers.
+function resp3Equal(actual: unknown, expected: unknown): boolean {
+  if (expected !== null && typeof expected === "object" && !Array.isArray(expected)) {
+    const tagged = expected as { $map?: [unknown, unknown][]; $set?: unknown[] };
+    if (tagged.$map) {
+      if (!(actual instanceof Map) || actual.size !== tagged.$map.length) return false;
+      return tagged.$map.every(([k, v]) => actual.has(k) && resp3Equal(actual.get(k), v));
+    }
+    if (tagged.$set) {
+      if (!(actual instanceof Set) || actual.size !== tagged.$set.length) return false;
+      return tagged.$set.every((item) => actual.has(item));
+    }
+    return false;
+  }
+  if (Array.isArray(expected)) {
+    return Array.isArray(actual) && actual.length === expected.length &&
+      expected.every((item, i) => resp3Equal(actual[i], item));
+  }
+  return actual === expected;
 }
 
 interface TestResult {
@@ -30,7 +92,7 @@ function isErrorMarker(value: unknown): boolean {
   return value !== null && typeof value === "object" && "error" in value;
 }
 
-let client: RedisClientType | null = null;
+let client: Client | null = null;
 const results: TestResult[] = [];
 
 function compareResult(actual: unknown, expected: unknown, type: string): boolean {
@@ -51,6 +113,14 @@ function compareResult(actual: unknown, expected: unknown, type: string): boolea
       return typeof actual === "number" && actual > threshold;
     case "null":
       return actual === null;
+    case "resp3":
+      return resp3Equal(actual, expected);
+    case "resp3_map_contains": {
+      // A map that includes at least the expected entries.
+      const want = (expected as { $map: [unknown, unknown][] }).$map;
+      return actual instanceof Map &&
+        want.every(([k, v]) => actual.has(k) && resp3Equal(actual.get(k), v));
+    }
     case "error":
       if (isErrorMarker(expected)) return typeof actual === "string" && actual.length > 0;
       return typeof actual === "string" && actual.includes(expected as string);
@@ -96,10 +166,16 @@ function formatResult(actual: unknown): string {
   if (Array.isArray(actual)) {
     return "[" + actual.map(formatResult).join(", ") + "]";
   }
+  if (actual instanceof Map) {
+    return "Map{" + [...actual].map(([k, v]) => `${formatResult(k)} => ${formatResult(v)}`).join(", ") + "}";
+  }
+  if (actual instanceof Set) {
+    return "Set{" + [...actual].map(formatResult).join(", ") + "}";
+  }
   return String(actual);
 }
 
-async function executeCommand(client: RedisClientType, cmd: string[]): Promise<unknown> {
+async function executeCommand(client: Client, cmd: string[]): Promise<unknown> {
   const command = cmd[0].toLowerCase();
   const args = cmd.slice(1);
 
@@ -162,7 +238,7 @@ async function executeCommand(client: RedisClientType, cmd: string[]): Promise<u
       case "renamenx":
         try {
           const result = await client.sendCommand(["RENAMENX", ...args]);
-          return result === 1 ? 1 : 0;
+          return Number(result) === 1 ? 1 : 0;
         } catch {
           return 0;
         }
@@ -240,7 +316,8 @@ async function executeCommand(client: RedisClientType, cmd: string[]): Promise<u
   }
 }
 
-async function runTest(testCase: TestCase): Promise<TestResult> {
+async function runTest(base: TestCase, resp: Protocol): Promise<TestResult> {
+  const testCase = effectiveCase(base, resp);
   try {
     if (!client) throw new Error("Client not connected");
 
@@ -361,46 +438,47 @@ function printResultsTable(results: TestResult[]) {
   }
 }
 
-// Main test suite
-Deno.test("Redis Command Test Suite", async () => {
-  client = await createClient({
-    url: "redis://localhost:6379",
-    socket: {
-      reconnectStrategy: false,
-    },
-  });
+// Main test suite, run once per protocol.
+for (const resp of PROTOCOLS) {
+  Deno.test(`Redis Command Test Suite (RESP${resp})`, async () => {
+    results.length = 0;
+    client = await connect(resp);
 
-  try {
-    await client.connect();
+    try {
+      // The protocol the connection is really speaking is part of the test.
+      const hello = await client.sendCommand(["HELLO"]);
+      const proto = hello instanceof Map ? hello.get("proto") : (hello as unknown as unknown[])[5];
+      assertEquals(proto, resp, "negotiated protocol");
+      await client.flushAll();
 
-    // Run all tests
-    for (const testCase of testCases) {
-      const result = await runTest(testCase);
-      results.push(result);
+      // Run all tests
+      for (const testCase of testCases) {
+        const result = await runTest(testCase, resp);
+        results.push(result);
 
-      // Assert for Deno test framework
-      if (result.status === "failed") {
-        console.error(`FAILED: ${result.name}`);
-        if (result.error) {
-          console.error(`  ${result.error}`);
+        // Assert for Deno test framework
+        if (result.status === "failed") {
+          console.error(`FAILED: ${result.name}`);
+          if (result.error) {
+            console.error(`  ${result.error}`);
+          }
         }
       }
+
+      // Print results table
+      printResultsTable(results);
+
+      // Assert all passed
+      const failedResults = results.filter(r => r.status === "failed");
+      assertEquals(
+        failedResults.length,
+        0,
+        `Some tests failed: ${failedResults.map(r => r.name).join(", ")}`
+      );
+    } finally {
+      if (client) {
+        await client.quit();
+      }
     }
-
-    // Print results table
-    printResultsTable(results);
-
-    // Assert all passed
-    const failedResults = results.filter(r => r.status === "failed");
-    assertEquals(
-      failedResults.length,
-      0,
-      `Some tests failed: ${failedResults.map(r => r.name).join(", ")}`
-    );
-
-  } finally {
-    if (client) {
-      await client.quit();
-    }
-  }
-});
+  });
+}

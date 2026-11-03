@@ -678,6 +678,8 @@
     "command": ["SMEMBERS", "set_test5"],
     "expected": ["a", "b", "c"],
     "type": "set",
+    "expected_resp3": {"$set": ["a", "b", "c"]},
+    "type_resp3": "resp3",
     "version": "1.0.0",
     "description": "Get all members of a set",
     "setup": [["SADD", "set_test5", "a", "b", "c"]]
@@ -687,6 +689,8 @@
     "command": ["SMEMBERS", "set_nonexistent2"],
     "expected": [],
     "type": "array",
+    "expected_resp3": {"$set": []},
+    "type_resp3": "resp3",
     "version": "1.0.0",
     "description": "Get members of non-existing set"
   },
@@ -739,6 +743,8 @@
     "command": ["SDIFF", "sdiff_a", "sdiff_b"],
     "expected": ["a", "b"],
     "type": "set",
+    "expected_resp3": {"$set": ["a", "b"]},
+    "type_resp3": "resp3",
     "version": "1.0.0",
     "description": "Difference of two sets",
     "setup": [["SADD", "sdiff_a", "a", "b", "c", "d"], ["SADD", "sdiff_b", "c", "d", "e"]]
@@ -748,6 +754,8 @@
     "command": ["SINTER", "sinter_a", "sinter_b"],
     "expected": ["c", "d"],
     "type": "set",
+    "expected_resp3": {"$set": ["c", "d"]},
+    "type_resp3": "resp3",
     "version": "1.0.0",
     "description": "Intersection of two sets",
     "setup": [["SADD", "sinter_a", "a", "b", "c", "d"], ["SADD", "sinter_b", "c", "d", "e", "f"]]
@@ -757,6 +765,8 @@
     "command": ["SUNION", "sunion_a", "sunion_b"],
     "expected": ["a", "b", "c", "d"],
     "type": "set",
+    "expected_resp3": {"$set": ["a", "b", "c", "d"]},
+    "type_resp3": "resp3",
     "version": "1.0.0",
     "description": "Union of two sets",
     "setup": [["SADD", "sunion_a", "a", "b"], ["SADD", "sunion_b", "c", "d"]]
@@ -1147,6 +1157,8 @@
     "command": ["ZSCORE", "zint_zscore", "b"],
     "expected": "2",
     "type": "bulk_string",
+    "expected_resp3": 2,
+    "type_resp3": "resp3",
     "version": "1.0.0",
     "description": "ZSCORE returns the score of a member",
     "setup": [["DEL", "zint_zscore"], ["ZADD", "zint_zscore", "1", "a", "2", "b", "3", "c"]]
@@ -1209,6 +1221,8 @@
     "command": ["ZRANGE", "zint_zrange", "0", "-1", "WITHSCORES"],
     "expected": ["a", "1", "b", "2", "c", "3"],
     "type": "array",
+    "expected_resp3": [["a", 1], ["b", 2], ["c", 3]],
+    "type_resp3": "resp3",
     "version": "1.0.0",
     "description": "ZRANGE WITHSCORES returns alternating member and score",
     "setup": [["DEL", "zint_zrange"], ["ZADD", "zint_zrange", "1", "a", "2", "b", "3", "c"]]
@@ -1263,6 +1277,8 @@
     "command": ["ZINCRBY", "zint_zincrby", "2.5", "a"],
     "expected": "3.5",
     "type": "bulk_string",
+    "expected_resp3": 3.5,
+    "type_resp3": "resp3",
     "version": "1.0.0",
     "description": "ZINCRBY adds increment to existing score",
     "setup": [["DEL", "zint_zincrby"], ["ZADD", "zint_zincrby", "1", "a"]]
@@ -1299,6 +1315,8 @@
     "command": ["ZPOPMIN", "zint_zpopmin"],
     "expected": ["a", "1"],
     "type": "array",
+    "expected_resp3": ["a", 1],
+    "type_resp3": "resp3",
     "version": "1.0.0",
     "description": "ZPOPMIN removes and returns the lowest scored member",
     "setup": [["DEL", "zint_zpopmin"], ["ZADD", "zint_zpopmin", "1", "a", "2", "b"]]
@@ -1308,6 +1326,8 @@
     "command": ["ZPOPMAX", "zint_zpopmax"],
     "expected": ["b", "2"],
     "type": "array",
+    "expected_resp3": ["b", 2],
+    "type_resp3": "resp3",
     "version": "1.0.0",
     "description": "ZPOPMAX removes and returns the highest scored member",
     "setup": [["DEL", "zint_zpopmax"], ["ZADD", "zint_zpopmax", "1", "a", "2", "b"]]
@@ -1326,6 +1346,8 @@
     "command": ["ZRANGEBYSCORE", "zint_zrbs", "-inf", "+inf", "WITHSCORES", "LIMIT", "1", "2"],
     "expected": ["b", "2", "c", "3"],
     "type": "array",
+    "expected_resp3": [["b", 2], ["c", 3]],
+    "type_resp3": "resp3",
     "version": "1.0.0",
     "description": "ZRANGEBYSCORE with WITHSCORES and LIMIT offset",
     "setup": [["DEL", "zint_zrbs"], ["ZADD", "zint_zrbs", "1", "a", "2", "b", "3", "c"]]
@@ -1362,6 +1384,8 @@
     "command": ["ZMSCORE", "zint_zmscore", "a", "x", "c"],
     "expected": ["1", null, "3"],
     "type": "array",
+    "expected_resp3": [1, null, 3],
+    "type_resp3": "resp3",
     "version": "1.0.0",
     "description": "ZMSCORE returns scores with null for missing members",
     "setup": [["DEL", "zint_zmscore"], ["ZADD", "zint_zmscore", "1", "a", "2", "b", "3", "c"]]
@@ -1389,6 +1413,8 @@
     "command": ["ZDIFF", "2", "zint_zdiff_a", "zint_zdiff_b", "WITHSCORES"],
     "expected": ["a", "1", "c", "3"],
     "type": "array",
+    "expected_resp3": [["a", 1], ["c", 3]],
+    "type_resp3": "resp3",
     "version": "1.0.0",
     "description": "ZDIFF WITHSCORES returns members with their scores",
     "setup": [["DEL", "zint_zdiff_a"], ["DEL", "zint_zdiff_b"], ["ZADD", "zint_zdiff_a", "1", "a", "2", "b", "3", "c"], ["ZADD", "zint_zdiff_b", "2", "b", "4", "d"]]
@@ -1902,6 +1928,8 @@
     "command": ["HGETALL", "h_all"],
     "expected": ["a", "1", "b", "2", "c", "3"],
     "type": "array",
+    "expected_resp3": {"$map": [["a", "1"], ["b", "2"], ["c", "3"]]},
+    "type_resp3": "resp3",
     "version": "2.0.0",
     "description": "HGETALL returns all field-value pairs as a flat array",
     "setup": [["DEL", "h_all"], ["HSET", "h_all", "a", "1", "b", "2", "c", "3"]]
@@ -1911,6 +1939,8 @@
     "command": ["HGETALL", "h_noall"],
     "expected": [],
     "type": "array",
+    "expected_resp3": {"$map": []},
+    "type_resp3": "resp3",
     "version": "2.0.0",
     "description": "HGETALL returns empty array for a non-existing key",
     "setup": [["DEL", "h_noall"]]
@@ -2231,6 +2261,8 @@
     "command": ["BZPOPMIN", "bzpopmin_immediate", "1"],
     "expected": ["bzpopmin_immediate", "member1", "1"],
     "type": "array",
+    "expected_resp3": ["bzpopmin_immediate", "member1", 1],
+    "type_resp3": "resp3",
     "version": "5.0.0",
     "description": "BZPOPMIN pops without blocking when the sorted set is non-empty",
     "setup": [["DEL", "bzpopmin_immediate"], ["ZADD", "bzpopmin_immediate", "1", "member1"]]
@@ -2240,6 +2272,8 @@
     "command": ["BZPOPMAX", "bzpopmax_immediate", "1"],
     "expected": ["bzpopmax_immediate", "member1", "1"],
     "type": "array",
+    "expected_resp3": ["bzpopmax_immediate", "member1", 1],
+    "type_resp3": "resp3",
     "version": "5.0.0",
     "description": "BZPOPMAX pops without blocking when the sorted set is non-empty",
     "setup": [["DEL", "bzpopmax_immediate"], ["ZADD", "bzpopmax_immediate", "1", "member1"]]
@@ -2829,6 +2863,8 @@
     "name": "XREAD entries after ID",
     "command": ["XREAD", "STREAMS", "stream_xrd", "1-0"],
     "type": "array",
+    "expected_resp3": {"$map": [["stream_xrd", [["2-0", ["f", "v2"]], ["3-0", ["f", "v3"]]]]]},
+    "type_resp3": "resp3",
     "version": "5.0.0",
     "description": "XREAD returns entries after the given ID",
     "setup": [
@@ -2855,6 +2891,8 @@
     "name": "XREAD BLOCK with data returns immediately",
     "command": ["XREAD", "BLOCK", "1000", "STREAMS", "stream_xrdb", "0-0"],
     "type": "array",
+    "expected_resp3": {"$map": [["stream_xrdb", [["1-0", ["f", "v1"]]]]]},
+    "type_resp3": "resp3",
     "version": "5.0.0",
     "description": "XREAD BLOCK returns immediately when entries already exist",
     "setup": [
@@ -3493,6 +3531,8 @@
     "command": ["ZRANGE", "zint_zrange_opt_rev_ws", "0", "-1", "REV", "WITHSCORES"],
     "expected": ["e", "5", "d", "4", "c", "3", "b", "2", "a", "1"],
     "type": "array",
+    "expected_resp3": [["e", 5], ["d", 4], ["c", 3], ["b", 2], ["a", 1]],
+    "type_resp3": "resp3",
     "version": "6.2.0",
     "description": "REV WITHSCORES keeps each member next to its score",
     "setup": [
@@ -3505,6 +3545,8 @@
     "command": ["ZRANGE", "zint_zrange_opt_rev_ws2", "0", "1", "WITHSCORES", "REV"],
     "expected": ["e", "5", "d", "4"],
     "type": "array",
+    "expected_resp3": [["e", 5], ["d", 4]],
+    "type_resp3": "resp3",
     "version": "6.2.0",
     "description": "options may appear in any order",
     "setup": [
@@ -3565,6 +3607,8 @@
     "command": ["ZRANGE", "zint_zrange_opt_bs_ws", "2", "3", "BYSCORE", "WITHSCORES"],
     "expected": ["b", "2", "c", "3"],
     "type": "array",
+    "expected_resp3": [["b", 2], ["c", 3]],
+    "type_resp3": "resp3",
     "version": "6.2.0",
     "description": "BYSCORE WITHSCORES returns member and score",
     "setup": [
@@ -3613,6 +3657,8 @@
     "command": ["ZRANGE", "zint_zrange_opt_bs_rev_ws_l", "+inf", "-inf", "BYSCORE", "REV", "WITHSCORES", "LIMIT", "0", "2"],
     "expected": ["e", "5", "d", "4"],
     "type": "array",
+    "expected_resp3": [["e", 5], ["d", 4]],
+    "type_resp3": "resp3",
     "version": "6.2.0",
     "description": "REV, WITHSCORES and LIMIT combine",
     "setup": [
@@ -4033,6 +4079,8 @@
     "command": ["HGETALL", "rn_hash_new"],
     "expected": ["f", "v", "g", "w"],
     "type": "array",
+    "expected_resp3": {"$map": [["f", "v"], ["g", "w"]]},
+    "type_resp3": "resp3",
     "version": "2.0.0",
     "description": "a renamed hash still has its fields",
     "setup": [
@@ -4046,6 +4094,8 @@
     "command": ["SMEMBERS", "rn_set_new"],
     "expected": ["x", "y", "z"],
     "type": "set",
+    "expected_resp3": {"$set": ["x", "y", "z"]},
+    "type_resp3": "resp3",
     "version": "1.0.0",
     "description": "a renamed set still has its members",
     "setup": [
@@ -4059,6 +4109,8 @@
     "command": ["ZRANGE", "rn_zset_new", "0", "-1", "WITHSCORES"],
     "expected": ["a", "1", "b", "2"],
     "type": "array",
+    "expected_resp3": [["a", 1], ["b", 2]],
+    "type_resp3": "resp3",
     "version": "1.2.0",
     "description": "a renamed sorted set still has its members and scores",
     "setup": [
@@ -4112,6 +4164,8 @@
     "command": ["HGETALL", "rn_over_dst"],
     "expected": ["f", "v"],
     "type": "array",
+    "expected_resp3": {"$map": [["f", "v"]]},
+    "type_resp3": "resp3",
     "version": "2.0.0",
     "description": "the old fields of an overwritten destination do not survive",
     "setup": [
@@ -4126,6 +4180,8 @@
     "command": ["HGETALL", "rn_same_hash"],
     "expected": ["f", "v"],
     "type": "array",
+    "expected_resp3": {"$map": [["f", "v"]]},
+    "type_resp3": "resp3",
     "version": "2.0.0",
     "description": "renaming a key to itself is a no-op",
     "setup": [
@@ -4217,6 +4273,8 @@
     "command": ["HGETALL", "ns_res_hash"],
     "expected": ["new", "2"],
     "type": "array",
+    "expected_resp3": {"$map": [["new", "2"]]},
+    "type_resp3": "resp3",
     "version": "2.0.0",
     "description": "elements of the hash overwritten by SET must not reappear in a hash created later under the same name",
     "setup": [
@@ -4232,6 +4290,8 @@
     "command": ["SMEMBERS", "ns_res_set"],
     "expected": ["new"],
     "type": "set",
+    "expected_resp3": {"$set": ["new"]},
+    "type_resp3": "resp3",
     "version": "1.0.0",
     "description": "elements of the set overwritten by SET must not reappear in a set created later under the same name",
     "setup": [
@@ -4247,6 +4307,8 @@
     "command": ["ZRANGE", "ns_res_zset", "0", "-1", "WITHSCORES"],
     "expected": ["new", "2"],
     "type": "array",
+    "expected_resp3": [["new", 2]],
+    "type_resp3": "resp3",
     "version": "1.2.0",
     "description": "elements of the sorted set overwritten by SET must not reappear in a sorted set created later under the same name",
     "setup": [
@@ -4307,6 +4369,8 @@
     "command": ["HGETALL", "ns_free_hash_old"],
     "expected": ["g", "w"],
     "type": "array",
+    "expected_resp3": {"$map": [["g", "w"]]},
+    "type_resp3": "resp3",
     "version": "2.0.0",
     "description": "reusing the old name of a renamed hash must not show the renamed hash's fields",
     "setup": [
@@ -4321,6 +4385,8 @@
     "command": ["HGETALL", "ns_free_hash2_new"],
     "expected": ["f", "v"],
     "type": "array",
+    "expected_resp3": {"$map": [["f", "v"]]},
+    "type_resp3": "resp3",
     "version": "2.0.0",
     "description": "the renamed hash keeps exactly its own fields",
     "setup": [
@@ -4349,6 +4415,8 @@
     "command": ["HGETALL", "ns_multi_hash"],
     "expected": ["a", "1", "b", "2"],
     "type": "array",
+    "expected_resp3": {"$map": [["a", "1"], ["b", "2"]]},
+    "type_resp3": "resp3",
     "version": "2.0.0",
     "description": "both commands of the transaction must use the same storage for the new hash",
     "setup": [
@@ -4391,11 +4459,109 @@
     "command": ["HGETALL", "ns_script_hash"],
     "expected": ["a", "1", "n", "5"],
     "type": "array",
+    "expected_resp3": {"$map": [["a", "1"], ["n", "5"]]},
+    "type_resp3": "resp3",
     "version": "2.0.0",
     "description": "both calls of the script must use the same storage for the new hash",
     "setup": [
       ["DEL", "ns_script_hash"],
       ["EVAL", "redis.call('HSET',KEYS[1],'a','1'); redis.call('HINCRBY',KEYS[1],'n',5)", "1", "ns_script_hash"]
     ]
+  },
+  {
+    "name": "RESP3 shapes: ZPOPMIN with count",
+    "command": ["ZPOPMIN", "r3_zpopmin", "2"],
+    "setup": [["ZADD", "r3_zpopmin", "1", "a", "2", "b", "3", "c"]],
+    "expected": ["a", "1", "b", "2"],
+    "expected_resp3": [["a", 1], ["b", 2]],
+    "type": "array",
+    "type_resp3": "resp3",
+    "version": "5.0.0",
+    "description": "With a count RESP3 returns [member, score] pairs; RESP2 stays flat"
+  },
+  {
+    "name": "RESP3 shapes: ZPOPMAX with count",
+    "command": ["ZPOPMAX", "r3_zpopmax", "1"],
+    "setup": [["ZADD", "r3_zpopmax", "1", "a", "2", "b"]],
+    "expected": ["b", "2"],
+    "expected_resp3": [["b", 2]],
+    "type": "array",
+    "type_resp3": "resp3",
+    "version": "5.0.0",
+    "description": "With a count RESP3 returns pairs, even for a count of 1"
+  },
+  {
+    "name": "RESP3 shapes: ZINTER WITHSCORES",
+    "command": ["ZINTER", "2", "r3_zi_a", "r3_zi_b", "WITHSCORES"],
+    "setup": [["ZADD", "r3_zi_a", "1", "x", "2", "y"], ["ZADD", "r3_zi_b", "10", "y"]],
+    "expected": ["y", "12"],
+    "expected_resp3": [["y", 12]],
+    "type": "array",
+    "type_resp3": "resp3",
+    "version": "6.2.0",
+    "description": "Scores are doubles in pairs on RESP3"
+  },
+  {
+    "name": "RESP3 shapes: ZUNION WITHSCORES",
+    "command": ["ZUNION", "2", "r3_zu_a", "r3_zu_b", "WITHSCORES"],
+    "setup": [["ZADD", "r3_zu_a", "1", "x"], ["ZADD", "r3_zu_b", "2", "y"]],
+    "expected": ["x", "1", "y", "2"],
+    "expected_resp3": [["x", 1], ["y", 2]],
+    "type": "array",
+    "type_resp3": "resp3",
+    "version": "6.2.0",
+    "description": "Scores are doubles in pairs on RESP3"
+  },
+  {
+    "name": "RESP3 shapes: ZSCORE of a missing member",
+    "command": ["ZSCORE", "r3_zscore_missing", "nope"],
+    "setup": [["ZADD", "r3_zscore_missing", "1", "a"]],
+    "expected": null,
+    "type": "null",
+    "version": "1.2.0",
+    "description": "A missing member is null on both protocols"
+  },
+  {
+    "name": "RESP3 shapes: HRANDFIELD WITHVALUES",
+    "command": ["HRANDFIELD", "r3_hrand", "5", "WITHVALUES"],
+    "setup": [["HSET", "r3_hrand", "a", "1", "b", "2"]],
+    "expected": ["a", "1", "b", "2"],
+    "expected_resp3": [["a", "1"], ["b", "2"]],
+    "type": "array",
+    "type_resp3": "resp3",
+    "version": "6.2.0",
+    "description": "Pairs on RESP3, flat on RESP2"
+  },
+  {
+    "name": "RESP3 shapes: PUBSUB NUMSUB",
+    "command": ["PUBSUB", "NUMSUB", "r3_numsub_ch"],
+    "expected": ["r3_numsub_ch", 0],
+    "expected_resp3": {"$map": [["r3_numsub_ch", 0]]},
+    "type": "array",
+    "type_resp3": "resp3",
+    "version": "2.8.0",
+    "description": "A map keyed by channel on RESP3, flat on RESP2"
+  },
+  {
+    "name": "RESP3 shapes: XINFO STREAM",
+    "command": ["XINFO", "STREAM", "r3_xinfo"],
+    "setup": [["XADD", "r3_xinfo", "1-0", "f", "v"]],
+    "expected": 20,
+    "expected_resp3": {"$map": [["length", 1], ["entries-added", 1], ["last-generated-id", "1-0"]]},
+    "type": "array_length",
+    "type_resp3": "resp3_map_contains",
+    "version": "5.0.0",
+    "description": "A map on RESP3, a flat 20-element array on RESP2"
+  },
+  {
+    "name": "RESP3 shapes: nested replies inside EXEC",
+    "command": ["EXEC"],
+    "setup": [["HSET", "r3_exec_h", "a", "1"], ["ZADD", "r3_exec_z", "1.5", "m"], ["SADD", "r3_exec_s", "x"], ["MULTI"], ["HGETALL", "r3_exec_h"], ["ZSCORE", "r3_exec_z", "m"], ["SMEMBERS", "r3_exec_s"], ["GET", "r3_exec_missing"]],
+    "expected": [["a", "1"], "1.5", ["x"], null],
+    "expected_resp3": [{"$map": [["a", "1"]]}, 1.5, {"$set": ["x"]}, null],
+    "type": "array",
+    "type_resp3": "resp3",
+    "version": "1.2.0",
+    "description": "EXEC nests the per-command RESP3 types"
   }
 ]

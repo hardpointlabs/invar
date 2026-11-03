@@ -21,10 +21,10 @@ use bytes::Bytes;
 use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
-use smallvec::{smallvec, SmallVec};
 use crate::common::session::Session;
 use crate::common::ValueType;
 use crate::resp::RespValue;
+use smallvec::{smallvec, SmallVec};
 
 /// The metadata byte stamped on every JSON document entry.
 const TYPE_JSON: u8 = ValueType::Json as u8;
@@ -918,9 +918,9 @@ impl WireOp for JsonWire {
             Err(e) => err_resp(&e),
             Ok(res) => match res.downcast::<JsonResult>() {
                 Ok(outcome) => render_json_result(*outcome),
-                Err(_) => RespValue::Error(Bytes::from_static(
-                    b"ERR internal error: bad json result",
-                )),
+                Err(_) => {
+                    RespValue::Error(Bytes::from_static(b"ERR internal error: bad json result"))
+                }
             },
         }
     }
@@ -1028,7 +1028,13 @@ pub(crate) fn set(
     let path = String::from_utf8_lossy(path).into_owned();
     let key_str = String::from_utf8_lossy(&key).into_owned();
     QueuedOp {
-        db_op: Box::new(SetOp { key, path, value, nx, xx }),
+        db_op: Box::new(SetOp {
+            key,
+            path,
+            value,
+            nx,
+            xx,
+        }),
         wire_op: Box::new(JsonWire),
         is_mutating: true,
         allowed_in_tx: true,
@@ -1129,10 +1135,7 @@ impl DbOp for GetOp {
 
             let mut result = BTreeMap::new();
             for p in &paths {
-                result.insert(
-                    p.clone(),
-                    doc.get(p).unwrap_or(JValue::Null),
-                );
+                result.insert(p.clone(), doc.get(p).unwrap_or(JValue::Null));
             }
             Ok(boxed(JsonResult::Json(JValue::Obj(result))))
         })
@@ -1241,7 +1244,12 @@ impl DbOp for TypeOp {
 }
 
 /// `JSON.ARRAPPEND key path value [value ...]`.
-pub(crate) fn arr_append(session: &Session, key: &[u8], path: &[u8], values: Vec<JValue>) -> QueuedOp {
+pub(crate) fn arr_append(
+    session: &Session,
+    key: &[u8],
+    path: &[u8],
+    values: Vec<JValue>,
+) -> QueuedOp {
     QueuedOp {
         db_op: Box::new(ArrAppendOp {
             key: session.public_key(key),
@@ -1601,7 +1609,10 @@ impl DbOp for StrLenOp {
 /// `JSON.MGET key [key ...] path`.
 pub fn mget(session: &Session, keys: Vec<Vec<u8>>, path: String) -> QueuedOp {
     let keys: Vec<Vec<u8>> = keys.into_iter().map(|k| session.public_key(&k)).collect();
-    let sv_keys: SmallVec<[String; 2]> = keys.iter().map(|k| String::from_utf8_lossy(k).into_owned()).collect();
+    let sv_keys: SmallVec<[String; 2]> = keys
+        .iter()
+        .map(|k| String::from_utf8_lossy(k).into_owned())
+        .collect();
     QueuedOp {
         db_op: Box::new(MGetOp { keys, path }),
         wire_op: Box::new(JsonWire),
@@ -1724,16 +1735,19 @@ impl DbOp for ClearOp {
                 };
                 match val {
                     JValue::Arr(a) if !a.is_empty() => {
-                        doc.set(&path, JValue::Arr(Vec::new())).map_err(DbError::Redis)?;
+                        doc.set(&path, JValue::Arr(Vec::new()))
+                            .map_err(DbError::Redis)?;
                         1
                     }
                     JValue::Obj(m) if !m.is_empty() => {
-                        doc.set(&path, JValue::Obj(BTreeMap::new())).map_err(DbError::Redis)?;
+                        doc.set(&path, JValue::Obj(BTreeMap::new()))
+                            .map_err(DbError::Redis)?;
                         1
                     }
                     JValue::Arr(_) | JValue::Obj(_) => 0,
                     _ => {
-                        doc.set(&path, JValue::Obj(BTreeMap::new())).map_err(DbError::Redis)?;
+                        doc.set(&path, JValue::Obj(BTreeMap::new()))
+                            .map_err(DbError::Redis)?;
                         1
                     }
                 }
@@ -1798,7 +1812,8 @@ impl DbOp for ArrPopOp {
                 return Err(DbError::Redis("err index out of range".to_string()));
             }
             let popped = arr.remove(pop_idx as usize);
-            doc.set_array_result(&path, JValue::Arr(arr)).map_err(DbError::Redis)?;
+            doc.set_array_result(&path, JValue::Arr(arr))
+                .map_err(DbError::Redis)?;
             write_doc(tx, key, doc, |_| Ok(())).await?;
             Ok(boxed(JsonResult::Json(popped)))
         })
@@ -1864,7 +1879,8 @@ impl DbOp for ArrTrimOp {
                 arr[s as usize..(e + 1) as usize].to_vec()
             };
             let new_len = new_arr.len();
-            doc.set_array_result(&path, JValue::Arr(new_arr)).map_err(DbError::Redis)?;
+            doc.set_array_result(&path, JValue::Arr(new_arr))
+                .map_err(DbError::Redis)?;
             write_doc(tx, key, doc, |_| Ok(())).await?;
             Ok(boxed(JsonResult::Int(new_len as i64)))
         })
@@ -1872,7 +1888,13 @@ impl DbOp for ArrTrimOp {
 }
 
 /// `JSON.ARRINSERT key path index value [value ...]`.
-pub(crate) fn arr_insert(session: &Session, key: &[u8], path: &[u8], index: i64, values: Vec<JValue>) -> QueuedOp {
+pub(crate) fn arr_insert(
+    session: &Session,
+    key: &[u8],
+    path: &[u8],
+    index: i64,
+    values: Vec<JValue>,
+) -> QueuedOp {
     QueuedOp {
         db_op: Box::new(ArrInsertOp {
             key: session.public_key(key),
@@ -1923,7 +1945,8 @@ impl DbOp for ArrInsertOp {
             new_arr.extend_from_slice(&values);
             new_arr.extend_from_slice(&arr[index as usize..]);
             let new_len = new_arr.len();
-            doc.set_array_result(&path, JValue::Arr(new_arr)).map_err(DbError::Redis)?;
+            doc.set_array_result(&path, JValue::Arr(new_arr))
+                .map_err(DbError::Redis)?;
             write_doc(tx, key, doc, |_| Ok(())).await?;
             Ok(boxed(JsonResult::Int(new_len as i64)))
         })

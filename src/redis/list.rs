@@ -40,12 +40,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 
+use crate::common::namespace::{
+    self, base_type, resolve_prefix, resolve_prefix_for_write, ElementPrefix,
+};
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
-use smallvec::smallvec;
 use crate::common::session::Session;
-use crate::common::namespace::{self, base_type, resolve_prefix, resolve_prefix_for_write, ElementPrefix};
 use crate::common::ValueType;
 use crate::resp::RespValue;
+use smallvec::smallvec;
 
 /// Byte length of a node key.
 const KEY_LENGTH: usize = 16;
@@ -468,7 +470,9 @@ pub(crate) async fn move_nodes(
         }
         let mut next = [0u8; KEY_LENGTH];
         next.copy_from_slice(&value[value.len() - KEY_LENGTH..]);
-        tx.set(Entry::new(node_key(to_prefix, &current), value.to_vec()).metadata(item.metadata()))?;
+        tx.set(
+            Entry::new(node_key(to_prefix, &current), value.to_vec()).metadata(item.metadata()),
+        )?;
         tx.delete(&from)?;
         current = next;
     }
@@ -873,7 +877,10 @@ pub fn rpoplpush(session: &Session, source: &[u8], destination: &[u8]) -> Queued
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
-        keys: Some(smallvec![String::from_utf8_lossy(&session.public_key(source)).into_owned(), String::from_utf8_lossy(&session.public_key(destination)).into_owned()]),
+        keys: Some(smallvec![
+            String::from_utf8_lossy(&session.public_key(source)).into_owned(),
+            String::from_utf8_lossy(&session.public_key(destination)).into_owned()
+        ]),
     }
 }
 
@@ -1487,15 +1494,18 @@ impl WireOp for NullableIntWire {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kv::kv::TxIsolation;
     use crate::testutil::test_session;
+    use kv::kv::TxIsolation;
 
     /// Runs one op through its own transaction and commits if it mutates,
     /// then renders the reply (the unit-test equivalent of Go's
     /// `kvs.Update`/`kvs.Read` calls).
     async fn exec(session: &Session, op: QueuedOp) -> RespValue {
         let store = session.store();
-        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
+        let tx = store
+            .begin(op.is_mutating, TxIsolation::Snapshot)
+            .await
+            .expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -1506,7 +1516,10 @@ mod tests {
     /// Loads the list stored under `key` for direct inspection.
     async fn load(session: &Session, key: &[u8]) -> Linked {
         let store = session.store();
-        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
+        let tx = store
+            .begin(false, TxIsolation::Snapshot)
+            .await
+            .expect("read tx");
         let public_key = session.public_key(key);
         let node_prefix = resolve_prefix(&*tx, &public_key, &session.private_key(key))
             .await
@@ -1648,14 +1661,24 @@ mod tests {
     // --- namespaced layout (RFC 0001) ---
 
     fn bs(parts: &[&str]) -> Vec<Bytes> {
-        parts.iter().map(|p| Bytes::copy_from_slice(p.as_bytes())).collect()
+        parts
+            .iter()
+            .map(|p| Bytes::copy_from_slice(p.as_bytes()))
+            .collect()
     }
 
     /// Runs the op on a legacy twin and on the namespaced one; replies must match.
-    async fn both(legacy: &Session, ns: &Session, build: impl Fn(&Session) -> QueuedOp) -> RespValue {
+    async fn both(
+        legacy: &Session,
+        ns: &Session,
+        build: impl Fn(&Session) -> QueuedOp,
+    ) -> RespValue {
         let a = crate::testutil::exec(legacy, build(legacy)).await;
         let b = crate::testutil::exec(ns, build(ns)).await;
-        assert_eq!(a, b, "a namespaced list must answer exactly like a legacy one");
+        assert_eq!(
+            a, b,
+            "a namespaced list must answer exactly like a legacy one"
+        );
         a
     }
 
@@ -1704,12 +1727,25 @@ mod tests {
         // The namespaced lists never wrote anything under their name-derived prefix
         // and their sentinels still record the namespace; removed nodes are deleted.
         for k in [&b"l"[..], b"m"] {
-            assert_eq!(crate::testutil::entries_under(&ns, &ns.private_key(k)).await, 0, "{}", String::from_utf8_lossy(k));
-            let meta = crate::testutil::stored_type_byte(&ns, &ns.public_key(k)).await.unwrap();
+            assert_eq!(
+                crate::testutil::entries_under(&ns, &ns.private_key(k)).await,
+                0,
+                "{}",
+                String::from_utf8_lossy(k)
+            );
+            let meta = crate::testutil::stored_type_byte(&ns, &ns.public_key(k))
+                .await
+                .unwrap();
             assert_eq!(meta, TYPE_LIST | crate::common::namespace::NAMESPACE_FLAG);
         }
-        let live_l = match crate::testutil::exec(&ns, llen(&ns, b"l")).await { RespValue::Integer(n) => n as usize, o => panic!("{o:?}") };
-        let live_m = match crate::testutil::exec(&ns, llen(&ns, b"m")).await { RespValue::Integer(n) => n as usize, o => panic!("{o:?}") };
+        let live_l = match crate::testutil::exec(&ns, llen(&ns, b"l")).await {
+            RespValue::Integer(n) => n as usize,
+            o => panic!("{o:?}"),
+        };
+        let live_m = match crate::testutil::exec(&ns, llen(&ns, b"m")).await {
+            RespValue::Integer(n) => n as usize,
+            o => panic!("{o:?}"),
+        };
         assert_eq!(crate::testutil::entries_under(&ns, &ns_l).await, live_l);
         assert_eq!(crate::testutil::entries_under(&ns, &ns_m).await, live_m);
 
@@ -1717,7 +1753,10 @@ mod tests {
         for _ in 0..live_l {
             both(&legacy, &ns, |s| lpop(s, b"l")).await;
         }
-        assert_eq!(crate::testutil::stored_type_byte(&ns, &ns.public_key(b"l")).await, None);
+        assert_eq!(
+            crate::testutil::stored_type_byte(&ns, &ns.public_key(b"l")).await,
+            None
+        );
         assert_eq!(crate::testutil::entries_under(&ns, &ns_l).await, 0);
     }
 
@@ -1731,13 +1770,20 @@ mod tests {
         crate::testutil::exec(&s, rpoplpush(&s, b"src", b"by_rpoplpush")).await;
         // The *X variants only push onto an existing list, so they create nothing.
         crate::testutil::exec(&s, lpushx(&s, b"never_created", b"a")).await;
-        assert_eq!(crate::testutil::stored_type_byte(&s, &s.public_key(b"never_created")).await, None);
+        assert_eq!(
+            crate::testutil::stored_type_byte(&s, &s.public_key(b"never_created")).await,
+            None
+        );
 
         let mut seen = std::collections::HashSet::new();
         for key in ["src", "by_lpush", "by_rpush", "by_rpoplpush"] {
             let ns = crate::testutil::namespace_of(&s, key.as_bytes()).await;
             assert!(crate::testutil::entries_under(&s, &ns).await > 0, "{key}");
-            assert_eq!(crate::testutil::entries_under(&s, &s.private_key(key.as_bytes())).await, 0, "{key}: nothing under the name");
+            assert_eq!(
+                crate::testutil::entries_under(&s, &s.private_key(key.as_bytes())).await,
+                0,
+                "{key}: nothing under the name"
+            );
             assert!(seen.insert(ns), "{key}: namespaces must be unique");
         }
     }
@@ -1750,7 +1796,11 @@ mod tests {
         crate::testutil::exec(&s, lpop(&s, b"l")).await;
         crate::testutil::exec(&s, rpush(&s, b"l", &bs(&["b"]))).await;
         assert_ne!(crate::testutil::namespace_of(&s, b"l").await, first);
-        assert_eq!(crate::testutil::entries_under(&s, &first).await, 0, "the emptied list left nothing behind");
+        assert_eq!(
+            crate::testutil::entries_under(&s, &first).await,
+            0,
+            "the emptied list left nothing behind"
+        );
     }
 
     #[tokio::test]
@@ -1760,7 +1810,10 @@ mod tests {
         crate::testutil::exec(&s, crate::keys::expire(&s, b"l", 100)).await;
         crate::testutil::exec(&s, rpush(&s, b"l", &bs(&["b"]))).await;
         let ttl = crate::testutil::exec(&s, crate::keys::ttl(&s, b"l")).await;
-        assert!(matches!(ttl, RespValue::Integer(n) if (90..=100).contains(&n)), "ttl was {ttl:?}");
+        assert!(
+            matches!(ttl, RespValue::Integer(n) if (90..=100).contains(&n)),
+            "ttl was {ttl:?}"
+        );
     }
 
     #[tokio::test]
@@ -2219,7 +2272,10 @@ mod tests {
         crate::testutil::legacy_key(&session, key).await;
 
         let store = session.store();
-        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
+        let tx = store
+            .begin(false, TxIsolation::Snapshot)
+            .await
+            .expect("read tx");
         let item = tx.get(&session.public_key(key)).await.expect("sentinel");
         assert_eq!(item.metadata(), TYPE_LIST);
         let val = item.value();
@@ -2248,7 +2304,10 @@ mod tests {
         exec(&session, rpush(&session, key, &[Bytes::from_static(b"v")])).await;
 
         let store = session.store();
-        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
+        let tx = store
+            .begin(false, TxIsolation::Snapshot)
+            .await
+            .expect("read tx");
         let item = tx.get(&session.public_key(key)).await.expect("sentinel");
         assert_eq!(item.metadata(), TYPE_LIST | namespace::NAMESPACE_FLAG);
         let payload = namespace::payload(&item).expect("payload");
@@ -2259,10 +2318,18 @@ mod tests {
 
         let ns = namespace::prefix_of(&item, &session.private_key(key)).expect("trailer");
         assert!(ns.is_explicit() && ns.starts_with(b"+0:"));
-        let node_item = tx.get(&node_key(&ns, head_key)).await.expect("node under the namespace");
+        let node_item = tx
+            .get(&node_key(&ns, head_key))
+            .await
+            .expect("node under the namespace");
         assert_eq!(node_item.metadata(), TYPE_LIST);
         assert_eq!(&node_item.value()[..1], b"v");
-        assert!(tx.get(&node_key(&session.private_key(key), head_key)).await.is_err(), "no node under the name-derived prefix");
+        assert!(
+            tx.get(&node_key(&session.private_key(key), head_key))
+                .await
+                .is_err(),
+            "no node under the name-derived prefix"
+        );
         drop(tx);
     }
 }

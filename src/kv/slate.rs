@@ -11,22 +11,30 @@
 //! Transactions use SlateDB's snapshot isolation; write-write conflicts
 //! surface as [`Error::Conflict`].
 
+use async_trait::async_trait;
+use foyer::{
+    BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCacheBuilder, HybridCachePolicy,
+    PsyncIoEngineConfig,
+};
+use slatedb::config::{PutOptions, Settings, Ttl};
+use slatedb::db_cache::foyer_hybrid::FoyerHybridCache;
+use slatedb::db_cache::{CachedEntry, DbCache};
+use slatedb::object_store::aws;
+use slatedb::object_store::memory::InMemory;
+use slatedb::object_store::ObjectStore;
+use slatedb::{
+    Db, DbIterator, DbStatus, DbTransaction, Error as SlateError, ErrorKind, IsolationLevel,
+};
+use slatedb_common::metrics::MetricsRecorder;
 use std::collections::{Bound, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use async_trait::async_trait;
-use foyer::{BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCacheBuilder, HybridCachePolicy, PsyncIoEngineConfig};
-use slatedb::config::{PutOptions, Settings, Ttl};
-use slatedb::db_cache::{CachedEntry, DbCache};
-use slatedb::db_cache::foyer_hybrid::FoyerHybridCache;
-use slatedb::object_store::memory::InMemory;
-use slatedb::object_store::ObjectStore;
-use slatedb::object_store::aws;
-use slatedb::{Db, DbIterator, DbStatus, DbTransaction, Error as SlateError, ErrorKind, IsolationLevel};
-use slatedb_common::metrics::MetricsRecorder;
 
-use crate::kv::{write_handle, BoxFuture, Entry, Error, Item, KeyValueIterator, KeyValueStore, Tx, TxIsolation, WriteHandle};
+use crate::kv::{
+    write_handle, BoxFuture, Entry, Error, Item, KeyValueIterator, KeyValueStore, Tx, TxIsolation,
+    WriteHandle,
+};
 use crate::metrics::MetricsRsRecorder;
 use crate::time::now_millis;
 
@@ -55,9 +63,9 @@ fn disk_capacity_bytes(path: &Path) -> Result<usize, Error> {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("/"))
     };
-    let size = rustix::fs::statvfs(&stat_path).map(|stat| {
-        stat.f_bavail.saturating_mul(stat.f_frsize)
-    }).expect("unable to call statvfs");
+    let size = rustix::fs::statvfs(&stat_path)
+        .map(|stat| stat.f_bavail.saturating_mul(stat.f_frsize))
+        .expect("unable to call statvfs");
     Ok((size as f64 * FREE_SPACE_HIGH_WATERMARK) as usize)
 }
 
@@ -65,8 +73,7 @@ async fn build_foyer_cache(
     cache_path: &Path,
     mem_limit_mb: usize,
 ) -> Result<Arc<dyn DbCache>, Error> {
-    let disk_capacity = disk_capacity_bytes(cache_path)
-        .expect("couldn't probe disk capacity");
+    let disk_capacity = disk_capacity_bytes(cache_path).expect("couldn't probe disk capacity");
     let mem_capacity = if mem_limit_mb == 0 { 16 } else { mem_limit_mb } * 1024 * 1024;
     let device = FsDeviceBuilder::new(cache_path)
         .with_capacity(disk_capacity)
@@ -91,7 +98,9 @@ async fn build_foyer_cache(
 /// across restarts so the persisted Foyer cache is recovered on reopen, so this
 /// uses FNV-1a rather than `DefaultHasher`, whose output isn't guaranteed stable.
 fn db_cache_id(path: &str) -> u64 {
-    path.bytes().fold(0xcbf29ce484222325, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
+    path.bytes().fold(0xcbf29ce484222325, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x100000001b3)
+    })
 }
 
 /// Options for opening a SlateDB-backed [`KeyValueStore`].
@@ -114,9 +123,12 @@ pub struct SlateDb {
 
 impl SlateDb {
     pub async fn open(opts: SlateDbOpts) -> Result<SlateDb, Error> {
-        let store = Arc::new(aws::AmazonS3Builder::from_env()
-            .with_bucket_name(opts.bucket_name)
-            .build().expect("couldn't create s3 client"));
+        let store = Arc::new(
+            aws::AmazonS3Builder::from_env()
+                .with_bucket_name(opts.bucket_name)
+                .build()
+                .expect("couldn't create s3 client"),
+        );
         Self::build(opts.path, store, opts.cache_path, opts.cache_mem_limit).await
     }
 
@@ -132,15 +144,18 @@ impl SlateDb {
         cache_path: Option<PathBuf>,
         cache_mem_limit: usize,
     ) -> Result<SlateDb, Error> {
-        let settings = Settings::from_env_with_default(
-            "SLATEDB_", Settings::default()).expect("couldn't read settings");
+        let settings = Settings::from_env_with_default("SLATEDB_", Settings::default())
+            .expect("couldn't read settings");
         let mut builder = Db::builder(path.clone(), store.clone());
         builder = builder.with_settings(settings);
-        builder = builder.with_metrics_recorder(Arc::new(MetricsRsRecorder) as Arc<dyn MetricsRecorder>);
+        builder =
+            builder.with_metrics_recorder(Arc::new(MetricsRsRecorder) as Arc<dyn MetricsRecorder>);
 
         let cache_id = db_cache_id(&path);
         let cache: Option<Arc<dyn DbCache>> = if let Some(ref cp) = cache_path {
-            let c = build_foyer_cache(cp, cache_mem_limit).await.expect("couldn't build foyer cache");
+            let c = build_foyer_cache(cp, cache_mem_limit)
+                .await
+                .expect("couldn't build foyer cache");
             builder = builder.with_db_cache(c.clone(), cache_id);
             Some(c)
         } else {
@@ -186,7 +201,6 @@ async fn wait_for_seq(
     rx.wait_for(|s| s.durable_seq >= sn).await.map(|_| ())
 }
 
-
 #[async_trait]
 impl KeyValueStore for SlateDb {
     fn new_entry(&self, key: Vec<u8>, value: Vec<u8>) -> Entry {
@@ -198,12 +212,11 @@ impl KeyValueStore for SlateDb {
             TxIsolation::Snapshot => IsolationLevel::Snapshot,
             TxIsolation::SerializableSnapshot => IsolationLevel::SerializableSnapshot,
         };
-        let tx = self
-            .db
-            .begin(level)
-            .await
-            .map_err(map_slate_error)?;
-        Ok(Box::new(SlateTx { tx, pending_expiry: Mutex::new(HashMap::new()) }))
+        let tx = self.db.begin(level).await.map_err(map_slate_error)?;
+        Ok(Box::new(SlateTx {
+            tx,
+            pending_expiry: Mutex::new(HashMap::new()),
+        }))
     }
 
     async fn update<F>(&self, f: F) -> Result<Option<WriteHandle>, Error>
@@ -303,7 +316,9 @@ impl SlateTx {
     /// the map half-updated (each critical section is a single insert, remove
     /// or lookup), so a poisoned lock is safe to keep using.
     fn pending_expiry(&self) -> std::sync::MutexGuard<'_, HashMap<Vec<u8>, Option<i64>>> {
-        self.pending_expiry.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.pending_expiry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -357,13 +372,13 @@ impl Tx for SlateTx {
         self.tx.delete(key).map_err(map_slate_error)
     }
 
-    async fn new_range_iterator(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<Box<dyn KeyValueIterator>, Error> {
+    async fn new_range_iterator(
+        &self,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+    ) -> Result<Box<dyn KeyValueIterator>, Error> {
         let range = (start, end);
-        let iter = self
-            .tx
-            .scan(range)
-            .await
-            .map_err(map_slate_error)?;
+        let iter = self.tx.scan(range).await.map_err(map_slate_error)?;
         Ok(Box::new(SlateIterator {
             iter: Some(iter),
             err: None,
@@ -465,9 +480,7 @@ mod tests {
     use super::*;
 
     async fn in_memory() -> SlateDb {
-        SlateDb::in_memory()
-            .await
-            .expect("open in-memory store")
+        SlateDb::in_memory().await.expect("open in-memory store")
     }
 
     async fn write(store: &SlateDb, key: &[u8], value: &[u8]) {
@@ -644,7 +657,10 @@ mod tests {
         let store = in_memory().await;
         write(&store, b"rkey", b"rval").await;
 
-        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("begin");
+        let tx = store
+            .begin(false, TxIsolation::Snapshot)
+            .await
+            .expect("begin");
         let item = tx.get(b"rkey").await.expect("get failed");
         assert_eq!(item.value(), b"rval");
         tx.discard();
@@ -654,7 +670,10 @@ mod tests {
     #[tokio::test]
     async fn begin_mutating() {
         let store = in_memory().await;
-        let tx = store.begin(true, TxIsolation::Snapshot).await.expect("begin");
+        let tx = store
+            .begin(true, TxIsolation::Snapshot)
+            .await
+            .expect("begin");
         tx.set(Entry::new(b"mkey".to_vec(), b"mval".to_vec()))
             .expect("set failed");
         tx.commit().await.expect("commit failed");
@@ -666,7 +685,10 @@ mod tests {
     #[tokio::test]
     async fn begin_discard() {
         let store = in_memory().await;
-        let tx = store.begin(true, TxIsolation::Snapshot).await.expect("begin");
+        let tx = store
+            .begin(true, TxIsolation::Snapshot)
+            .await
+            .expect("begin");
         tx.set(Entry::new(b"dkey".to_vec(), b"dval".to_vec()))
             .expect("set failed");
         tx.discard();
@@ -749,18 +771,27 @@ mod tests {
     #[tokio::test]
     async fn uncommitted_ttl_is_visible_to_reads_in_the_same_tx() {
         let store = in_memory().await;
-        let tx = store.begin(true, TxIsolation::Snapshot).await.expect("begin");
+        let tx = store
+            .begin(true, TxIsolation::Snapshot)
+            .await
+            .expect("begin");
 
         tx.set(Entry::new(b"k".to_vec(), b"v".to_vec()).ttl(Duration::from_secs(60)))
             .expect("set");
-        let remaining = tx.get(b"k").await.expect("get").ttl().expect("pending write keeps its TTL");
+        let remaining = tx
+            .get(b"k")
+            .await
+            .expect("get")
+            .ttl()
+            .expect("pending write keeps its TTL");
         assert!(
             remaining > Duration::from_secs(55) && remaining <= Duration::from_secs(60),
             "remaining TTL was {remaining:?}"
         );
 
         // Rewriting without a TTL clears it, as a plain overwrite should.
-        tx.set(Entry::new(b"k".to_vec(), b"v2".to_vec())).expect("set");
+        tx.set(Entry::new(b"k".to_vec(), b"v2".to_vec()))
+            .expect("set");
         assert_eq!(tx.get(b"k").await.expect("get").ttl(), None);
         tx.discard();
         store.close().await.expect("close");
@@ -977,7 +1008,10 @@ mod tests {
             .await
             .expect("set failed");
 
-        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("begin");
+        let tx = store
+            .begin(false, TxIsolation::Snapshot)
+            .await
+            .expect("begin");
         let mut it = tx.new_prefix_iterator(b"user:").await.expect("iterator");
         let mut keys = Vec::new();
         while it.next().await {
@@ -999,7 +1033,10 @@ mod tests {
             write(&store, k.as_bytes(), v.as_bytes()).await;
         }
 
-        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("begin");
+        let tx = store
+            .begin(false, TxIsolation::Snapshot)
+            .await
+            .expect("begin");
         let mut it = tx
             .new_range_iterator(Bound::Included(b"b"), Bound::Excluded(b"d"))
             .await
@@ -1021,7 +1058,10 @@ mod tests {
             write(&store, k.as_bytes(), v.as_bytes()).await;
         }
 
-        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("begin");
+        let tx = store
+            .begin(false, TxIsolation::Snapshot)
+            .await
+            .expect("begin");
         let mut it = tx
             .new_range_iterator(Bound::Unbounded, Bound::Unbounded)
             .await
@@ -1043,7 +1083,10 @@ mod tests {
             write(&store, k.as_bytes(), v.as_bytes()).await;
         }
 
-        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("begin");
+        let tx = store
+            .begin(false, TxIsolation::Snapshot)
+            .await
+            .expect("begin");
         let mut it = tx
             .new_range_iterator(Bound::Excluded(b"b"), Bound::Unbounded)
             .await
@@ -1066,7 +1109,10 @@ mod tests {
         }
 
         // The end bound must be exclusive: only user:* keys are in range.
-        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("begin");
+        let tx = store
+            .begin(false, TxIsolation::Snapshot)
+            .await
+            .expect("begin");
         let mut it = tx
             .new_range_iterator(Bound::Included(b"user:"), Bound::Excluded(b"user;"))
             .await
@@ -1087,7 +1133,10 @@ mod tests {
         write(&store, b"a", b"1").await;
         write(&store, b"b", b"2").await;
 
-        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("begin");
+        let tx = store
+            .begin(false, TxIsolation::Snapshot)
+            .await
+            .expect("begin");
         let mut it = tx
             .new_range_iterator(Bound::Included(b"x"), Bound::Unbounded)
             .await

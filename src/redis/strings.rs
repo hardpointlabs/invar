@@ -14,11 +14,11 @@ use bytes::Bytes;
 use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
-use smallvec::{smallvec, SmallVec};
 use crate::common::session::Session;
 use crate::common::set_keeping_ttl;
 use crate::common::ValueType;
 use crate::resp::RespValue;
+use smallvec::{smallvec, SmallVec};
 
 /// The metadata byte stored on every string entry.
 const TYPE_STRING: u8 = ValueType::String as u8;
@@ -279,7 +279,11 @@ pub fn mset(session: &Session, args: &[Bytes]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
-        keys: Some(args.chunks(2).map(|c| String::from_utf8_lossy(&session.public_key(&c[0])).into_owned()).collect::<SmallVec<[String; 2]>>()),
+        keys: Some(
+            args.chunks(2)
+                .map(|c| String::from_utf8_lossy(&session.public_key(&c[0])).into_owned())
+                .collect::<SmallVec<[String; 2]>>(),
+        ),
     }
 }
 
@@ -297,7 +301,11 @@ pub fn mset_nx(session: &Session, args: &[Bytes]) -> QueuedOp {
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
-        keys: Some(args.chunks(2).map(|c| String::from_utf8_lossy(&session.public_key(&c[0])).into_owned()).collect::<SmallVec<[String; 2]>>()),
+        keys: Some(
+            args.chunks(2)
+                .map(|c| String::from_utf8_lossy(&session.public_key(&c[0])).into_owned())
+                .collect::<SmallVec<[String; 2]>>(),
+        ),
     }
 }
 
@@ -382,9 +390,7 @@ impl DbOp for SetOp {
 
             if allowed {
                 let effective_ttl = if keepttl {
-                    existing
-                        .as_ref()
-                        .map(|i| i.ttl()).unwrap()
+                    existing.as_ref().map(|i| i.ttl()).unwrap()
                 } else {
                     ttl
                 };
@@ -395,7 +401,10 @@ impl DbOp for SetOp {
                 tx.set(entry)?;
             }
 
-            let result: DbResult = Box::new(SetResult { modified: allowed, old });
+            let result: DbResult = Box::new(SetResult {
+                modified: allowed,
+                old,
+            });
             Ok(result)
         })
     }
@@ -414,11 +423,7 @@ impl WireOp for SetWire {
                 Ok(set_result) => {
                     if self.get {
                         RespValue::BulkString(
-                            set_result
-                                .old
-                                .map(Bytes::from)
-                                .map(Some)
-                                .unwrap_or(None),
+                            set_result.old.map(Bytes::from).map(Some).unwrap_or(None),
                         )
                     } else if set_result.modified {
                         RespValue::SimpleString(Bytes::from_static(b"OK"))
@@ -963,15 +968,18 @@ impl WireOp for BulkStringWire {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kv::kv::TxIsolation;
     use crate::common::ValueType;
     use crate::testutil::test_session;
+    use kv::kv::TxIsolation;
 
     /// Runs one op through its own transaction, committing if it mutates, and
     /// renders the reply.
     async fn exec(session: &Session, op: QueuedOp) -> RespValue {
         let store = session.store();
-        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
+        let tx = store
+            .begin(op.is_mutating, TxIsolation::Snapshot)
+            .await
+            .expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -982,7 +990,10 @@ mod tests {
     /// Runs a db op expecting success, returning the raw result.
     async fn exec_db(session: &Session, op: QueuedOp) -> DbResult {
         let store = session.store();
-        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
+        let tx = store
+            .begin(op.is_mutating, TxIsolation::Snapshot)
+            .await
+            .expect("tx");
         let outcome = op.db_op.run(&*tx).await.expect("op failed");
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -993,7 +1004,10 @@ mod tests {
     /// Runs a db op expecting a Redis error, returning the message Bytes.
     async fn exec_db_err(session: &Session, op: QueuedOp) -> Bytes {
         let store = session.store();
-        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
+        let tx = store
+            .begin(op.is_mutating, TxIsolation::Snapshot)
+            .await
+            .expect("tx");
         let err = op.db_op.run(&*tx).await.expect_err("expected op error");
         match err_resp(&err) {
             RespValue::Error(msg) => msg,
@@ -1022,7 +1036,10 @@ mod tests {
     /// Reads the stored value at key (any metadata), or None if missing.
     async fn stored(session: &Session, key: &[u8]) -> Option<Vec<u8>> {
         let store = session.store();
-        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
+        let tx = store
+            .begin(false, TxIsolation::Snapshot)
+            .await
+            .expect("read tx");
         match tx.get(&session.public_key(key)).await {
             Ok(item) => Some(item.value().to_vec()),
             Err(KvError::KeyNotFound) => None,
@@ -1033,7 +1050,10 @@ mod tests {
     /// Reads the stored TTL at key
     async fn stored_ttl(session: &Session, key: &[u8]) -> Option<Duration> {
         let store = session.store();
-        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("read tx");
+        let tx = store
+            .begin(false, TxIsolation::Snapshot)
+            .await
+            .expect("read tx");
         match tx.get(&session.public_key(key)).await {
             Ok(item) => item.ttl(),
             Err(e) => panic!("get failed: {e:?}"),

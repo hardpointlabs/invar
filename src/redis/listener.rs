@@ -47,7 +47,7 @@ use crate::pubsub::{
     message_resp, pmessage_resp, psubscribe_resp, punsubscribe_resp, ssubscribe_resp,
     subscribe_resp, sunsubscribe_resp, unsubscribe_resp, ConnectionSubs, PubSubRegistry,
 };
-use crate::resp::{RespDecoder, RespError, RespValue};
+use crate::resp::{Protocol, RespDecoder, RespError, RespValue};
 
 // ---------------------------------------------------------------------------
 // Listener
@@ -82,9 +82,11 @@ impl FromStr for ListenAddr {
         if let Ok(addr) = s.parse::<SocketAddr>() {
             return Ok(ListenAddr::Tcp(addr));
         }
-        let mut addrs = s
-            .to_socket_addrs()
-            .map_err(|e| format!("couldn't resolve '{s}' (expected host:port or a socket path containing '/'): {e}"))?;
+        let mut addrs = s.to_socket_addrs().map_err(|e| {
+            format!(
+                "couldn't resolve '{s}' (expected host:port or a socket path containing '/'): {e}"
+            )
+        })?;
         addrs
             .next()
             .map(ListenAddr::Tcp)
@@ -209,7 +211,8 @@ impl RedisListener {
         let pubsub = self.pubsub.clone();
         let conflict_retry_count = self.conflict_retry_count;
         tokio::spawn(async move {
-            let result = handle_connection(socket, store, registry, pubsub, conflict_retry_count).await;
+            let result =
+                handle_connection(socket, store, registry, pubsub, conflict_retry_count).await;
             crate::server::conn_closed();
             if let Err(e) = result {
                 tracing::error!("invar: connection error: {e}");
@@ -390,13 +393,15 @@ async fn handle_connection<S: ClientStream>(
                         // Inside MULTI: route through dispatch_command which will
                         // dirty the transaction and return an error.
                         let replies = enqueue_command(&mut session, &args).await;
+                        sync_protocol(&mut framed, &session);
                         for reply in replies {
                             framed.send(reply).await?;
                         }
                     } else {
                         match name_lower.as_slice() {
                             b"subscribe" => {
-                                handle_subscribe(&mut framed, &mut subs, &args[1..], false, false).await?;
+                                handle_subscribe(&mut framed, &mut subs, &args[1..], false, false)
+                                    .await?;
                             }
                             b"psubscribe" => {
                                 handle_psubscribe(&mut framed, &mut subs, &args[1..]).await?;
@@ -404,7 +409,8 @@ async fn handle_connection<S: ClientStream>(
                             b"ssubscribe" => {
                                 // SSUBSCRIBE is treated the same as SUBSCRIBE in
                                 // single-node mode.
-                                handle_subscribe(&mut framed, &mut subs, &args[1..], false, true).await?;
+                                handle_subscribe(&mut framed, &mut subs, &args[1..], false, true)
+                                    .await?;
                             }
                             b"unsubscribe" | b"punsubscribe" | b"sunsubscribe" => {
                                 // Called outside subscribe mode with no subscriptions;
@@ -416,11 +422,15 @@ async fn handle_connection<S: ClientStream>(
                                 } else {
                                     b"unsubscribe".as_ref()
                                 };
-                                framed.send(RespValue::Array(Some(vec![
-                                    RespValue::BulkString(Some(Bytes::copy_from_slice(kind_byte))),
-                                    RespValue::BulkString(None),
-                                    RespValue::Integer(0),
-                                ]))).await?;
+                                framed
+                                    .send(RespValue::Push(vec![
+                                        RespValue::BulkString(Some(Bytes::copy_from_slice(
+                                            kind_byte,
+                                        ))),
+                                        RespValue::BulkString(None),
+                                        RespValue::Integer(0),
+                                    ]))
+                                    .await?;
                             }
                             _ => {
                                 // Normal command dispatch. Once a command
@@ -442,6 +452,10 @@ async fn handle_connection<S: ClientStream>(
                                         }
                                     } => return Ok(()),
                                 };
+                                // HELLO/RESET may have changed the protocol;
+                                // apply it before sending so that this very
+                                // batch (e.g. the reply to HELLO 3) uses it.
+                                sync_protocol(&mut framed, &session);
                                 for reply in replies {
                                     framed.send(reply).await?;
                                 }
@@ -505,16 +519,24 @@ async fn handle_subscribe_mode_command<S: ClientStream>(
             handle_punsubscribe(framed, subs, &args[1..]).await?;
         }
         b"ping" => {
-            // PING in subscribe mode replies with a push-style array, not the
-            // plain +PONG, when no message is given; with a message it echoes
-            // the message. This matches real Redis RESP2 subscribe-mode PING.
-            let payload = args.get(1).cloned().unwrap_or_else(|| Bytes::from_static(b""));
-            framed
-                .send(RespValue::Array(Some(vec![
+            // RESP2: PING in subscribe mode replies with a push-style array,
+            // not the plain +PONG, whether or not a message is given. This
+            // matches real Redis RESP2 subscribe-mode PING.
+            let payload = args
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| Bytes::from_static(b""));
+            let reply = match session.protocol() {
+                Protocol::Resp2 => RespValue::Array(Some(vec![
                     RespValue::BulkString(Some(Bytes::from_static(b"pong"))),
                     RespValue::BulkString(Some(payload)),
-                ])))
-                .await?;
+                ])),
+                // RESP3 clients get the ordinary PING reply: pushes are
+                // reserved for out-of-band messages.
+                Protocol::Resp3 if args.len() > 1 => RespValue::BulkString(Some(payload)),
+                Protocol::Resp3 => RespValue::SimpleString(Bytes::from_static(b"PONG")),
+            };
+            framed.send(reply).await?;
         }
         b"quit" => {
             framed
@@ -523,11 +545,13 @@ async fn handle_subscribe_mode_command<S: ClientStream>(
             return Ok(true);
         }
         b"reset" => {
-            // TODO: full RESET implementation (out of scope for this pass).
-            // For now, unsubscribe everything and reply +RESET.
+            // Drop every subscription (leaving subscribe mode) and reset the
+            // session, as RESET does outside subscribe mode. The connection
+            // stays open.
             subs.unsubscribe_all_channels();
             subs.unsubscribe_all_patterns();
-            session.request_close();
+            session.reset();
+            sync_protocol(framed, session);
             framed
                 .send(RespValue::SimpleString(Bytes::from_static(b"RESET")))
                 .await?;
@@ -610,7 +634,7 @@ async fn handle_unsubscribe<S: ClientStream>(
             };
             // Match real Redis: BulkString(None) for the channel field.
             framed
-                .send(RespValue::Array(Some(vec![
+                .send(RespValue::Push(vec![
                     RespValue::BulkString(Some(if use_sunsubscribe_frame {
                         Bytes::from_static(b"sunsubscribe")
                     } else {
@@ -618,7 +642,7 @@ async fn handle_unsubscribe<S: ClientStream>(
                     })),
                     RespValue::BulkString(None),
                     RespValue::Integer(0),
-                ])))
+                ]))
                 .await?;
             let _ = frame; // silence unused warning
         } else {
@@ -662,11 +686,11 @@ async fn handle_punsubscribe<S: ClientStream>(
         let all: Vec<Bytes> = subs.pattern_streams.keys().cloned().collect();
         if all.is_empty() {
             framed
-                .send(RespValue::Array(Some(vec![
+                .send(RespValue::Push(vec![
                     RespValue::BulkString(Some(Bytes::from_static(b"punsubscribe"))),
                     RespValue::BulkString(None),
                     RespValue::Integer(0),
-                ])))
+                ]))
                 .await?;
         } else {
             for pat in &all {
@@ -688,6 +712,12 @@ async fn handle_punsubscribe<S: ClientStream>(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Copies the session's negotiated protocol onto the codec. Replies already
+/// sent are never re-encoded; the protocol is only read when a reply is sent.
+fn sync_protocol<S>(framed: &mut Framed<S, RespDecoder>, session: &Session) {
+    framed.codec_mut().set_protocol(session.protocol());
+}
 
 /// Extracts a `Vec<Bytes>` of bulk strings from a RESP array's elements.
 /// Returns `None` if any element is not a bulk/simple string.
@@ -853,9 +883,8 @@ mod tests {
         drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
         assert!(path.exists());
 
-        let handle = tokio::spawn(
-            RedisListener::new(ListenAddr::Unix(path.clone()), test_store()).serve(),
-        );
+        let handle =
+            tokio::spawn(RedisListener::new(ListenAddr::Unix(path.clone()), test_store()).serve());
         let mut client = loop {
             match tokio::net::UnixStream::connect(&path).await {
                 Ok(c) => break c,
@@ -890,7 +919,10 @@ mod tests {
     // Pub/Sub integration tests
     // ----------------------------------------------------------------
 
-    async fn spawn_listener() -> (std::net::SocketAddr, tokio::task::JoinHandle<std::io::Result<()>>) {
+    async fn spawn_listener() -> (
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<std::io::Result<()>>,
+    ) {
         let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = probe.local_addr().unwrap();
         drop(probe);
@@ -957,8 +989,9 @@ mod tests {
         .await
         .unwrap();
         match next_reply(conn).await {
-            RespValue::BulkString(Some(body)) => String::from_utf8_lossy(&body)
-                .contains(&format!("addr={addr} ")),
+            RespValue::BulkString(Some(body)) => {
+                String::from_utf8_lossy(&body).contains(&format!("addr={addr} "))
+            }
             other => panic!("unexpected CLIENT LIST reply: {other:?}"),
         }
     }
@@ -1054,8 +1087,14 @@ mod tests {
         let confirm = next_reply(&mut sub).await;
         match &confirm {
             RespValue::Array(Some(v)) => {
-                assert_eq!(v[0], RespValue::BulkString(Some(Bytes::from_static(b"subscribe"))));
-                assert_eq!(v[1], RespValue::BulkString(Some(Bytes::from_static(b"news"))));
+                assert_eq!(
+                    v[0],
+                    RespValue::BulkString(Some(Bytes::from_static(b"subscribe")))
+                );
+                assert_eq!(
+                    v[1],
+                    RespValue::BulkString(Some(Bytes::from_static(b"news")))
+                );
                 assert_eq!(v[2], RespValue::Integer(1));
             }
             _ => panic!("unexpected reply: {confirm:?}"),
@@ -1071,9 +1110,18 @@ mod tests {
         let msg = next_reply(&mut sub).await;
         match &msg {
             RespValue::Array(Some(v)) => {
-                assert_eq!(v[0], RespValue::BulkString(Some(Bytes::from_static(b"message"))));
-                assert_eq!(v[1], RespValue::BulkString(Some(Bytes::from_static(b"news"))));
-                assert_eq!(v[2], RespValue::BulkString(Some(Bytes::from_static(b"breaking"))));
+                assert_eq!(
+                    v[0],
+                    RespValue::BulkString(Some(Bytes::from_static(b"message")))
+                );
+                assert_eq!(
+                    v[1],
+                    RespValue::BulkString(Some(Bytes::from_static(b"news")))
+                );
+                assert_eq!(
+                    v[2],
+                    RespValue::BulkString(Some(Bytes::from_static(b"breaking")))
+                );
             }
             _ => panic!("unexpected message push: {msg:?}"),
         }
@@ -1100,8 +1148,14 @@ mod tests {
         let confirm = next_reply(&mut sub).await;
         match &confirm {
             RespValue::Array(Some(v)) => {
-                assert_eq!(v[0], RespValue::BulkString(Some(Bytes::from_static(b"psubscribe"))));
-                assert_eq!(v[1], RespValue::BulkString(Some(Bytes::from_static(b"news.*"))));
+                assert_eq!(
+                    v[0],
+                    RespValue::BulkString(Some(Bytes::from_static(b"psubscribe")))
+                );
+                assert_eq!(
+                    v[1],
+                    RespValue::BulkString(Some(Bytes::from_static(b"news.*")))
+                );
                 assert_eq!(v[2], RespValue::Integer(1));
             }
             _ => panic!("unexpected: {confirm:?}"),
@@ -1117,10 +1171,22 @@ mod tests {
         let msg = next_reply(&mut sub).await;
         match &msg {
             RespValue::Array(Some(v)) => {
-                assert_eq!(v[0], RespValue::BulkString(Some(Bytes::from_static(b"pmessage"))));
-                assert_eq!(v[1], RespValue::BulkString(Some(Bytes::from_static(b"news.*"))));
-                assert_eq!(v[2], RespValue::BulkString(Some(Bytes::from_static(b"news.sports"))));
-                assert_eq!(v[3], RespValue::BulkString(Some(Bytes::from_static(b"goal"))));
+                assert_eq!(
+                    v[0],
+                    RespValue::BulkString(Some(Bytes::from_static(b"pmessage")))
+                );
+                assert_eq!(
+                    v[1],
+                    RespValue::BulkString(Some(Bytes::from_static(b"news.*")))
+                );
+                assert_eq!(
+                    v[2],
+                    RespValue::BulkString(Some(Bytes::from_static(b"news.sports")))
+                );
+                assert_eq!(
+                    v[3],
+                    RespValue::BulkString(Some(Bytes::from_static(b"goal")))
+                );
             }
             _ => panic!("unexpected: {msg:?}"),
         }
@@ -1237,7 +1303,10 @@ mod tests {
         let pong = next_reply(&mut sub).await;
         match &pong {
             RespValue::Array(Some(v)) => {
-                assert_eq!(v[0], RespValue::BulkString(Some(Bytes::from_static(b"pong"))));
+                assert_eq!(
+                    v[0],
+                    RespValue::BulkString(Some(Bytes::from_static(b"pong")))
+                );
                 // payload is empty
                 assert_eq!(v[1], RespValue::BulkString(Some(Bytes::from_static(b""))));
             }
@@ -1312,7 +1381,10 @@ mod tests {
             RespValue::Array(Some(v)) => {
                 // [channel, count]
                 assert_eq!(v.len(), 2);
-                assert_eq!(v[0], RespValue::BulkString(Some(Bytes::from_static(b"sports"))));
+                assert_eq!(
+                    v[0],
+                    RespValue::BulkString(Some(Bytes::from_static(b"sports")))
+                );
                 assert_eq!(v[1], RespValue::Integer(2));
             }
             _ => panic!("expected array, got {ns_reply:?}"),
@@ -1490,5 +1562,345 @@ mod tests {
         }
 
         handle.abort();
+    }
+
+    // --- RESP3 negotiation (RFC 0002, step 2) ---
+
+    /// Starts a listener on a free port and returns a raw client socket.
+    async fn raw_client() -> tokio::net::TcpStream {
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+        tokio::spawn(RedisListener::new(addr, test_store()).serve());
+        connect_retry(addr).await
+    }
+
+    /// Sends `parts` and asserts the server's next bytes are exactly
+    /// `expected`.
+    async fn expect_bytes(c: &mut tokio::net::TcpStream, parts: &[&[u8]], expected: &[u8]) {
+        use tokio::io::AsyncReadExt;
+        send_cmd(c, parts).await;
+        let mut got = vec![0u8; expected.len()];
+        tokio::time::timeout(Duration::from_secs(5), c.read_exact(&mut got))
+            .await
+            .expect("timeout waiting for reply")
+            .expect("read failed");
+        assert_eq!(
+            String::from_utf8_lossy(&got),
+            String::from_utf8_lossy(expected)
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_defaults_to_resp2() {
+        let mut c = raw_client().await;
+        expect_bytes(&mut c, &[b"GET", b"missing"], b"$-1\r\n").await;
+    }
+
+    #[tokio::test]
+    async fn hello_3_reply_is_a_map_and_nulls_become_underscore() {
+        use tokio::io::AsyncReadExt;
+        let mut c = raw_client().await;
+        send_cmd(&mut c, &[b"HELLO", b"3"]).await;
+        let mut head = [0u8; 4];
+        tokio::time::timeout(Duration::from_secs(5), c.read_exact(&mut head))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&head, b"%7\r\n", "the reply to HELLO 3 is itself a map");
+        // Drain the remainder of the map, then check a null.
+        let mut rest = vec![0u8; 8192];
+        let _ = tokio::time::timeout(Duration::from_millis(200), c.read(&mut rest)).await;
+        expect_bytes(&mut c, &[b"GET", b"missing"], b"_\r\n").await;
+    }
+
+    #[tokio::test]
+    async fn hello_2_after_hello_3_returns_to_resp2() {
+        let c = raw_client().await;
+        let mut framed = Framed::new(c, RespDecoder::new());
+        framed.send(array_cmd(&[b"HELLO", b"3"])).await.unwrap();
+        assert!(matches!(next_reply(&mut framed).await, RespValue::Map(_)));
+        framed.send(array_cmd(&[b"GET", b"k"])).await.unwrap();
+        assert_eq!(next_reply(&mut framed).await, RespValue::Null);
+
+        framed.send(array_cmd(&[b"HELLO", b"2"])).await.unwrap();
+        match next_reply(&mut framed).await {
+            RespValue::Array(Some(items)) => {
+                assert_eq!(items.len(), 14, "HELLO 2 replies with the flat array");
+                assert_eq!(items[5], RespValue::Integer(2));
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+        framed.send(array_cmd(&[b"GET", b"k"])).await.unwrap();
+        assert_eq!(next_reply(&mut framed).await, RespValue::BulkString(None));
+    }
+
+    #[tokio::test]
+    async fn hello_inside_multi_is_rejected_in_both_protocols() {
+        for proto in [&b"2"[..], b"3"] {
+            let mut c = raw_client().await;
+            if proto == b"3" {
+                let mut framed = Framed::new(c, RespDecoder::new());
+                framed.send(array_cmd(&[b"HELLO", b"3"])).await.unwrap();
+                next_reply(&mut framed).await;
+                c = framed.into_inner();
+            }
+            let mut framed = Framed::new(c, RespDecoder::new());
+            framed.send(array_cmd(&[b"MULTI"])).await.unwrap();
+            next_reply(&mut framed).await;
+            framed
+                .send(array_cmd(&[b"HELLO", b"3", b"SETNAME", b"x"]))
+                .await
+                .unwrap();
+            assert!(matches!(
+                next_reply(&mut framed).await,
+                RespValue::Error(e) if e.starts_with(b"Command not allowed inside a transaction")
+            ));
+            // The rejection dirties the transaction, like any refused command.
+            framed.send(array_cmd(&[b"EXEC"])).await.unwrap();
+            assert!(matches!(next_reply(&mut framed).await, RespValue::Error(_)));
+            framed
+                .send(array_cmd(&[b"CLIENT", b"GETNAME"]))
+                .await
+                .unwrap();
+            let name = next_reply(&mut framed).await;
+            assert!(
+                matches!(name, RespValue::BulkString(None) | RespValue::Null),
+                "HELLO inside MULTI must not apply SETNAME, got {name:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reset_returns_connection_to_resp2() {
+        let c = raw_client().await;
+        let mut framed = Framed::new(c, RespDecoder::new());
+        framed.send(array_cmd(&[b"HELLO", b"3"])).await.unwrap();
+        next_reply(&mut framed).await;
+        framed.send(array_cmd(&[b"RESET"])).await.unwrap();
+        assert_eq!(
+            next_reply(&mut framed).await,
+            RespValue::SimpleString(Bytes::from_static(b"RESET"))
+        );
+        framed.send(array_cmd(&[b"GET", b"k"])).await.unwrap();
+        assert_eq!(next_reply(&mut framed).await, RespValue::BulkString(None));
+    }
+
+    #[tokio::test]
+    async fn subscribe_mode_restrictions_are_identical_under_resp3() {
+        let mut errors = Vec::new();
+        for resp3 in [false, true] {
+            let c = raw_client().await;
+            let mut framed = Framed::new(c, RespDecoder::new());
+            if resp3 {
+                framed.send(array_cmd(&[b"HELLO", b"3"])).await.unwrap();
+                next_reply(&mut framed).await;
+            }
+            framed
+                .send(array_cmd(&[b"SUBSCRIBE", b"ch"]))
+                .await
+                .unwrap();
+            next_reply(&mut framed).await;
+            framed.send(array_cmd(&[b"SET", b"a", b"b"])).await.unwrap();
+            errors.push(next_reply(&mut framed).await);
+            // RESET is allowed while subscribed and drops back to RESP2.
+            framed.send(array_cmd(&[b"RESET"])).await.unwrap();
+            assert_eq!(
+                next_reply(&mut framed).await,
+                RespValue::SimpleString(Bytes::from_static(b"RESET"))
+            );
+        }
+        assert!(matches!(errors[0], RespValue::Error(_)));
+        assert_eq!(errors[0], errors[1]);
+    }
+
+    /// `RESET` from subscribe mode must leave a usable, fully reset
+    /// connection: no subscriptions left and no pending close.
+    #[tokio::test]
+    async fn reset_in_subscribe_mode_keeps_connection_open() {
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+        tokio::spawn(RedisListener::new(addr, test_store()).serve());
+
+        let mut sub = Framed::new(connect_retry(addr).await, RespDecoder::new());
+        sub.send(array_cmd(&[b"SUBSCRIBE", b"ch"])).await.unwrap();
+        next_reply(&mut sub).await;
+        sub.send(array_cmd(&[b"RESET"])).await.unwrap();
+        assert_eq!(
+            next_reply(&mut sub).await,
+            RespValue::SimpleString(Bytes::from_static(b"RESET"))
+        );
+
+        // Several ordinary commands in a row: the connection must survive all
+        // of them, not just the first.
+        for _ in 0..3 {
+            sub.send(array_cmd(&[b"PING"])).await.unwrap();
+            assert_eq!(
+                next_reply(&mut sub).await,
+                RespValue::SimpleString(Bytes::from_static(b"PONG")),
+                "connection closed or misbehaving after RESET"
+            );
+        }
+
+        // The subscription really is gone.
+        let mut publisher = Framed::new(connect_retry(addr).await, RespDecoder::new());
+        publisher
+            .send(array_cmd(&[b"PUBLISH", b"ch", b"hi"]))
+            .await
+            .unwrap();
+        assert_eq!(next_reply(&mut publisher).await, RespValue::Integer(0));
+    }
+
+    async fn resp3_pair() -> (
+        Framed<tokio::net::TcpStream, RespDecoder>,
+        Framed<tokio::net::TcpStream, RespDecoder>,
+    ) {
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+        tokio::spawn(RedisListener::new(addr, test_store()).serve());
+        let mut sub = Framed::new(connect_retry(addr).await, RespDecoder::new());
+        sub.send(array_cmd(&[b"HELLO", b"3"])).await.unwrap();
+        next_reply(&mut sub).await;
+        let publisher = Framed::new(connect_retry(addr).await, RespDecoder::new());
+        (sub, publisher)
+    }
+
+    fn bulk(s: &'static [u8]) -> RespValue {
+        RespValue::BulkString(Some(Bytes::from_static(s)))
+    }
+
+    #[tokio::test]
+    async fn resp3_pubsub_frames_are_pushes() {
+        let (mut sub, mut publisher) = resp3_pair().await;
+        sub.send(array_cmd(&[b"SUBSCRIBE", b"ch"])).await.unwrap();
+        assert_eq!(
+            next_reply(&mut sub).await,
+            RespValue::Push(vec![bulk(b"subscribe"), bulk(b"ch"), RespValue::Integer(1)])
+        );
+        sub.send(array_cmd(&[b"PSUBSCRIBE", b"p*"])).await.unwrap();
+        assert_eq!(
+            next_reply(&mut sub).await,
+            RespValue::Push(vec![
+                bulk(b"psubscribe"),
+                bulk(b"p*"),
+                RespValue::Integer(2)
+            ])
+        );
+
+        publisher
+            .send(array_cmd(&[b"PUBLISH", b"ch", b"hi"]))
+            .await
+            .unwrap();
+        next_reply(&mut publisher).await;
+        assert_eq!(
+            next_reply(&mut sub).await,
+            RespValue::Push(vec![bulk(b"message"), bulk(b"ch"), bulk(b"hi")])
+        );
+        publisher
+            .send(array_cmd(&[b"PUBLISH", b"px", b"yo"]))
+            .await
+            .unwrap();
+        next_reply(&mut publisher).await;
+        assert_eq!(
+            next_reply(&mut sub).await,
+            RespValue::Push(vec![
+                bulk(b"pmessage"),
+                bulk(b"p*"),
+                bulk(b"px"),
+                bulk(b"yo")
+            ])
+        );
+
+        sub.send(array_cmd(&[b"UNSUBSCRIBE", b"ch"])).await.unwrap();
+        assert_eq!(
+            next_reply(&mut sub).await,
+            RespValue::Push(vec![
+                bulk(b"unsubscribe"),
+                bulk(b"ch"),
+                RespValue::Integer(1)
+            ])
+        );
+        sub.send(array_cmd(&[b"PUNSUBSCRIBE"])).await.unwrap();
+        assert_eq!(
+            next_reply(&mut sub).await,
+            RespValue::Push(vec![
+                bulk(b"punsubscribe"),
+                bulk(b"p*"),
+                RespValue::Integer(0)
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn resp3_unsubscribe_with_nothing_subscribed_is_a_null_push() {
+        let (mut sub, _publisher) = resp3_pair().await;
+        sub.send(array_cmd(&[b"UNSUBSCRIBE"])).await.unwrap();
+        assert_eq!(
+            next_reply(&mut sub).await,
+            RespValue::Push(vec![
+                bulk(b"unsubscribe"),
+                RespValue::Null,
+                RespValue::Integer(0)
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribed_ping_differs_by_protocol() {
+        let (mut sub, _publisher) = resp3_pair().await;
+        sub.send(array_cmd(&[b"SUBSCRIBE", b"ch"])).await.unwrap();
+        next_reply(&mut sub).await;
+        sub.send(array_cmd(&[b"PING"])).await.unwrap();
+        assert_eq!(
+            next_reply(&mut sub).await,
+            RespValue::SimpleString(Bytes::from_static(b"PONG"))
+        );
+        sub.send(array_cmd(&[b"PING", b"x"])).await.unwrap();
+        assert_eq!(next_reply(&mut sub).await, bulk(b"x"));
+
+        // RESP2 is unchanged.
+        let c = raw_client().await;
+        let mut sub2 = Framed::new(c, RespDecoder::new());
+        sub2.send(array_cmd(&[b"SUBSCRIBE", b"ch"])).await.unwrap();
+        next_reply(&mut sub2).await;
+        sub2.send(array_cmd(&[b"PING"])).await.unwrap();
+        assert_eq!(
+            next_reply(&mut sub2).await,
+            RespValue::Array(Some(vec![bulk(b"pong"), bulk(b"")]))
+        );
+    }
+
+    #[tokio::test]
+    async fn pubsub_numsub_is_a_map_in_resp3_and_flat_in_resp2() {
+        let (mut c3, _p) = resp3_pair().await;
+        c3.send(array_cmd(&[b"PUBSUB", b"NUMSUB", b"a", b"b"]))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_reply(&mut c3).await,
+            RespValue::Map(vec![
+                (bulk(b"a"), RespValue::Integer(0)),
+                (bulk(b"b"), RespValue::Integer(0)),
+            ])
+        );
+        let mut c2 = Framed::new(raw_client().await, RespDecoder::new());
+        c2.send(array_cmd(&[b"PUBSUB", b"NUMSUB", b"a"]))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_reply(&mut c2).await,
+            RespValue::Array(Some(vec![bulk(b"a"), RespValue::Integer(0)]))
+        );
+    }
+
+    fn array_cmd(parts: &[&[u8]]) -> RespValue {
+        RespValue::Array(Some(
+            parts
+                .iter()
+                .map(|p| RespValue::BulkString(Some(Bytes::copy_from_slice(p))))
+                .collect(),
+        ))
     }
 }

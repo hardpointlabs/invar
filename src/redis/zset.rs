@@ -49,14 +49,18 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use kv::kv::{TxIsolation, BoxFuture, Entry, Error as KvError, Tx};
+use kv::kv::{BoxFuture, Entry, Error as KvError, Tx, TxIsolation};
 
+use crate::common::namespace::{
+    self, base_type, new_namespace, resolve_prefix, resolve_prefix_for_write, ElementPrefix,
+};
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
-use smallvec::{smallvec, SmallVec};
 use crate::common::session::Session;
-use crate::common::namespace::{self, base_type, new_namespace, resolve_prefix, resolve_prefix_for_write, ElementPrefix};
-use crate::common::{BlockResult, BlockingSignal, Claim, PopResult, RedisStore, ValueType, WatchRegistry};
-use crate::resp::RespValue;
+use crate::common::{
+    BlockResult, BlockingSignal, Claim, PopResult, RedisStore, ValueType, WatchRegistry,
+};
+use crate::resp::{format_f64, RespValue};
+use smallvec::{smallvec, SmallVec};
 
 /// Metadata type byte stamped on every zset sentinel, matching
 /// `ValueType::SortedSet`.
@@ -66,25 +70,6 @@ const TYPE_SORTED_SET: u8 = ValueType::SortedSet as u8;
 /// result shape is unexpected (a "can't happen" guard).
 fn internal_error() -> RespValue {
     RespValue::Error(Bytes::from_static(b"ERR internal error"))
-}
-
-// --- Float formatting ---
-
-/// Formats a float the way Go's `redis/common.FormatFloat` does (which the
-/// zset wire replies use): shortest round-trip decimal digits, no exponent,
-/// and `inf`/`-inf` (not `+Inf`/`-Inf`, matching Redis's literal scores) for
-/// the infinities. NaN is kept as `NaN`.
-fn format_f64(v: f64) -> String {
-    if v.is_nan() {
-        return "NaN".to_string();
-    }
-    if v > 0.0 && v.is_infinite() {
-        return "inf".to_string();
-    }
-    if v < 0.0 && v.is_infinite() {
-        return "-inf".to_string();
-    }
-    format!("{v}")
 }
 
 // --- Score encoding ---
@@ -247,7 +232,14 @@ async fn write_sentinel(
     count: u32,
     prefix: &ElementPrefix,
 ) -> Result<(), DbError> {
-    namespace::write_sentinel(tx, public_key, count.to_be_bytes().to_vec(), TYPE_SORTED_SET, prefix).await
+    namespace::write_sentinel(
+        tx,
+        public_key,
+        count.to_be_bytes().to_vec(),
+        TYPE_SORTED_SET,
+        prefix,
+    )
+    .await
 }
 
 /// Loads every member in score order (ascending, with member bytes as the
@@ -430,7 +422,9 @@ fn parse_lex_bound(s: &str) -> Result<(Option<Vec<u8>>, bool), DbError> {
     if let Some(rest) = s.strip_prefix('[') {
         return Ok((Some(rest.as_bytes().to_vec()), false));
     }
-    Err(DbError::Redis("min or max not valid string range item".into()))
+    Err(DbError::Redis(
+        "min or max not valid string range item".into(),
+    ))
 }
 
 /// Filters members by the lexicographic range `[min, max]`/`(min, max)`,
@@ -626,7 +620,13 @@ async fn store_zset_result(
         tx.set(Entry::new(dest.score_key(e.score, &e.member), Vec::new()))?;
         tx.set(Entry::new(dest.member_key(&e.member), score_bytes(e.score)))?;
     }
-    write_sentinel(tx, &dest.public_key, members.len() as u32, &dest.node_prefix).await?;
+    write_sentinel(
+        tx,
+        &dest.public_key,
+        members.len() as u32,
+        &dest.node_prefix,
+    )
+    .await?;
     Ok(members.len() as i64)
 }
 
@@ -721,7 +721,7 @@ pub fn zrange(session: &Session, key: &[u8], start: i64, stop: i64, with_scores:
             with_scores,
             reverse: false,
         }),
-        wire_op: Box::new(BulkArrayWire),
+        wire_op: Box::new(ScoredArrayWire { with_scores }),
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
@@ -745,7 +745,7 @@ pub fn zrevrange(
             with_scores,
             reverse: true,
         }),
-        wire_op: Box::new(BulkArrayWire),
+        wire_op: Box::new(ScoredArrayWire { with_scores }),
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
@@ -843,7 +843,7 @@ pub fn zrangebyscore(
             has_limit,
             reverse: false,
         }),
-        wire_op: Box::new(BulkArrayWire),
+        wire_op: Box::new(ScoredArrayWire { with_scores }),
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
@@ -876,7 +876,7 @@ pub fn zrevrangebyscore(
             has_limit,
             reverse: true,
         }),
-        wire_op: Box::new(BulkArrayWire),
+        wire_op: Box::new(ScoredArrayWire { with_scores }),
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
@@ -1007,14 +1007,19 @@ pub fn zremrangebylex(session: &Session, key: &[u8], min_str: &str, max_str: &st
 }
 
 /// `ZPOPMIN key [count]` — removes and returns the lowest-score members.
-pub fn zpopmin(session: &Session, key: &[u8], count: usize) -> QueuedOp {
+/// Without a `count` the reply is a flat `[member, score]`; with one it is
+/// pairs on RESP3 (all flat on RESP2).
+pub fn zpopmin(session: &Session, key: &[u8], count: Option<usize>) -> QueuedOp {
     QueuedOp {
         db_op: Box::new(ZPopOp {
             node: NodeRef::new(session, key),
-            count,
+            count: count.unwrap_or(1),
             want_min: true,
         }),
-        wire_op: Box::new(MemberScoreArrayWire { with_scores: true }),
+        wire_op: Box::new(MemberScoreArrayWire {
+            with_scores: true,
+            paired: count.is_some(),
+        }),
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
@@ -1023,14 +1028,17 @@ pub fn zpopmin(session: &Session, key: &[u8], count: usize) -> QueuedOp {
 }
 
 /// `ZPOPMAX key [count]` — removes and returns the highest-score members.
-pub fn zpopmax(session: &Session, key: &[u8], count: usize) -> QueuedOp {
+pub fn zpopmax(session: &Session, key: &[u8], count: Option<usize>) -> QueuedOp {
     QueuedOp {
         db_op: Box::new(ZPopOp {
             node: NodeRef::new(session, key),
-            count,
+            count: count.unwrap_or(1),
             want_min: false,
         }),
-        wire_op: Box::new(MemberScoreArrayWire { with_scores: true }),
+        wire_op: Box::new(MemberScoreArrayWire {
+            with_scores: true,
+            paired: count.is_some(),
+        }),
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
@@ -1064,6 +1072,7 @@ pub fn zrandmember(session: &Session, key: &[u8], count: i64) -> QueuedOp {
         }),
         wire_op: Box::new(MemberScoreArrayWire {
             with_scores: count < 0,
+            paired: true,
         }),
         is_mutating: false,
         allowed_in_tx: true,
@@ -1084,7 +1093,7 @@ pub fn zdiff(session: &Session, with_scores: bool, keys: &[Bytes]) -> QueuedOp {
             with_scores,
             SetOpKind::Diff,
         )),
-        wire_op: Box::new(BulkArrayWire),
+        wire_op: Box::new(ScoredArrayWire { with_scores }),
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
@@ -1111,7 +1120,10 @@ pub fn zdiffstore(session: &Session, dest: &[u8], keys: &[Bytes]) -> QueuedOp {
         keys: Some({
             let mut ks = SmallVec::<[String; 2]>::new();
             ks.push(String::from_utf8_lossy(&session.public_key(dest)).into_owned());
-            ks.extend(keys.iter().map(|k| String::from_utf8_lossy(&session.public_key(k)).into_owned()));
+            ks.extend(
+                keys.iter()
+                    .map(|k| String::from_utf8_lossy(&session.public_key(k)).into_owned()),
+            );
             ks
         }),
     }
@@ -1135,7 +1147,7 @@ pub fn zinter(
             with_scores,
             SetOpKind::Inter,
         )),
-        wire_op: Box::new(BulkArrayWire),
+        wire_op: Box::new(ScoredArrayWire { with_scores }),
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
@@ -1168,7 +1180,10 @@ pub fn zinterstore(
         keys: Some({
             let mut ks = SmallVec::<[String; 2]>::new();
             ks.push(String::from_utf8_lossy(&session.public_key(dest)).into_owned());
-            ks.extend(keys.iter().map(|k| String::from_utf8_lossy(&session.public_key(k)).into_owned()));
+            ks.extend(
+                keys.iter()
+                    .map(|k| String::from_utf8_lossy(&session.public_key(k)).into_owned()),
+            );
             ks
         }),
     }
@@ -1192,7 +1207,7 @@ pub fn zunion(
             with_scores,
             SetOpKind::Union,
         )),
-        wire_op: Box::new(BulkArrayWire),
+        wire_op: Box::new(ScoredArrayWire { with_scores }),
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
@@ -1225,7 +1240,10 @@ pub fn zunionstore(
         keys: Some({
             let mut ks = SmallVec::<[String; 2]>::new();
             ks.push(String::from_utf8_lossy(&session.public_key(dest)).into_owned());
-            ks.extend(keys.iter().map(|k| String::from_utf8_lossy(&session.public_key(k)).into_owned()));
+            ks.extend(
+                keys.iter()
+                    .map(|k| String::from_utf8_lossy(&session.public_key(k)).into_owned()),
+            );
             ks
         }),
     }
@@ -1245,7 +1263,10 @@ pub fn zrangestore(session: &Session, dest: &[u8], src: &[u8], start: i64, stop:
         is_mutating: true,
         allowed_in_tx: true,
         abort_in_tx: false,
-        keys: Some(smallvec![String::from_utf8_lossy(&session.public_key(dest)).into_owned(), String::from_utf8_lossy(&session.public_key(src)).into_owned()]),
+        keys: Some(smallvec![
+            String::from_utf8_lossy(&session.public_key(dest)).into_owned(),
+            String::from_utf8_lossy(&session.public_key(src)).into_owned()
+        ]),
     }
 }
 
@@ -1705,7 +1726,9 @@ impl DbOp for ZAddOp {
     fn defer_claims(&self, result: &mut DbResult, into: &Mutex<Vec<Claim>>) {
         if let Some(zadd) = result.downcast_mut::<ZAddResult>() {
             if let Some(claim) = zadd.claim.take() {
-                into.lock().expect("deferred claims mutex poisoned").push(claim);
+                into.lock()
+                    .expect("deferred claims mutex poisoned")
+                    .push(claim);
             }
         }
     }
@@ -2102,7 +2125,8 @@ impl DbOp for ZPopOp {
                 if new_count == 0 {
                     tx.delete(&node.public_key)?;
                 } else {
-                    write_sentinel(tx, &node.public_key, new_count as u32, &node.node_prefix).await?;
+                    write_sentinel(tx, &node.public_key, new_count as u32, &node.node_prefix)
+                        .await?;
                 }
                 let result: DbResult = Box::new(
                     popped
@@ -2124,7 +2148,8 @@ impl DbOp for ZPopOp {
                 if new_count == 0 {
                     tx.delete(&node.public_key)?;
                 } else {
-                    write_sentinel(tx, &node.public_key, new_count as u32, &node.node_prefix).await?;
+                    write_sentinel(tx, &node.public_key, new_count as u32, &node.node_prefix)
+                        .await?;
                 }
                 let result: DbResult = Box::new(
                     popped
@@ -2409,8 +2434,8 @@ impl WireOp for NullableIntWire {
     }
 }
 
-/// Replies `ZSCORE`/`ZINCRBY`: a bulk serialized float, or null for a missing
-/// member.
+/// Replies `ZSCORE`/`ZINCRBY`: a double (a bulk serialized float on RESP2),
+/// or null for a missing member.
 enum ScoreWire {
     Nullable,
     Plain,
@@ -2421,11 +2446,11 @@ impl WireOp for ScoreWire {
         match result {
             Ok(res) => match res.downcast::<Option<f64>>() {
                 Ok(boxed) => match *boxed {
-                    Some(score) => RespValue::BulkString(Some(Bytes::from(format_f64(score)))),
+                    Some(score) => RespValue::Double(score),
                     None => RespValue::BulkString(None),
                 },
                 Err(res) => match res.downcast::<f64>() {
-                    Ok(score) => RespValue::BulkString(Some(Bytes::from(format_f64(*score)))),
+                    Ok(score) => RespValue::Double(*score),
                     Err(_) => internal_error(),
                 },
             },
@@ -2454,9 +2479,55 @@ impl WireOp for BulkArrayWire {
     }
 }
 
-/// Replies an array of member [/ score] pairs from a `Vec<MemberScore>`.
+/// A score as the double it was formatted from by [`flatten_members`]. The
+/// text round-trips exactly; should it ever not parse, the bulk string is
+/// kept rather than losing the value.
+fn score_value(text: &[u8]) -> RespValue {
+    match std::str::from_utf8(text)
+        .ok()
+        .and_then(|t| t.parse::<f64>().ok())
+    {
+        Some(score) => RespValue::Double(score),
+        None => RespValue::BulkString(Some(Bytes::copy_from_slice(text))),
+    }
+}
+
+/// Replies a range-style result from [`flatten_members`]: plain members, or
+/// with scores `[member, score]` pairs (flat on RESP2).
+struct ScoredArrayWire {
+    with_scores: bool,
+}
+
+impl WireOp for ScoredArrayWire {
+    fn reply(&self, result: Result<DbResult, DbError>) -> RespValue {
+        if !self.with_scores {
+            return BulkArrayWire.reply(result);
+        }
+        match result {
+            Ok(res) => match res.downcast::<Vec<Vec<u8>>>() {
+                Ok(flat) => RespValue::Pairs(
+                    flat.chunks_exact(2)
+                        .map(|p| {
+                            (
+                                RespValue::BulkString(Some(Bytes::copy_from_slice(&p[0]))),
+                                score_value(&p[1]),
+                            )
+                        })
+                        .collect(),
+                ),
+                Err(_) => internal_error(),
+            },
+            Err(e) => err_resp(&e),
+        }
+    }
+}
+
+/// Replies an array of member [/ score] from a `Vec<MemberScore>`. Scores
+/// are doubles. With `paired` they come as `[member, score]` pairs (flat on
+/// RESP2); otherwise as one flat array.
 struct MemberScoreArrayWire {
     with_scores: bool,
+    paired: bool,
 }
 
 impl WireOp for MemberScoreArrayWire {
@@ -2464,18 +2535,26 @@ impl WireOp for MemberScoreArrayWire {
         match result {
             Ok(res) => match res.downcast::<Vec<MemberScore>>() {
                 Ok(boxed) => {
-                    let mut items = Vec::with_capacity(boxed.len() * 2);
-                    for e in boxed.iter() {
-                        items.push(RespValue::BulkString(Some(Bytes::copy_from_slice(
-                            &e.member,
-                        ))));
-                        if self.with_scores {
-                            items.push(RespValue::BulkString(Some(Bytes::from(format_f64(
-                                e.score,
-                            )))));
+                    let member = |e: &MemberScore| {
+                        RespValue::BulkString(Some(Bytes::copy_from_slice(&e.member)))
+                    };
+                    if self.with_scores && self.paired {
+                        RespValue::Pairs(
+                            boxed
+                                .iter()
+                                .map(|e| (member(e), RespValue::Double(e.score)))
+                                .collect(),
+                        )
+                    } else {
+                        let mut items = Vec::with_capacity(boxed.len() * 2);
+                        for e in boxed.iter() {
+                            items.push(member(e));
+                            if self.with_scores {
+                                items.push(RespValue::Double(e.score));
+                            }
                         }
+                        RespValue::Array(Some(items))
                     }
-                    RespValue::Array(Some(items))
                 }
                 Err(_) => internal_error(),
             },
@@ -2484,7 +2563,7 @@ impl WireOp for MemberScoreArrayWire {
     }
 }
 
-/// Replies `ZMSCORE`: an array of bulk scores or nulls, in member order.
+/// Replies `ZMSCORE`: an array of doubles or nulls, in member order.
 struct ZMScoreWire;
 
 impl WireOp for ZMScoreWire {
@@ -2496,9 +2575,7 @@ impl WireOp for ZMScoreWire {
                         .scores
                         .iter()
                         .map(|s| match s {
-                            Some(score) => {
-                                RespValue::BulkString(Some(Bytes::from(format_f64(*score))))
-                            }
+                            Some(score) => RespValue::Double(*score),
                             None => RespValue::BulkString(None),
                         })
                         .collect(),
@@ -2534,12 +2611,12 @@ impl WireOp for ZAddWire {
 // --- Blocking pops ---
 
 /// The reply for a successful `BZPOPMIN`/`BZPOPMAX`: a 3-element array of
-/// `[key, member, score]`.
+/// `[key, member, score]`, the score being a double.
 fn bzpop_reply_value(p: PopResult) -> RespValue {
     RespValue::Array(Some(vec![
         RespValue::BulkString(Some(Bytes::from(p.key))),
         RespValue::BulkString(Some(Bytes::from(p.member))),
-        RespValue::BulkString(Some(Bytes::from(format_f64(p.score)))),
+        RespValue::Double(p.score),
     ]))
 }
 
@@ -2604,7 +2681,11 @@ impl DbOp for BzpopOp {
                             None
                         };
                         self.blocking.entering_block();
-                        match self.registry.block(&public_keys, self.want_min, duration).await {
+                        match self
+                            .registry
+                            .block(&public_keys, self.want_min, duration)
+                            .await
+                        {
                             Some(result) => Ok(Box::new(Some(result)) as DbResult),
                             None => Ok(Box::new(None::<PopResult>) as DbResult),
                         }
@@ -2642,12 +2723,7 @@ impl WireOp for BzpopWire {
 }
 
 /// `BZPOPMIN key [key ...] timeout` / `BZPOPMAX key [key ...] timeout`.
-pub fn bzpop(
-    session: &Session,
-    keys: &[&[u8]],
-    timeout: f64,
-    want_min: bool,
-) -> QueuedOp {
+pub fn bzpop(session: &Session, keys: &[&[u8]], timeout: f64, want_min: bool) -> QueuedOp {
     let can_block = session.should_block();
     let store = session.store();
     let registry = session.registry();
@@ -2672,7 +2748,10 @@ pub fn bzpop(
         abort_in_tx: false,
         keys: Some({
             let mut ks = SmallVec::<[String; 2]>::new();
-            ks.extend(keys.iter().map(|k| String::from_utf8_lossy(&session.public_key(k)).into_owned()));
+            ks.extend(
+                keys.iter()
+                    .map(|k| String::from_utf8_lossy(&session.public_key(k)).into_owned()),
+            );
             ks
         }),
     }
@@ -2687,8 +2766,16 @@ mod tests {
     /// Runs one op through its own transaction and commits if it mutates, then
     /// renders the reply (the unit-test equivalent of Go's `kvs.Update`/`Read`).
     async fn exec(session: &Session, op: QueuedOp) -> RespValue {
+        crate::testutil::resp2(exec_raw(session, op).await)
+    }
+
+    /// Like [`exec`], but leaves the RESP3 types in the reply.
+    async fn exec_raw(session: &Session, op: QueuedOp) -> RespValue {
         let store = session.store();
-        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
+        let tx = store
+            .begin(op.is_mutating, TxIsolation::Snapshot)
+            .await
+            .expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -2699,7 +2786,14 @@ mod tests {
     /// Like [`exec`] but takes owned data so it can be spawned as a `'static`
     /// task (needed for blocking-pop tests).
     async fn exec_owned(op: QueuedOp, store: Arc<dyn RedisStore>) -> RespValue {
-        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
+        crate::testutil::resp2(exec_owned_raw(op, store).await)
+    }
+
+    async fn exec_owned_raw(op: QueuedOp, store: Arc<dyn RedisStore>) -> RespValue {
+        let tx = store
+            .begin(op.is_mutating, TxIsolation::Snapshot)
+            .await
+            .expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -2747,14 +2841,24 @@ mod tests {
     // --- namespaced layout (RFC 0001) ---
 
     fn bs(parts: &[&str]) -> Vec<Bytes> {
-        parts.iter().map(|p| Bytes::copy_from_slice(p.as_bytes())).collect()
+        parts
+            .iter()
+            .map(|p| Bytes::copy_from_slice(p.as_bytes()))
+            .collect()
     }
 
     /// Runs the op on a legacy twin and on the namespaced one; replies must match.
-    async fn both(legacy: &Session, ns: &Session, build: impl Fn(&Session) -> QueuedOp) -> RespValue {
+    async fn both(
+        legacy: &Session,
+        ns: &Session,
+        build: impl Fn(&Session) -> QueuedOp,
+    ) -> RespValue {
         let a = crate::testutil::exec(legacy, build(legacy)).await;
         let b = crate::testutil::exec(ns, build(ns)).await;
-        assert_eq!(a, b, "a namespaced sorted set must answer exactly like a legacy one");
+        assert_eq!(
+            a, b,
+            "a namespaced sorted set must answer exactly like a legacy one"
+        );
         a
     }
 
@@ -2762,7 +2866,11 @@ mod tests {
     async fn namespaced_sorted_sets_behave_like_legacy_ones() {
         let (legacy, ns) = (test_session(), test_session());
         for s in [&legacy, &ns] {
-            crate::testutil::exec(s, zadd(s, b"a", &bs(&["1", "a", "2", "b", "3", "c", "4", "d"]))).await;
+            crate::testutil::exec(
+                s,
+                zadd(s, b"a", &bs(&["1", "a", "2", "b", "3", "c", "4", "d"])),
+            )
+            .await;
             crate::testutil::exec(s, zadd(s, b"b", &bs(&["10", "b", "20", "c", "30", "x"]))).await;
             crate::testutil::exec(s, zadd(s, b"d", &bs(&["5", "old"]))).await;
         }
@@ -2784,51 +2892,97 @@ mod tests {
         both(&legacy, &ns, |s| zrevrank(s, b"a", b"c")).await;
         both(&legacy, &ns, |s| zrange(s, b"a", 0, -1, true)).await;
         both(&legacy, &ns, |s| zrevrange(s, b"a", 0, 1, true)).await;
-        both(&legacy, &ns, |s| zrangebyscore(s, b"a", "(1", "3", true, None)).await;
-        both(&legacy, &ns, |s| zrevrangebyscore(s, b"a", "+inf", "-inf", false, Some((1, 2)))).await;
+        both(&legacy, &ns, |s| {
+            zrangebyscore(s, b"a", "(1", "3", true, None)
+        })
+        .await;
+        both(&legacy, &ns, |s| {
+            zrevrangebyscore(s, b"a", "+inf", "-inf", false, Some((1, 2)))
+        })
+        .await;
         both(&legacy, &ns, |s| zcount(s, b"a", "2", "4")).await;
         both(&legacy, &ns, |s| zlexcount(s, b"a", "-", "+")).await;
-        both(&legacy, &ns, |s| zrangebylex(s, b"a", "-", "+", 0, 0, false)).await;
+        both(&legacy, &ns, |s| {
+            zrangebylex(s, b"a", "-", "+", 0, 0, false)
+        })
+        .await;
 
         // Writes.
-        both(&legacy, &ns, |s| zadd(s, b"a", &bs(&["2.5", "bb", "9", "z"]))).await;
+        both(&legacy, &ns, |s| {
+            zadd(s, b"a", &bs(&["2.5", "bb", "9", "z"]))
+        })
+        .await;
         both(&legacy, &ns, |s| zadd(s, b"a", &bs(&["7", "a"]))).await; // update an existing score
         both(&legacy, &ns, |s| zincrby(s, b"a", 5.0, b"c")).await;
         both(&legacy, &ns, |s| zincrby(s, b"a", 1.0, b"brand-new")).await;
         both(&legacy, &ns, |s| zrem(s, b"a", &bs(&["d", "nope"]))).await;
         both(&legacy, &ns, |s| zrange(s, b"a", 0, -1, true)).await;
-        both(&legacy, &ns, |s| zpopmin(s, b"a", 1)).await;
-        both(&legacy, &ns, |s| zpopmax(s, b"a", 1)).await;
+        both(&legacy, &ns, |s| zpopmin(s, b"a", Some(1))).await;
+        both(&legacy, &ns, |s| zpopmax(s, b"a", Some(1))).await;
         both(&legacy, &ns, |s| zremrangebyscore(s, b"a", "-inf", "3")).await;
         both(&legacy, &ns, |s| zremrangebyrank(s, b"a", 0, 0)).await;
         both(&legacy, &ns, |s| zrange(s, b"a", 0, -1, true)).await;
 
         // Multi-key reads and stores, mixing namespaced and legacy operands.
         for s in [&legacy, &ns] {
-            crate::testutil::exec(s, zadd(s, b"c", &bs(&["1", "x", "2", "y"]))).await; // stays legacy
+            crate::testutil::exec(s, zadd(s, b"c", &bs(&["1", "x", "2", "y"]))).await;
+            // stays legacy
         }
-        both(&legacy, &ns, |s| zunion(s, "SUM", &[], true, &bs(&["a", "b", "c"]))).await;
-        both(&legacy, &ns, |s| zinter(s, "MAX", &[], true, &bs(&["b", "c"]))).await;
+        both(&legacy, &ns, |s| {
+            zunion(s, "SUM", &[], true, &bs(&["a", "b", "c"]))
+        })
+        .await;
+        both(&legacy, &ns, |s| {
+            zinter(s, "MAX", &[], true, &bs(&["b", "c"]))
+        })
+        .await;
         both(&legacy, &ns, |s| zdiff(s, true, &bs(&["b", "a"]))).await;
-        both(&legacy, &ns, |s| zunionstore(s, b"d", "SUM", &[], &bs(&["b", "c"]))).await; // replaces a namespaced dest
+        both(&legacy, &ns, |s| {
+            zunionstore(s, b"d", "SUM", &[], &bs(&["b", "c"]))
+        })
+        .await; // replaces a namespaced dest
         both(&legacy, &ns, |s| zrange(s, b"d", 0, -1, true)).await;
-        assert_eq!(crate::testutil::entries_under(&ns, &ns_d).await, 0, "the old destination's entries must be cleared");
-        assert_ne!(crate::testutil::namespace_of(&ns, b"d").await, ns_d, "a stored result is a new sorted set");
-        both(&legacy, &ns, |s| zinterstore(s, b"d", "SUM", &[], &bs(&["b", "c"]))).await;
+        assert_eq!(
+            crate::testutil::entries_under(&ns, &ns_d).await,
+            0,
+            "the old destination's entries must be cleared"
+        );
+        assert_ne!(
+            crate::testutil::namespace_of(&ns, b"d").await,
+            ns_d,
+            "a stored result is a new sorted set"
+        );
+        both(&legacy, &ns, |s| {
+            zinterstore(s, b"d", "SUM", &[], &bs(&["b", "c"]))
+        })
+        .await;
         both(&legacy, &ns, |s| zdiffstore(s, b"d", &bs(&["b", "c"]))).await;
         both(&legacy, &ns, |s| zrangestore(s, b"d", b"b", 0, 1)).await;
         both(&legacy, &ns, |s| zrange(s, b"d", 0, -1, true)).await;
 
         // Nothing under the name-derived prefixes of namespaced sets; sentinels still flagged.
         for k in [&b"a"[..], b"b"] {
-            assert_eq!(crate::testutil::entries_under(&ns, &ns.private_key(k)).await, 0, "{}", String::from_utf8_lossy(k));
-            let meta = crate::testutil::stored_type_byte(&ns, &ns.public_key(k)).await.unwrap();
-            assert_eq!(meta, TYPE_SORTED_SET | crate::common::namespace::NAMESPACE_FLAG);
+            assert_eq!(
+                crate::testutil::entries_under(&ns, &ns.private_key(k)).await,
+                0,
+                "{}",
+                String::from_utf8_lossy(k)
+            );
+            let meta = crate::testutil::stored_type_byte(&ns, &ns.public_key(k))
+                .await
+                .unwrap();
+            assert_eq!(
+                meta,
+                TYPE_SORTED_SET | crate::common::namespace::NAMESPACE_FLAG
+            );
         }
 
         // Emptying a namespaced set removes the sentinel and every entry.
         both(&legacy, &ns, |s| zremrangebyrank(s, b"b", 0, -1)).await;
-        assert_eq!(crate::testutil::stored_type_byte(&ns, &ns.public_key(b"b")).await, None);
+        assert_eq!(
+            crate::testutil::stored_type_byte(&ns, &ns.public_key(b"b")).await,
+            None
+        );
         assert_eq!(crate::testutil::entries_under(&ns, &ns_b).await, 0);
     }
 
@@ -2844,10 +2998,21 @@ mod tests {
         crate::testutil::exec(&s, zrangestore(&s, b"by_rangestore", b"src", 0, -1)).await;
 
         let mut seen = std::collections::HashSet::new();
-        for key in ["src", "by_zincrby", "by_union", "by_inter", "by_diff", "by_rangestore"] {
+        for key in [
+            "src",
+            "by_zincrby",
+            "by_union",
+            "by_inter",
+            "by_diff",
+            "by_rangestore",
+        ] {
             let ns = crate::testutil::namespace_of(&s, key.as_bytes()).await;
             assert!(crate::testutil::entries_under(&s, &ns).await > 0, "{key}");
-            assert_eq!(crate::testutil::entries_under(&s, &s.private_key(key.as_bytes())).await, 0, "{key}: nothing under the name");
+            assert_eq!(
+                crate::testutil::entries_under(&s, &s.private_key(key.as_bytes())).await,
+                0,
+                "{key}: nothing under the name"
+            );
             assert!(seen.insert(ns), "{key}: namespaces must be unique");
         }
     }
@@ -2861,7 +3026,9 @@ mod tests {
         crate::testutil::exec(&s, zadd(&s, b"z", &bs(&["2", "new"]))).await;
         assert_eq!(
             crate::testutil::exec(&s, zrange(&s, b"z", 0, -1, false)).await,
-            RespValue::Array(Some(vec![RespValue::BulkString(Some(Bytes::from_static(b"new")))]))
+            RespValue::Array(Some(vec![RespValue::BulkString(Some(Bytes::from_static(
+                b"new"
+            )))]))
         );
     }
 
@@ -2873,12 +3040,22 @@ mod tests {
         let ns_a = crate::testutil::namespace_of(&s, b"a").await;
         crate::testutil::exec(&s, zadd(&s, b"a", &bs(&["2", "b"]))).await;
         let ttl = crate::testutil::exec(&s, crate::keys::ttl(&s, b"a")).await;
-        assert!(matches!(ttl, RespValue::Integer(n) if (90..=100).contains(&n)), "ttl was {ttl:?}");
+        assert!(
+            matches!(ttl, RespValue::Integer(n) if (90..=100).contains(&n)),
+            "ttl was {ttl:?}"
+        );
 
         // BZPOPMIN on a namespaced set pops from it.
         let reply = crate::testutil::exec(&s, bzpop(&s, &[&b"a"[..]], 1.0, true)).await;
-        assert!(matches!(&reply, RespValue::Array(Some(v)) if v.len() == 3), "got {reply:?}");
-        assert_eq!(crate::testutil::entries_under(&s, &ns_a).await, 2, "one member left: a score and a member entry");
+        assert!(
+            matches!(&reply, RespValue::Array(Some(v)) if v.len() == 3),
+            "got {reply:?}"
+        );
+        assert_eq!(
+            crate::testutil::entries_under(&s, &ns_a).await,
+            2,
+            "one member left: a score and a member entry"
+        );
     }
 
     #[tokio::test]
@@ -3309,12 +3486,12 @@ mod tests {
     async fn zpopmin_and_max() {
         let session = test_session();
         zadd_pairs(&session, b"z", &[("a", 1.0), ("b", 2.0), ("c", 3.0)]).await;
-        let reply = exec(&session, zpopmin(&session, b"z", 2)).await;
+        let reply = exec(&session, zpopmin(&session, b"z", Some(2))).await;
         assert_eq!(
             expect_array(&reply),
             vec![b"a".to_vec(), b"1".to_vec(), b"b".to_vec(), b"2".to_vec()]
         );
-        let reply = exec(&session, zpopmax(&session, b"z", 1)).await;
+        let reply = exec(&session, zpopmax(&session, b"z", Some(1))).await;
         assert_eq!(expect_array(&reply), vec![b"c".to_vec(), b"3".to_vec()]);
         assert_eq!(
             exec(&session, zcard(&session, b"z")).await,
@@ -3507,7 +3684,7 @@ mod tests {
             ),
             zcard(&session, b"strkey"),
             zrange(&session, b"strkey", 0, -1, false),
-            zpopmin(&session, b"strkey", 1),
+            zpopmin(&session, b"strkey", Some(1)),
         ] {
             let err = expect_error(&exec(&session, op).await);
             assert_eq!(
