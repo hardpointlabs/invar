@@ -1346,20 +1346,23 @@ impl WireOp for XReadWire {
                 if !any_entries {
                     return RespValue::Array(None);
                 }
-                let items: Vec<RespValue> = streams
-                    .iter()
-                    .map(|(name, entries)| {
-                        let entry_items: Vec<RespValue> = entries
-                            .iter()
-                            .map(|(id, fields)| entry_resp(id, fields))
-                            .collect();
-                        RespValue::Array(Some(vec![
-                            RespValue::BulkString(Some(name.clone())),
-                            RespValue::Array(Some(entry_items)),
-                        ]))
-                    })
-                    .collect();
-                RespValue::Array(Some(items))
+                // A map keyed by stream name on RESP3; on RESP2 an array of
+                // `[name, entries]` arrays.
+                RespValue::NestedMap(
+                    streams
+                        .iter()
+                        .map(|(name, entries)| {
+                            let entry_items: Vec<RespValue> = entries
+                                .iter()
+                                .map(|(id, fields)| entry_resp(id, fields))
+                                .collect();
+                            (
+                                RespValue::BulkString(Some(name.clone())),
+                                RespValue::Array(Some(entry_items)),
+                            )
+                        })
+                        .collect(),
+                )
             }
             Err(e) => err_resp(&e),
         }
@@ -1397,7 +1400,14 @@ impl WireOp for XInfoStreamWire {
                     RespValue::BulkString(Some(Bytes::from_static(b"last-accessed-entry-id"))),
                     RespValue::BulkString(Some(Bytes::from(meta.last_id.display()))),
                 ];
-                RespValue::Array(Some(items))
+                // Alternating name/value: a map on RESP3, the same flat array
+                // on RESP2.
+                RespValue::Map(
+                    items
+                        .chunks_exact(2)
+                        .map(|kv| (kv[0].clone(), kv[1].clone()))
+                        .collect(),
+                )
             }
             Err(e) => err_resp(&e),
         }
@@ -1415,6 +1425,11 @@ mod tests {
     use std::time::Duration;
 
     async fn exec(session: &Session, op: QueuedOp) -> RespValue {
+        crate::testutil::resp2(exec_raw(session, op).await)
+    }
+
+    /// Like [`exec`], but leaves the RESP3 types in the reply.
+    async fn exec_raw(session: &Session, op: QueuedOp) -> RespValue {
         let store = session.store();
         let tx = store
             .begin(op.is_mutating, TxIsolation::Snapshot)
@@ -1430,6 +1445,10 @@ mod tests {
     /// Like [`exec`] but takes owned data so it can be spawned as a `'static`
     /// task (needed for blocking-read tests).
     async fn exec_owned(op: QueuedOp, store: Arc<dyn RedisStore>) -> RespValue {
+        crate::testutil::resp2(exec_owned_raw(op, store).await)
+    }
+
+    async fn exec_owned_raw(op: QueuedOp, store: Arc<dyn RedisStore>) -> RespValue {
         let tx = store
             .begin(op.is_mutating, TxIsolation::Snapshot)
             .await

@@ -3175,6 +3175,41 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn stream_reply_shapes_per_protocol() {
+        let mut s = test_session();
+        dispatch(&mut s, &["xadd", "st", "1-1", "f", "v"]).await;
+        // XREAD: array of [name, entries] on RESP2, a map on RESP3. Entries
+        // keep their flat field list on both.
+        assert_wire(
+            &mut s,
+            &["xread", "streams", "st", "0-0"],
+            "*1\r\n*2\r\n$2\r\nst\r\n*1\r\n*2\r\n$3\r\n1-1\r\n*2\r\n$1\r\nf\r\n$1\r\nv\r\n",
+            "%1\r\n$2\r\nst\r\n*1\r\n*2\r\n$3\r\n1-1\r\n*2\r\n$1\r\nf\r\n$1\r\nv\r\n",
+        )
+        .await;
+        // Nothing to read: the null array / RESP3 null.
+        assert_wire(&mut s, &["xread", "streams", "st", "$"], "*-1\r\n", "_\r\n").await;
+
+        let info = dispatch_raw(&mut s, &["xinfo", "stream", "st"])
+            .await
+            .remove(0);
+        let RespValue::Map(pairs) = &info else {
+            panic!("XINFO STREAM must be a map, got {info:?}");
+        };
+        assert_eq!(
+            pairs[0].0,
+            RespValue::BulkString(Some(Bytes::from_static(b"length")))
+        );
+        assert_eq!(pairs[0].1, RespValue::Integer(1));
+        // Flat alternating array on RESP2, as before.
+        let flat = crate::testutil::wire(crate::resp::Protocol::Resp2, info);
+        assert!(
+            flat.starts_with("*20\r\n$6\r\nlength\r\n:1\r\n"),
+            "{flat:?}"
+        );
+    }
+
     /// RESET wipes the session clean: protocol, DB, name, MULTI and WATCH.
     #[tokio::test]
     async fn reset_wipes_session_state() {
