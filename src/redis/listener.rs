@@ -47,7 +47,7 @@ use crate::pubsub::{
     message_resp, pmessage_resp, psubscribe_resp, punsubscribe_resp, ssubscribe_resp,
     subscribe_resp, sunsubscribe_resp, unsubscribe_resp, ConnectionSubs, PubSubRegistry,
 };
-use crate::resp::{RespDecoder, RespError, RespValue};
+use crate::resp::{Protocol, RespDecoder, RespError, RespValue};
 
 // ---------------------------------------------------------------------------
 // Listener
@@ -423,13 +423,13 @@ async fn handle_connection<S: ClientStream>(
                                     b"unsubscribe".as_ref()
                                 };
                                 framed
-                                    .send(RespValue::Array(Some(vec![
+                                    .send(RespValue::Push(vec![
                                         RespValue::BulkString(Some(Bytes::copy_from_slice(
                                             kind_byte,
                                         ))),
                                         RespValue::BulkString(None),
                                         RespValue::Integer(0),
-                                    ])))
+                                    ]))
                                     .await?;
                             }
                             _ => {
@@ -519,19 +519,24 @@ async fn handle_subscribe_mode_command<S: ClientStream>(
             handle_punsubscribe(framed, subs, &args[1..]).await?;
         }
         b"ping" => {
-            // PING in subscribe mode replies with a push-style array, not the
-            // plain +PONG, when no message is given; with a message it echoes
-            // the message. This matches real Redis RESP2 subscribe-mode PING.
+            // RESP2: PING in subscribe mode replies with a push-style array,
+            // not the plain +PONG, whether or not a message is given. This
+            // matches real Redis RESP2 subscribe-mode PING.
             let payload = args
                 .get(1)
                 .cloned()
                 .unwrap_or_else(|| Bytes::from_static(b""));
-            framed
-                .send(RespValue::Array(Some(vec![
+            let reply = match session.protocol() {
+                Protocol::Resp2 => RespValue::Array(Some(vec![
                     RespValue::BulkString(Some(Bytes::from_static(b"pong"))),
                     RespValue::BulkString(Some(payload)),
-                ])))
-                .await?;
+                ])),
+                // RESP3 clients get the ordinary PING reply: pushes are
+                // reserved for out-of-band messages.
+                Protocol::Resp3 if args.len() > 1 => RespValue::BulkString(Some(payload)),
+                Protocol::Resp3 => RespValue::SimpleString(Bytes::from_static(b"PONG")),
+            };
+            framed.send(reply).await?;
         }
         b"quit" => {
             framed
@@ -629,7 +634,7 @@ async fn handle_unsubscribe<S: ClientStream>(
             };
             // Match real Redis: BulkString(None) for the channel field.
             framed
-                .send(RespValue::Array(Some(vec![
+                .send(RespValue::Push(vec![
                     RespValue::BulkString(Some(if use_sunsubscribe_frame {
                         Bytes::from_static(b"sunsubscribe")
                     } else {
@@ -637,7 +642,7 @@ async fn handle_unsubscribe<S: ClientStream>(
                     })),
                     RespValue::BulkString(None),
                     RespValue::Integer(0),
-                ])))
+                ]))
                 .await?;
             let _ = frame; // silence unused warning
         } else {
@@ -681,11 +686,11 @@ async fn handle_punsubscribe<S: ClientStream>(
         let all: Vec<Bytes> = subs.pattern_streams.keys().cloned().collect();
         if all.is_empty() {
             framed
-                .send(RespValue::Array(Some(vec![
+                .send(RespValue::Push(vec![
                     RespValue::BulkString(Some(Bytes::from_static(b"punsubscribe"))),
                     RespValue::BulkString(None),
                     RespValue::Integer(0),
-                ])))
+                ]))
                 .await?;
         } else {
             for pat in &all {
@@ -1745,6 +1750,149 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(next_reply(&mut publisher).await, RespValue::Integer(0));
+    }
+
+    async fn resp3_pair() -> (
+        Framed<tokio::net::TcpStream, RespDecoder>,
+        Framed<tokio::net::TcpStream, RespDecoder>,
+    ) {
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+        tokio::spawn(RedisListener::new(addr, test_store()).serve());
+        let mut sub = Framed::new(connect_retry(addr).await, RespDecoder::new());
+        sub.send(array_cmd(&[b"HELLO", b"3"])).await.unwrap();
+        next_reply(&mut sub).await;
+        let publisher = Framed::new(connect_retry(addr).await, RespDecoder::new());
+        (sub, publisher)
+    }
+
+    fn bulk(s: &'static [u8]) -> RespValue {
+        RespValue::BulkString(Some(Bytes::from_static(s)))
+    }
+
+    #[tokio::test]
+    async fn resp3_pubsub_frames_are_pushes() {
+        let (mut sub, mut publisher) = resp3_pair().await;
+        sub.send(array_cmd(&[b"SUBSCRIBE", b"ch"])).await.unwrap();
+        assert_eq!(
+            next_reply(&mut sub).await,
+            RespValue::Push(vec![bulk(b"subscribe"), bulk(b"ch"), RespValue::Integer(1)])
+        );
+        sub.send(array_cmd(&[b"PSUBSCRIBE", b"p*"])).await.unwrap();
+        assert_eq!(
+            next_reply(&mut sub).await,
+            RespValue::Push(vec![
+                bulk(b"psubscribe"),
+                bulk(b"p*"),
+                RespValue::Integer(2)
+            ])
+        );
+
+        publisher
+            .send(array_cmd(&[b"PUBLISH", b"ch", b"hi"]))
+            .await
+            .unwrap();
+        next_reply(&mut publisher).await;
+        assert_eq!(
+            next_reply(&mut sub).await,
+            RespValue::Push(vec![bulk(b"message"), bulk(b"ch"), bulk(b"hi")])
+        );
+        publisher
+            .send(array_cmd(&[b"PUBLISH", b"px", b"yo"]))
+            .await
+            .unwrap();
+        next_reply(&mut publisher).await;
+        assert_eq!(
+            next_reply(&mut sub).await,
+            RespValue::Push(vec![
+                bulk(b"pmessage"),
+                bulk(b"p*"),
+                bulk(b"px"),
+                bulk(b"yo")
+            ])
+        );
+
+        sub.send(array_cmd(&[b"UNSUBSCRIBE", b"ch"])).await.unwrap();
+        assert_eq!(
+            next_reply(&mut sub).await,
+            RespValue::Push(vec![
+                bulk(b"unsubscribe"),
+                bulk(b"ch"),
+                RespValue::Integer(1)
+            ])
+        );
+        sub.send(array_cmd(&[b"PUNSUBSCRIBE"])).await.unwrap();
+        assert_eq!(
+            next_reply(&mut sub).await,
+            RespValue::Push(vec![
+                bulk(b"punsubscribe"),
+                bulk(b"p*"),
+                RespValue::Integer(0)
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn resp3_unsubscribe_with_nothing_subscribed_is_a_null_push() {
+        let (mut sub, _publisher) = resp3_pair().await;
+        sub.send(array_cmd(&[b"UNSUBSCRIBE"])).await.unwrap();
+        assert_eq!(
+            next_reply(&mut sub).await,
+            RespValue::Push(vec![
+                bulk(b"unsubscribe"),
+                RespValue::Null,
+                RespValue::Integer(0)
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribed_ping_differs_by_protocol() {
+        let (mut sub, _publisher) = resp3_pair().await;
+        sub.send(array_cmd(&[b"SUBSCRIBE", b"ch"])).await.unwrap();
+        next_reply(&mut sub).await;
+        sub.send(array_cmd(&[b"PING"])).await.unwrap();
+        assert_eq!(
+            next_reply(&mut sub).await,
+            RespValue::SimpleString(Bytes::from_static(b"PONG"))
+        );
+        sub.send(array_cmd(&[b"PING", b"x"])).await.unwrap();
+        assert_eq!(next_reply(&mut sub).await, bulk(b"x"));
+
+        // RESP2 is unchanged.
+        let c = raw_client().await;
+        let mut sub2 = Framed::new(c, RespDecoder::new());
+        sub2.send(array_cmd(&[b"SUBSCRIBE", b"ch"])).await.unwrap();
+        next_reply(&mut sub2).await;
+        sub2.send(array_cmd(&[b"PING"])).await.unwrap();
+        assert_eq!(
+            next_reply(&mut sub2).await,
+            RespValue::Array(Some(vec![bulk(b"pong"), bulk(b"")]))
+        );
+    }
+
+    #[tokio::test]
+    async fn pubsub_numsub_is_a_map_in_resp3_and_flat_in_resp2() {
+        let (mut c3, _p) = resp3_pair().await;
+        c3.send(array_cmd(&[b"PUBSUB", b"NUMSUB", b"a", b"b"]))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_reply(&mut c3).await,
+            RespValue::Map(vec![
+                (bulk(b"a"), RespValue::Integer(0)),
+                (bulk(b"b"), RespValue::Integer(0)),
+            ])
+        );
+        let mut c2 = Framed::new(raw_client().await, RespDecoder::new());
+        c2.send(array_cmd(&[b"PUBSUB", b"NUMSUB", b"a"]))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_reply(&mut c2).await,
+            RespValue::Array(Some(vec![bulk(b"a"), RespValue::Integer(0)]))
+        );
     }
 
     fn array_cmd(parts: &[&[u8]]) -> RespValue {

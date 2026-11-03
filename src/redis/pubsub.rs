@@ -403,75 +403,75 @@ pub fn subscribe_reply(channel: &[u8], count: usize) -> Vec<u8> {
 
 /// `["subscribe", channel, count]`
 pub fn subscribe_resp(channel: Bytes, count: usize) -> crate::resp::RespValue {
-    crate::resp::RespValue::Array(Some(vec![
+    crate::resp::RespValue::Push(vec![
         crate::resp::RespValue::BulkString(Some(Bytes::from_static(b"subscribe"))),
         crate::resp::RespValue::BulkString(Some(channel)),
         crate::resp::RespValue::Integer(count as i64),
-    ]))
+    ])
 }
 
 /// `["unsubscribe", channel, count]`
 pub fn unsubscribe_resp(channel: Bytes, count: usize) -> crate::resp::RespValue {
-    crate::resp::RespValue::Array(Some(vec![
+    crate::resp::RespValue::Push(vec![
         crate::resp::RespValue::BulkString(Some(Bytes::from_static(b"unsubscribe"))),
         crate::resp::RespValue::BulkString(Some(channel)),
         crate::resp::RespValue::Integer(count as i64),
-    ]))
+    ])
 }
 
 /// `["psubscribe", pattern, count]`
 pub fn psubscribe_resp(pattern: Bytes, count: usize) -> crate::resp::RespValue {
-    crate::resp::RespValue::Array(Some(vec![
+    crate::resp::RespValue::Push(vec![
         crate::resp::RespValue::BulkString(Some(Bytes::from_static(b"psubscribe"))),
         crate::resp::RespValue::BulkString(Some(pattern)),
         crate::resp::RespValue::Integer(count as i64),
-    ]))
+    ])
 }
 
 /// `["punsubscribe", pattern, count]`
 pub fn punsubscribe_resp(pattern: Bytes, count: usize) -> crate::resp::RespValue {
-    crate::resp::RespValue::Array(Some(vec![
+    crate::resp::RespValue::Push(vec![
         crate::resp::RespValue::BulkString(Some(Bytes::from_static(b"punsubscribe"))),
         crate::resp::RespValue::BulkString(Some(pattern)),
         crate::resp::RespValue::Integer(count as i64),
-    ]))
+    ])
 }
 
 /// `["ssubscribe", channel, count]`
 pub fn ssubscribe_resp(channel: Bytes, count: usize) -> crate::resp::RespValue {
-    crate::resp::RespValue::Array(Some(vec![
+    crate::resp::RespValue::Push(vec![
         crate::resp::RespValue::BulkString(Some(Bytes::from_static(b"ssubscribe"))),
         crate::resp::RespValue::BulkString(Some(channel)),
         crate::resp::RespValue::Integer(count as i64),
-    ]))
+    ])
 }
 
 /// `["sunsubscribe", channel, count]`
 pub fn sunsubscribe_resp(channel: Bytes, count: usize) -> crate::resp::RespValue {
-    crate::resp::RespValue::Array(Some(vec![
+    crate::resp::RespValue::Push(vec![
         crate::resp::RespValue::BulkString(Some(Bytes::from_static(b"sunsubscribe"))),
         crate::resp::RespValue::BulkString(Some(channel)),
         crate::resp::RespValue::Integer(count as i64),
-    ]))
+    ])
 }
 
 /// `["message", channel, payload]` — exact-channel push.
 pub fn message_resp(channel: Bytes, payload: Bytes) -> crate::resp::RespValue {
-    crate::resp::RespValue::Array(Some(vec![
+    crate::resp::RespValue::Push(vec![
         crate::resp::RespValue::BulkString(Some(Bytes::from_static(b"message"))),
         crate::resp::RespValue::BulkString(Some(channel)),
         crate::resp::RespValue::BulkString(Some(payload)),
-    ]))
+    ])
 }
 
 /// `["pmessage", pattern, channel, payload]` — pattern-match push.
 pub fn pmessage_resp(pattern: Bytes, channel: Bytes, payload: Bytes) -> crate::resp::RespValue {
-    crate::resp::RespValue::Array(Some(vec![
+    crate::resp::RespValue::Push(vec![
         crate::resp::RespValue::BulkString(Some(Bytes::from_static(b"pmessage"))),
         crate::resp::RespValue::BulkString(Some(pattern)),
         crate::resp::RespValue::BulkString(Some(channel)),
         crate::resp::RespValue::BulkString(Some(payload)),
-    ]))
+    ])
 }
 
 // ---------------------------------------------------------------------------
@@ -484,12 +484,12 @@ struct NumSubOp {
 impl WireOp for NumSubOp {
     fn reply(&self, _result: Result<DbResult, DbError>) -> RespValue {
         let counts = self.registry.numsub_value(self.channels.as_slice());
-        let mut flat = Vec::with_capacity(counts.len() * 2);
-        for (ch, count) in counts {
-            flat.push(RespValue::BulkString(Some(ch)));
-            flat.push(RespValue::Integer(count));
-        }
-        RespValue::Array(Some(flat))
+        RespValue::Map(
+            counts
+                .into_iter()
+                .map(|(ch, count)| (RespValue::BulkString(Some(ch)), RespValue::Integer(count)))
+                .collect(),
+        )
     }
 }
 
