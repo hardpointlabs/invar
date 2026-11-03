@@ -399,33 +399,19 @@ fn info_string() -> String {
     b
 }
 
-/// Whether `HELLO 3` is honoured. While the RESP3 command audit (RFC 0002,
-/// step 3) is incomplete this stays `false` outside unit tests, so clients get
-/// `NOPROTO` and fall back to RESP2 (which is what lets ioredis, and therefore
-/// BullMQ, work). The session and listener plumbing is exercised in tests,
-/// where it is on. Flipping this is the last step of the rollout.
-const RESP3_ENABLED: bool = cfg!(test);
-
-/// Negotiates the RESP protocol version: `HELLO 2` selects RESP2 and, once
-/// [`RESP3_ENABLED`], `HELLO 3` selects RESP3. Any other version is refused
-/// with a NOPROTO error, which lets RESP2-only clients such as ioredis fall
-/// back cleanly. A bare `HELLO` replies in the current protocol without
-/// changing it. The new protocol takes effect for the reply to this very
-/// command: the listener syncs it onto the codec before sending.
+/// Negotiates the RESP protocol version: `HELLO 2` selects RESP2 and `HELLO 3`
+/// selects RESP3. Any other version is refused with a NOPROTO error. A bare
+/// `HELLO` replies in the current protocol without changing it. The new
+/// protocol takes effect for the reply to this very command: the listener
+/// syncs it onto the codec before sending.
 pub fn hello(session: &mut Session, args: &[Bytes]) -> QueuedOp {
-    hello_with(session, args, RESP3_ENABLED)
-}
-
-/// `HELLO` with the RESP3 gate passed explicitly, so tests can exercise both
-/// sides of it.
-fn hello_with(session: &mut Session, args: &[Bytes], resp3_enabled: bool) -> QueuedOp {
     // `HELLO` changes session state, so it is refused inside `MULTI` (in
     // either protocol) before it can touch anything. The transaction guard in
     // `enqueue_command` turns `allowed_in_tx: false` into the error reply and
     // dirties the transaction.
     let allowed_in_tx = !session.in_multi();
     let reply = if allowed_in_tx {
-        hello_reply(session, args, resp3_enabled)
+        hello_reply(session, args)
     } else {
         RespValue::Null
     };
@@ -439,7 +425,7 @@ fn hello_with(session: &mut Session, args: &[Bytes], resp3_enabled: bool) -> Que
     }
 }
 
-fn hello_reply(session: &mut Session, args: &[Bytes], resp3_enabled: bool) -> RespValue {
+fn hello_reply(session: &mut Session, args: &[Bytes]) -> RespValue {
     // A bare `HELLO` reports the current protocol without changing it.
     let mut proto: i64 = match session.protocol() {
         Protocol::Resp2 => 2,
@@ -476,7 +462,7 @@ fn hello_reply(session: &mut Session, args: &[Bytes], resp3_enabled: bool) -> Re
     }
     let protocol = match proto {
         2 => Protocol::Resp2,
-        3 if resp3_enabled => Protocol::Resp3,
+        3 => Protocol::Resp3,
         _ => {
             return RespValue::Error(Bytes::from_static(b"NOPROTO unsupported protocol version"));
         }
@@ -753,13 +739,12 @@ mod tests {
     }
 
     #[test]
-    fn hello_rejects_resp3_while_gated() {
+    fn refused_hello_applies_nothing() {
         let mut session = test_session();
         session.set_client_name("keep".into());
-        let reply = exec(hello_with(
+        let reply = exec(hello(
             &mut session,
-            &cmd(&[b"HELLO", b"3", b"SETNAME", b"new"]),
-            false,
+            &cmd(&[b"HELLO", b"4", b"SETNAME", b"new"]),
         ));
         assert_eq!(
             reply,
@@ -810,7 +795,7 @@ mod tests {
     }
 
     #[test]
-    fn hello_unknown_version_is_noproto_even_when_enabled() {
+    fn hello_unknown_version_is_noproto() {
         let mut session = test_session();
         for v in [&b"4"[..], b"1", b"0"] {
             let reply = exec(hello(&mut session, &cmd(&[b"HELLO", v])));
