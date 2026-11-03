@@ -2990,7 +2990,93 @@ mod tests {
             .iter()
             .map(|arg| Bytes::copy_from_slice(arg.as_bytes()))
             .collect();
+        enqueue_command(session, &args)
+            .await
+            .into_iter()
+            .map(crate::testutil::resp2)
+            .collect()
+    }
+
+    /// Like [`dispatch`], but leaves the RESP3 types in the replies.
+    async fn dispatch_raw(session: &mut Session, args: &[&str]) -> Vec<RespValue> {
+        let args: Vec<Bytes> = args
+            .iter()
+            .map(|arg| Bytes::copy_from_slice(arg.as_bytes()))
+            .collect();
         enqueue_command(session, &args).await
+    }
+
+    /// Asserts the exact bytes a command's reply takes on each protocol.
+    async fn assert_wire(session: &mut Session, args: &[&str], resp2: &str, resp3: &str) {
+        use crate::resp::Protocol::{Resp2, Resp3};
+        let reply = dispatch_raw(session, args).await.remove(0);
+        assert_eq!(
+            crate::testutil::wire(Resp2, reply.clone()),
+            resp2,
+            "{args:?} on RESP2"
+        );
+        assert_eq!(
+            crate::testutil::wire(Resp3, reply),
+            resp3,
+            "{args:?} on RESP3"
+        );
+    }
+
+    #[tokio::test]
+    async fn hash_and_set_reply_shapes_per_protocol() {
+        let mut s = test_session();
+        dispatch(&mut s, &["hset", "h", "f", "v"]).await;
+        assert_wire(
+            &mut s,
+            &["hgetall", "h"],
+            "*2\r\n$1\r\nf\r\n$1\r\nv\r\n",
+            "%1\r\n$1\r\nf\r\n$1\r\nv\r\n",
+        )
+        .await;
+        assert_wire(&mut s, &["hgetall", "nope"], "*0\r\n", "%0\r\n").await;
+        assert_wire(
+            &mut s,
+            &["hrandfield", "h", "2", "withvalues"],
+            "*2\r\n$1\r\nf\r\n$1\r\nv\r\n",
+            "*1\r\n*2\r\n$1\r\nf\r\n$1\r\nv\r\n",
+        )
+        .await;
+        // Without WITHVALUES it stays a plain array on both.
+        assert_wire(
+            &mut s,
+            &["hrandfield", "h", "2"],
+            "*1\r\n$1\r\nf\r\n",
+            "*1\r\n$1\r\nf\r\n",
+        )
+        .await;
+        assert_wire(&mut s, &["hrandfield", "nope"], "$-1\r\n", "_\r\n").await;
+
+        dispatch(&mut s, &["sadd", "s1", "a", "b"]).await;
+        dispatch(&mut s, &["sadd", "s2", "b"]).await;
+        assert_wire(
+            &mut s,
+            &["smembers", "s2"],
+            "*1\r\n$1\r\nb\r\n",
+            "~1\r\n$1\r\nb\r\n",
+        )
+        .await;
+        assert_wire(
+            &mut s,
+            &["sdiff", "s1", "s2"],
+            "*1\r\n$1\r\na\r\n",
+            "~1\r\n$1\r\na\r\n",
+        )
+        .await;
+        assert_wire(
+            &mut s,
+            &["sinter", "s1", "s2"],
+            "*1\r\n$1\r\nb\r\n",
+            "~1\r\n$1\r\nb\r\n",
+        )
+        .await;
+        assert_wire(&mut s, &["smembers", "nope"], "*0\r\n", "~0\r\n").await;
+        let u = dispatch_raw(&mut s, &["sunion", "s1", "s2"]).await;
+        assert!(matches!(&u[0], RespValue::Set(items) if items.len() == 2));
     }
 
     /// RESET wipes the session clean: protocol, DB, name, MULTI and WATCH.

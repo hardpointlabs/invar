@@ -307,15 +307,15 @@ pub fn hvals(session: &Session, key: &[u8]) -> QueuedOp {
     }
 }
 
-/// `HGETALL key` — returns all field-value pairs as a flat array, empty if
-/// the key is missing.
+/// `HGETALL key` — returns all field-value pairs (a map on RESP3, a flat
+/// array on RESP2), empty if the key is missing.
 pub fn hgetall(session: &Session, key: &[u8]) -> QueuedOp {
     QueuedOp {
         db_op: Box::new(HGetAllOp {
             public_key: session.public_key(key),
             node_prefix: session.private_key(key),
         }),
-        wire_op: Box::new(BulkArrayWire),
+        wire_op: Box::new(HGetAllWire),
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
@@ -385,7 +385,7 @@ pub fn hrandfield(session: &Session, key: &[u8], count: i64, with_values: bool) 
             count,
             with_values,
         }),
-        wire_op: Box::new(HRandFieldWire { count }),
+        wire_op: Box::new(HRandFieldWire { count, with_values }),
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
@@ -1155,6 +1155,34 @@ impl WireOp for NullableArrayWire {
     }
 }
 
+/// Replies `HGETALL`: the flat `[field, value, ...]` list as a map (flat
+/// array on RESP2, via the encoder's downgrade).
+struct HGetAllWire;
+
+impl WireOp for HGetAllWire {
+    fn reply(&self, result: Result<DbResult, DbError>) -> RespValue {
+        match result {
+            Ok(res) => match res.downcast::<Vec<Vec<u8>>>() {
+                Ok(boxed) => RespValue::Map(bulk_pairs(&boxed)),
+                Err(_) => internal_error(),
+            },
+            Err(e) => err_resp(&e),
+        }
+    }
+}
+
+/// Pairs up a flat `[a, b, a, b, ...]` list of bulk strings.
+fn bulk_pairs(flat: &[Vec<u8>]) -> Vec<(RespValue, RespValue)> {
+    flat.chunks_exact(2)
+        .map(|kv| {
+            (
+                RespValue::BulkString(Some(Bytes::copy_from_slice(&kv[0]))),
+                RespValue::BulkString(Some(Bytes::copy_from_slice(&kv[1]))),
+            )
+        })
+        .collect()
+}
+
 /// Replies an array of non-null bulk strings.
 struct BulkArrayWire;
 
@@ -1191,6 +1219,7 @@ impl WireOp for OkWire {
 /// of bulk strings otherwise.
 struct HRandFieldWire {
     count: i64,
+    with_values: bool,
 }
 
 impl WireOp for HRandFieldWire {
@@ -1203,6 +1232,9 @@ impl WireOp for HRandFieldWire {
                         if self.count == 1 && !items.is_empty() {
                             // When count is 1 with no WITHVALUES, return a single bulk string.
                             RespValue::BulkString(Some(Bytes::copy_from_slice(&items[0])))
+                        } else if self.with_values {
+                            // Pairs on RESP3, the flat list on RESP2.
+                            RespValue::Pairs(bulk_pairs(&items))
                         } else {
                             RespValue::Array(Some(
                                 items
@@ -1285,7 +1317,10 @@ mod tests {
     }
 
     fn expect_bulk_array(reply: &RespValue) -> Vec<Vec<u8>> {
-        match reply {
+        // Assert the RESP2 shape: the RESP3 types downgrade to it.
+        let mut reply = reply.clone();
+        crate::resp::downgrade_to_resp2(&mut reply);
+        match &reply {
             RespValue::Array(Some(items)) => items
                 .iter()
                 .map(|r| match r {

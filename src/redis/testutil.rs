@@ -15,6 +15,22 @@ pub(crate) fn test_store() -> Arc<dyn RedisStore> {
     Arc::new(FjallDb::temporary(&path).expect("fjall"))
 }
 
+/// Renders a reply the way a RESP2 connection would see it.
+pub(crate) fn resp2(mut reply: crate::resp::RespValue) -> crate::resp::RespValue {
+    crate::resp::downgrade_to_resp2(&mut reply);
+    reply
+}
+
+/// The bytes a connection speaking `protocol` would receive for `reply`.
+pub(crate) fn wire(protocol: crate::resp::Protocol, reply: crate::resp::RespValue) -> String {
+    use tokio_util::codec::Encoder;
+    let mut codec = crate::resp::RespDecoder::new();
+    codec.set_protocol(protocol);
+    let mut dst = bytes::BytesMut::new();
+    codec.encode(reply, &mut dst).expect("encode");
+    String::from_utf8_lossy(&dst).into_owned()
+}
+
 /// Builds a session over a fresh test store.
 pub(crate) fn test_session() -> Session {
     Session::new(test_store(), Arc::new(WatchRegistry::new()))

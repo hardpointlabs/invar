@@ -309,7 +309,7 @@ pub fn smembers(session: &Session, key: &[u8]) -> QueuedOp {
             public_key: session.public_key(key),
             node_prefix: session.private_key(key),
         }),
-        wire_op: Box::new(BulkArrayWire),
+        wire_op: Box::new(SetWire),
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
@@ -393,7 +393,7 @@ pub fn smove(session: &Session, src: &[u8], dst: &[u8], member: &[u8]) -> Queued
 pub fn sdiff(session: &Session, keys: &[Bytes]) -> QueuedOp {
     QueuedOp {
         db_op: Box::new(BinarySetOp::new(session, keys, BinarySetOpKind::Diff)),
-        wire_op: Box::new(BulkArrayWire),
+        wire_op: Box::new(SetWire),
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
@@ -405,7 +405,7 @@ pub fn sdiff(session: &Session, keys: &[Bytes]) -> QueuedOp {
 pub fn sinter(session: &Session, keys: &[Bytes]) -> QueuedOp {
     QueuedOp {
         db_op: Box::new(BinarySetOp::new(session, keys, BinarySetOpKind::Inter)),
-        wire_op: Box::new(BulkArrayWire),
+        wire_op: Box::new(SetWire),
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
@@ -417,7 +417,7 @@ pub fn sinter(session: &Session, keys: &[Bytes]) -> QueuedOp {
 pub fn sunion(session: &Session, keys: &[Bytes]) -> QueuedOp {
     QueuedOp {
         db_op: Box::new(BinarySetOp::new(session, keys, BinarySetOpKind::Union)),
-        wire_op: Box::new(BulkArrayWire),
+        wire_op: Box::new(SetWire),
         is_mutating: false,
         allowed_in_tx: true,
         abort_in_tx: false,
@@ -1037,19 +1037,20 @@ impl WireOp for NullableBulkWire {
     }
 }
 
-/// Replies an array of bulk strings.
-struct BulkArrayWire;
+/// Replies a set of bulk strings (an array on RESP2, via the encoder's
+/// downgrade).
+struct SetWire;
 
-impl WireOp for BulkArrayWire {
+impl WireOp for SetWire {
     fn reply(&self, result: Result<DbResult, DbError>) -> RespValue {
         match result {
             Ok(res) => match res.downcast::<Vec<Vec<u8>>>() {
-                Ok(boxed) => RespValue::Array(Some(
+                Ok(boxed) => RespValue::Set(
                     boxed
                         .iter()
                         .map(|v| RespValue::BulkString(Some(Bytes::copy_from_slice(v))))
                         .collect(),
-                )),
+                ),
                 Err(_) => internal_error(),
             },
             Err(e) => err_resp(&e),
@@ -1272,7 +1273,10 @@ mod tests {
     }
 
     fn expect_bulk_array(replies: &[RespValue]) -> Vec<Bytes> {
-        match &replies[0] {
+        // Assert the RESP2 shape: the RESP3 types downgrade to it.
+        let mut reply = replies[0].clone();
+        crate::resp::downgrade_to_resp2(&mut reply);
+        match &reply {
             RespValue::Array(Some(items)) => items
                 .iter()
                 .map(|r| match r {
@@ -1313,6 +1317,10 @@ mod tests {
             RespValue::Array(Some(mut items)) => {
                 items.sort_by_key(|i| format!("{i:?}"));
                 RespValue::Array(Some(items))
+            }
+            RespValue::Set(mut items) => {
+                items.sort_by_key(|i| format!("{i:?}"));
+                RespValue::Set(items)
             }
             other => other,
         }
@@ -1419,8 +1427,8 @@ mod tests {
 
         // Emptying a namespaced set removes the sentinel and every member.
         let rest = both(&legacy, &ns, |s| smembers(s, b"a")).await;
-        let RespValue::Array(Some(rest)) = rest else {
-            panic!("SMEMBERS must reply an array")
+        let RespValue::Set(rest) = rest else {
+            panic!("SMEMBERS must reply a set")
         };
         let rest: Vec<Bytes> = rest
             .into_iter()
@@ -1471,7 +1479,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(60)).await;
         crate::testutil::exec(&s, sadd(&s, b"s", &bs(&["new"]))).await;
         assert_eq!(
-            crate::testutil::exec(&s, smembers(&s, b"s")).await,
+            crate::testutil::resp2(crate::testutil::exec(&s, smembers(&s, b"s")).await),
             RespValue::Array(Some(vec![RespValue::BulkString(Some(Bytes::from_static(
                 b"new"
             )))]))

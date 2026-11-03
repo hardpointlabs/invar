@@ -1226,7 +1226,10 @@ mod tests {
     }
 
     fn expect_bulk_array(reply: &RespValue) -> Vec<Option<Bytes>> {
-        match reply {
+        // Assert the RESP2 shape: the RESP3 types downgrade to it.
+        let mut reply = reply.clone();
+        crate::resp::downgrade_to_resp2(&mut reply);
+        match &reply {
             RespValue::Array(Some(items)) => items
                 .iter()
                 .map(|r| match r {
@@ -1572,9 +1575,9 @@ mod tests {
     /// What `read_op` returns, with unordered replies sorted.
     async fn read_back(session: &Session, ty: &str, key: &[u8]) -> RespValue {
         match exec(session, read_op(session, ty, key)).await {
-            RespValue::Array(Some(mut items)) if ty == "set" => {
+            RespValue::Set(mut items) if ty == "set" => {
                 items.sort_by_key(|i| format!("{i:?}"));
-                RespValue::Array(Some(items))
+                RespValue::Set(items)
             }
             other => other,
         }
@@ -1705,7 +1708,7 @@ mod tests {
 
             exec(&s, crate::hash::hset(&s, b"old", &[bs("g"), bs("w")])).await;
 
-            let fresh = exec(&s, crate::hash::hgetall(&s, b"old")).await;
+            let fresh = crate::testutil::resp2(exec(&s, crate::hash::hgetall(&s, b"old")).await);
             assert_eq!(
                 fresh,
                 RespValue::Array(Some(vec![
@@ -1714,7 +1717,7 @@ mod tests {
                 ])),
                 "legacy={legacy}"
             );
-            let renamed = exec(&s, crate::hash::hgetall(&s, b"new")).await;
+            let renamed = crate::testutil::resp2(exec(&s, crate::hash::hgetall(&s, b"new")).await);
             assert_eq!(
                 renamed,
                 RespValue::Array(Some(vec![
@@ -1750,7 +1753,7 @@ mod tests {
 
         exec(&s, rename(&s, b"src", b"dst")).await;
 
-        let got = exec(&s, crate::hash::hgetall(&s, b"dst")).await;
+        let got = crate::testutil::resp2(exec(&s, crate::hash::hgetall(&s, b"dst")).await);
         assert_eq!(
             got,
             RespValue::Array(Some(vec![
