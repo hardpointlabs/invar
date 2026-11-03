@@ -2172,4 +2172,36 @@ mod tests {
         assert_eq!(expect_bulk(&items[0]).as_deref(), Some(b"a".as_slice()));
         assert_eq!(expect_bulk(&items[1]).as_deref(), Some(b"b".as_slice()));
     }
+
+    // Scripts see RESP2 conversions of replies that are RESP3 types on the
+    // wire (RFC 0002, section 5): maps as flat tables, doubles as strings,
+    // sets as arrays.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn redis_call_sees_resp2_shapes_of_resp3_replies() {
+        let op = eval_op(
+            "redis.call('HSET', 'h', 'f', 'v'); \
+             redis.call('SADD', 's', 'm'); \
+             redis.call('ZADD', 'z', '1.5', 'a'); \
+             return {redis.call('HGETALL', 'h'), redis.call('SMEMBERS', 's'), \
+                     redis.call('ZSCORE', 'z', 'a'), redis.call('ZRANGE', 'z', 0, -1, 'WITHSCORES'), \
+                     redis.call('ZSCORE', 'z', 'nope')}",
+            &[],
+            &[],
+        );
+        let reply = exec(op).await;
+        let items = expect_array(&reply);
+        let bulks = |v: &RespValue| -> Vec<Vec<u8>> {
+            expect_array(v)
+                .iter()
+                .map(|b| expect_bulk(b).expect("bulk").to_vec())
+                .collect()
+        };
+        assert_eq!(bulks(&items[0]), vec![b"f".to_vec(), b"v".to_vec()]);
+        assert_eq!(bulks(&items[1]), vec![b"m".to_vec()]);
+        assert_eq!(expect_bulk(&items[2]).as_deref(), Some(b"1.5".as_slice()));
+        assert_eq!(bulks(&items[3]), vec![b"a".to_vec(), b"1.5".to_vec()]);
+        // A missing member is a null bulk, `false` in Lua; a table with a
+        // trailing `false` element still returns it as a null.
+        assert_eq!(items.get(4), Some(&RespValue::BulkString(None)));
+    }
 }
