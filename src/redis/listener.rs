@@ -540,14 +540,13 @@ async fn handle_subscribe_mode_command<S: ClientStream>(
             return Ok(true);
         }
         b"reset" => {
-            // TODO: full RESET implementation (out of scope for this pass).
-            // For now, unsubscribe everything, reset the session and reply
-            // +RESET.
+            // Drop every subscription (leaving subscribe mode) and reset the
+            // session, as RESET does outside subscribe mode. The connection
+            // stays open.
             subs.unsubscribe_all_channels();
             subs.unsubscribe_all_patterns();
             session.reset();
             sync_protocol(framed, session);
-            session.request_close();
             framed
                 .send(RespValue::SimpleString(Bytes::from_static(b"RESET")))
                 .await?;
@@ -1708,6 +1707,44 @@ mod tests {
         }
         assert!(matches!(errors[0], RespValue::Error(_)));
         assert_eq!(errors[0], errors[1]);
+    }
+
+    /// `RESET` from subscribe mode must leave a usable, fully reset
+    /// connection: no subscriptions left and no pending close.
+    #[tokio::test]
+    async fn reset_in_subscribe_mode_keeps_connection_open() {
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+        tokio::spawn(RedisListener::new(addr, test_store()).serve());
+
+        let mut sub = Framed::new(connect_retry(addr).await, RespDecoder::new());
+        sub.send(array_cmd(&[b"SUBSCRIBE", b"ch"])).await.unwrap();
+        next_reply(&mut sub).await;
+        sub.send(array_cmd(&[b"RESET"])).await.unwrap();
+        assert_eq!(
+            next_reply(&mut sub).await,
+            RespValue::SimpleString(Bytes::from_static(b"RESET"))
+        );
+
+        // Several ordinary commands in a row: the connection must survive all
+        // of them, not just the first.
+        for _ in 0..3 {
+            sub.send(array_cmd(&[b"PING"])).await.unwrap();
+            assert_eq!(
+                next_reply(&mut sub).await,
+                RespValue::SimpleString(Bytes::from_static(b"PONG")),
+                "connection closed or misbehaving after RESET"
+            );
+        }
+
+        // The subscription really is gone.
+        let mut publisher = Framed::new(connect_retry(addr).await, RespDecoder::new());
+        publisher
+            .send(array_cmd(&[b"PUBLISH", b"ch", b"hi"]))
+            .await
+            .unwrap();
+        assert_eq!(next_reply(&mut publisher).await, RespValue::Integer(0));
     }
 
     fn array_cmd(parts: &[&[u8]]) -> RespValue {

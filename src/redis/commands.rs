@@ -2993,6 +2993,39 @@ mod tests {
         enqueue_command(session, &args).await
     }
 
+    /// RESET wipes the session clean: protocol, DB, name, MULTI and WATCH.
+    #[tokio::test]
+    async fn reset_wipes_session_state() {
+        let mut session = test_session();
+        session.set_protocol(crate::resp::Protocol::Resp3);
+        session.set_client_name("conn".into());
+        dispatch(&mut session, &["select", "3"]).await;
+        dispatch(&mut session, &["watch", "k"]).await;
+        dispatch(&mut session, &["multi"]).await;
+        dispatch(&mut session, &["set", "k", "v"]).await;
+
+        assert_eq!(
+            dispatch(&mut session, &["reset"]).await,
+            vec![RespValue::SimpleString(Bytes::from_static(b"RESET"))]
+        );
+        assert_eq!(session.protocol(), crate::resp::Protocol::Resp2);
+        assert_eq!(session.current_db(), 0);
+        assert_eq!(session.client_name(), "");
+        assert!(!session.in_multi());
+        assert!(!session.is_dirty());
+        // The queued SET was discarded along with the transaction.
+        assert_eq!(
+            dispatch(&mut session, &["exec"]).await,
+            vec![RespValue::Error(Bytes::from_static(
+                b"ERR EXEC without MULTI"
+            ))]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["get", "k"]).await,
+            vec![RespValue::BulkString(None)]
+        );
+    }
+
     /// WATCH must abort EXEC if the watched key was *written* after WATCH,
     /// even if it was later written back to its original value (ABA).
     /// Real Redis returns a nil multi-bulk here.
