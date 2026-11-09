@@ -36,6 +36,7 @@ use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
 use crate::common::session::Session;
 use crate::common::namespace::{self, base_type, resolve_prefix, resolve_prefix_for_write, ElementPrefix};
 use crate::common::ValueType;
+use crate::pattern::{GlobPattern, PatternMatcher};
 use crate::resp::RespValue;
 
 /// Metadata type byte stamped on every hash entry (sentinel and fields).
@@ -1048,19 +1049,14 @@ impl DbOp for HScanOp {
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(0);
 
-            let match_pattern = !pattern.is_empty();
+            let matcher = (!pattern.is_empty()).then(|| GlobPattern::keyspace(pattern));
             let mut it = tx.new_prefix_iterator(&fields_prefix(&node_prefix)).await?;
             let mut pairs: Vec<Vec<u8>> = Vec::new();
             while it.next().await {
                 if let Some(item) = it.item() {
                     let field = field_from_internal_key(item.key());
 
-                    if match_pattern
-                        && !glob_match(
-                            std::str::from_utf8(&pattern).unwrap_or(""),
-                            std::str::from_utf8(&field).unwrap_or(""),
-                        )
-                    {
+                    if matcher.as_ref().is_some_and(|m| !m.is_match(&field)) {
                         continue;
                     }
 
@@ -1097,34 +1093,6 @@ impl DbOp for HScanOp {
             });
             Ok(result)
         })
-    }
-}
-
-/// Simple glob pattern matcher (mirrors Go's `path.Match`). Supports `*`
-/// (any sequence of chars) and `?` (any single char). No character classes.
-fn glob_match(pattern: &str, s: &str) -> bool {
-    let pat: Vec<char> = pattern.chars().collect();
-    let s: Vec<char> = s.chars().collect();
-    glob_match_inner(&pat, &s)
-}
-
-fn glob_match_inner(pat: &[char], s: &[char]) -> bool {
-    match (pat.first(), s.first()) {
-        (None, None) => true,
-        (None, Some(_)) => false,
-        (Some('*'), _) => {
-            // '*' can match zero or more characters.
-            if glob_match_inner(&pat[1..], s) {
-                return true;
-            }
-            if s.is_empty() {
-                return false;
-            }
-            glob_match_inner(pat, &s[1..])
-        }
-        (Some('?'), Some(_)) => glob_match_inner(&pat[1..], &s[1..]),
-        (Some(p), Some(c)) if p == c => glob_match_inner(&pat[1..], &s[1..]),
-        _ => false,
     }
 }
 
@@ -1617,16 +1585,5 @@ mod tests {
         let session = test_session();
         let r = exec(&session, hrandfield(&session, b"missing", 1, false)).await;
         assert_eq!(expect_bulk(&r), None);
-    }
-
-    #[test]
-    fn glob_match_basics() {
-        assert!(glob_match("*", "anything"));
-        assert!(glob_match("h*llo", "hello"));
-        assert!(glob_match("h?llo", "hello"));
-        assert!(!glob_match("h?llo", "hllo"));
-        assert!(!glob_match("exact", "other"));
-        assert!(glob_match("", ""));
-        assert!(!glob_match("", "a"));
     }
 }

@@ -79,7 +79,7 @@ pub fn parse_json_string(bytes: &[u8]) -> Option<String> {
 /// positive exponents (the `e-09`→`e-9` cleanup is already how Rust prints).
 fn go_json_number(f: f64) -> String {
     let abs = f.abs();
-    if abs != 0.0 && (abs < 1e-6 || abs >= 1e21) {
+    if abs != 0.0 && !(1e-6..1e21).contains(&abs) {
         let s = format!("{f:e}");
         if let Some(dot_e) = s.find('e') {
             let (mant, exp) = s.split_at(dot_e);

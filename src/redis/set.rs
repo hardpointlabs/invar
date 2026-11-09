@@ -47,6 +47,7 @@ use smallvec::{smallvec, SmallVec};
 use crate::common::session::Session;
 use crate::common::namespace::{self, base_type, new_namespace, resolve_prefix, resolve_prefix_for_write, ElementPrefix};
 use crate::common::ValueType;
+use crate::pattern::{GlobPattern, PatternMatcher};
 use crate::resp::RespValue;
 
 /// Metadata type byte stamped on every set entry (sentinel and members),
@@ -1126,14 +1127,11 @@ impl DbOp for SScanOp {
             };
 
             // Filter by pattern if given.
-            let filtered: Vec<Vec<u8>> = if let Some(ref pat) = pattern {
-                let pat_str = std::str::from_utf8(pat).unwrap_or("");
+            let filtered: Vec<Vec<u8>> = if let Some(pat) = pattern {
+                let matcher = GlobPattern::keyspace(pat);
                 all_members
                     .into_iter()
-                    .filter(|m| {
-                        let m_str = std::str::from_utf8(m).unwrap_or("");
-                        glob_match(pat_str, m_str)
-                    })
+                    .filter(|m| matcher.is_match(m))
                     .collect()
             } else {
                 all_members
@@ -1154,52 +1152,6 @@ impl DbOp for SScanOp {
             });
             Ok(result)
         })
-    }
-}
-
-/// Simple glob pattern matcher (mirrors Go's `path.Match`). Supports `*`
-/// (any sequence of chars) and `?` (any single char). No character classes.
-fn glob_match(pattern: &str, s: &str) -> bool {
-    if pattern.is_empty() {
-        return true;
-    }
-    let pat: Vec<char> = pattern.chars().collect();
-    let s: Vec<char> = s.chars().collect();
-    glob_match_inner(&pat, &s)
-}
-
-fn glob_match_inner(pat: &[char], s: &[char]) -> bool {
-    match (pat.first(), s.first()) {
-        (None, None) => true,
-        (None, Some(_)) => false,
-        (Some('*'), _) => {
-            if glob_match_inner(&pat[1..], s) {
-                return true;
-            }
-            if s.is_empty() {
-                return false;
-            }
-            glob_match_inner(pat, &s[1..])
-        }
-        (Some('?'), Some(_)) => glob_match_inner(&pat[1..], &s[1..]),
-        (Some('['), _) => {
-            let close = pat[1..].iter().position(|&c| c == ']');
-            if let Some(idx) = close {
-                let charset = &pat[2..idx + 1];
-                let negate = charset.first() == Some(&'^');
-                let chars = if negate { &charset[1..] } else { charset };
-                let matched = s.first().is_some_and(|&c| {
-                    chars.contains(&c) || chars.windows(2).any(|w| w[0] == '-' && c >= w[0] && c <= w[2])
-                });
-                if negate {
-                    return glob_match_inner(&pat[idx + 2..], &s[1..]);
-                }
-                return matched && glob_match_inner(&pat[idx + 2..], &s[1..]);
-            }
-            false
-        }
-        (Some(&p), Some(&c)) if p == c => glob_match_inner(&pat[1..], &s[1..]),
-        _ => false,
     }
 }
 

@@ -22,7 +22,7 @@ use crate::common::session::Session;
 use crate::common::namespace::{self, base_type, encode_sentinel, prefix_of, with_db, ElementPrefix};
 use crate::common::ValueType;
 use crate::list;
-use crate::pubsub::redis_glob_match;
+use crate::pattern::{GlobPattern, PatternMatcher};
 use crate::resp::RespValue;
 
 /// `EXISTS key [key ...]` — returns the number of given keys that exist.
@@ -291,7 +291,7 @@ struct KeysOp {
 impl DbOp for KeysOp {
     fn run<'a>(&'a self, tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
         Box::pin(async move {
-            let match_all = self.pattern == b"*";
+            let matcher = GlobPattern::keyspace(self.pattern.clone());
             let mut it = tx.new_prefix_iterator(&self.prefix).await?;
             let mut names: Vec<Vec<u8>> = Vec::new();
             while it.next().await {
@@ -300,7 +300,7 @@ impl DbOp for KeysOp {
                     continue;
                 }
                 let name = &item.key()[self.prefix.len()..];
-                if match_all || redis_glob_match(&self.pattern, name, false) {
+                if matcher.is_match(name) {
                     names.push(name.to_vec());
                 }
             }
@@ -878,7 +878,7 @@ impl DbOp for ScanOp {
         let prefix = self.prefix.clone();
         let cursor = self.cursor.clone();
         let count = self.count.max(1);
-        let pattern = self.pattern.clone();
+        let matcher = self.pattern.clone().map(GlobPattern::keyspace);
         let type_filter = self.type_filter;
         Box::pin(async move {
             let mut start = prefix.clone();
@@ -918,12 +918,8 @@ impl DbOp for ScanOp {
                 }
                 let name = &full[prefix.len()..];
                 last_seen = name.to_vec();
-                if let Some(pattern) = &pattern {
-                    // As in Redis, a lone `*` selects everything (even the
-                    // empty key name, which the glob matcher would reject).
-                    if pattern.as_slice() != b"*" && !redis_glob_match(pattern, name, false) {
-                        continue;
-                    }
+                if matcher.as_ref().is_some_and(|m| !m.is_match(name)) {
+                    continue;
                 }
                 if let Some(want) = type_filter {
                     if base_type(item.metadata()) != want {
