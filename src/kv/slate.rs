@@ -169,7 +169,6 @@ impl SlateDb {
         let tx = self
             .db
             .begin(IsolationLevel::Snapshot)
-            .await
             .map_err(map_slate_error)?;
         for key in &keys {
             tx.delete(key).map_err(map_slate_error)?;
@@ -201,7 +200,6 @@ impl KeyValueStore for SlateDb {
         let tx = self
             .db
             .begin(level)
-            .await
             .map_err(map_slate_error)?;
         Ok(Box::new(SlateTx { tx, pending_expiry: Mutex::new(HashMap::new()) }))
     }
