@@ -98,6 +98,11 @@ pub struct SlateDbOpts {
     pub cache_mem_limit: usize,
 }
 
+/// Scope ID for SlateDB's block cache. Each process owns its cache exclusively
+/// (one database per cache), and a stable ID lets a restarted instance recover
+/// the persisted on-disk cache data.
+const DB_CACHE_ID: u64 = 0;
+
 /// SlateDB-backed [`KeyValueStore`].
 #[derive(Clone)]
 pub struct SlateDb {
@@ -133,7 +138,7 @@ impl SlateDb {
 
         let cache: Option<Arc<dyn DbCache>> = if let Some(ref cp) = cache_path {
             let c = build_foyer_cache(cp, cache_mem_limit).await.expect("couldn't build foyer cache");
-            builder = builder.with_db_cache(c.clone());
+            builder = builder.with_db_cache(c.clone(), DB_CACHE_ID);
             Some(c)
         } else {
             None
@@ -161,7 +166,6 @@ impl SlateDb {
         let tx = self
             .db
             .begin(IsolationLevel::Snapshot)
-            .await
             .map_err(map_slate_error)?;
         for key in &keys {
             tx.delete(key).map_err(map_slate_error)?;
@@ -193,7 +197,6 @@ impl KeyValueStore for SlateDb {
         let tx = self
             .db
             .begin(level)
-            .await
             .map_err(map_slate_error)?;
         Ok(Box::new(SlateTx { tx, pending_expiry: Mutex::new(HashMap::new()) }))
     }
