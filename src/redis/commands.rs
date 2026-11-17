@@ -9,22 +9,22 @@ use bytes::Bytes;
 use crate::bitmap;
 use crate::bloom;
 use crate::common::op::{NoOp, WireOp};
-use crate::common::{DbError, DbResult, QueuedOp};
 use crate::common::session::Session;
+use crate::common::{DbError, DbResult, QueuedOp};
 use crate::conn;
 use crate::hash;
 use crate::hll;
 use crate::json;
 use crate::keys;
 use crate::list;
+use crate::pubsub;
 use crate::resp::{ok_resp, RespValue};
+use crate::script;
 use crate::server;
 use crate::set;
+use crate::stream;
 use crate::strings;
 use crate::zset;
-use crate::pubsub;
-use crate::script;
-use crate::stream;
 
 pub async fn enqueue_command(session: &mut Session, args: &[Bytes]) -> Vec<RespValue> {
     // short-circuit in the case of a command not allowed in a script
@@ -75,7 +75,9 @@ pub async fn dispatch_noscript(session: &mut Session, args: &[Bytes]) -> Option<
             if session.in_multi() {
                 // Nested MULTI is an error but does NOT abort the outer
                 // transaction, so it bypasses dirty tracking.
-                Some(vec![RespValue::Error(Bytes::from_static(b"ERR MULTI calls can not be nested"))])
+                Some(vec![RespValue::Error(Bytes::from_static(
+                    b"ERR MULTI calls can not be nested",
+                ))])
             } else {
                 session.enter_multi();
                 Some(vec![ok_resp()])
@@ -91,7 +93,10 @@ pub async fn dispatch_noscript(session: &mut Session, args: &[Bytes]) -> Option<
         },
         b"watch" => {
             if args.len() < 2 {
-                return Some(vec![error(session, "ERR wrong number of arguments for 'watch' command")]);
+                return Some(vec![error(
+                    session,
+                    "ERR wrong number of arguments for 'watch' command",
+                )]);
             }
             if session.in_multi() {
                 return Some(vec![RespValue::Error(Bytes::from_static(
@@ -105,7 +110,17 @@ pub async fn dispatch_noscript(session: &mut Session, args: &[Bytes]) -> Option<
             session.unwatch();
             Some(vec![ok_resp()])
         }
-        _ => None
+        b"reset" => {
+            if args.len() != 1 {
+                return Some(vec![error(
+                    session,
+                    "ERR wrong number of arguments for 'reset' command",
+                )]);
+            }
+            session.reset();
+            Some(vec![RespValue::SimpleString(Bytes::from_static(b"RESET"))])
+        }
+        _ => None,
     }
 }
 
@@ -157,7 +172,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         b"evalsha" => {
             // EVALSHA sha1 numkeys [key ...] [arg ...]
             if args.len() < 3 {
-                return error_op(session, "ERR wrong number of arguments for 'evalsha' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'evalsha' command",
+                );
             }
             let sha1 = args[1].clone();
             let Some(num_keys) = parse_i64(&args[2]) else {
@@ -168,7 +186,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
             }
             let num_keys = num_keys as usize;
             if args.len() < 3 + num_keys {
-                return error_op(session, "ERR wrong number of arguments for 'evalsha' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'evalsha' command",
+                );
             }
             let keys = args[3..3 + num_keys].to_vec();
             let argv = args[3 + num_keys..].to_vec();
@@ -197,21 +218,16 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                     }
                     _ => error_op(session, "ERR invalid DB index"),
                 },
-                _ => error_op(session, "ERR wrong number of arguments for 'select' command"),
+                _ => error_op(
+                    session,
+                    "ERR wrong number of arguments for 'select' command",
+                ),
             }
         }
-        b"client" => {
-            server::client(session, args)
-        }
-        b"info" => {
-            server::info()
-        }
-        b"hello" => {
-            server::hello(session, args)
-        }
-        b"sync" | b"psync" => {
-            conn::sync()
-        }
+        b"client" => server::client(session, args),
+        b"info" => server::info(),
+        b"hello" => server::hello(session, args),
+        b"sync" | b"psync" => conn::sync(),
         b"wait" => {
             if args.len() != 3 {
                 return error_op(session, "ERR wrong number of arguments for 'wait' command");
@@ -230,37 +246,24 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
             }
             conn::wait(Duration::from_millis(timeout as u64), session)
         }
-        b"lolwut" => {
-            conn::lolwut(conn::VERSION, conn::COMMIT)
-        }
-        b"time" => {
-            conn::time()
-        }
-        b"module" => {
-            conn::module(args)
-        }
-        b"save" => {
-            server::save(session)
-        }
-        b"bgsave" => {
-            conn::bgsave(session)
-        }
-        b"dbsize" => {
-            conn::dbsize(session)
-        }
+        b"lolwut" => conn::lolwut(conn::VERSION, conn::COMMIT),
+        b"time" => conn::time(),
+        b"module" => conn::module(args),
+        b"save" => server::save(session),
+        b"bgsave" => conn::bgsave(session),
+        b"dbsize" => conn::dbsize(session),
         b"quit" => {
             session.request_close();
             ok()
         }
-        b"flushall" => {
-            server::flushall(session)
-        }
-        b"flushdb" => {
-            server::flushdb(session)
-        }
+        b"flushall" => server::flushall(session),
+        b"flushdb" => server::flushdb(session),
         b"setbit" => {
             if args.len() != 4 {
-                return error_op(session, "ERR wrong number of arguments for 'setbit' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'setbit' command",
+                );
             }
             let Some(offset) = parse_i64(&args[2]) else {
                 return error_op(session, "ERR value is not an integer or out of range");
@@ -278,7 +281,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"getbit" => {
             if args.len() != 3 {
-                return error_op(session, "ERR wrong number of arguments for 'getbit' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'getbit' command",
+                );
             }
             let Some(offset) = parse_i64(&args[2]) else {
                 return error_op(session, "ERR value is not an integer or out of range");
@@ -290,7 +296,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"bitcount" => {
             if args.len() < 2 {
-                return error_op(session, "ERR wrong number of arguments for 'bitcount' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'bitcount' command",
+                );
             }
             let mut start_given = false;
             let mut end_given = false;
@@ -341,7 +350,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"bitpos" => {
             if args.len() < 3 {
-                return error_op(session, "ERR wrong number of arguments for 'bitpos' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'bitpos' command",
+                );
             }
             let Some(bit) = parse_i64(&args[2]) else {
                 return error_op(session, "ERR value is not an integer or out of range");
@@ -424,7 +436,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                             return error_op(session, "ERR syntax error");
                         }
                         let Some(seconds) = parse_i64(&args[i]) else {
-                            return error_op(session, "ERR value is not an integer or out of range");
+                            return error_op(
+                                session,
+                                "ERR value is not an integer or out of range",
+                            );
                         };
                         if seconds <= 0 {
                             return error_op(session, "ERR invalid expire time in 'set' command");
@@ -438,7 +453,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                             return error_op(session, "ERR syntax error");
                         }
                         let Some(ms) = parse_i64(&args[i]) else {
-                            return error_op(session, "ERR value is not an integer or out of range");
+                            return error_op(
+                                session,
+                                "ERR value is not an integer or out of range",
+                            );
                         };
                         if ms <= 0 {
                             return error_op(session, "ERR invalid expire time in 'set' command");
@@ -452,7 +470,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                             return error_op(session, "ERR syntax error");
                         }
                         let Some(ts) = parse_i64(&args[i]) else {
-                            return error_op(session, "ERR value is not an integer or out of range");
+                            return error_op(
+                                session,
+                                "ERR value is not an integer or out of range",
+                            );
                         };
                         if ts <= 0 {
                             return error_op(session, "ERR invalid expire time in 'set' command");
@@ -475,7 +496,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                             return error_op(session, "ERR syntax error");
                         }
                         let Some(ts_ms) = parse_i64(&args[i]) else {
-                            return error_op(session, "ERR value is not an integer or out of range");
+                            return error_op(
+                                session,
+                                "ERR value is not an integer or out of range",
+                            );
                         };
                         if ts_ms <= 0 {
                             return error_op(session, "ERR invalid expire time in 'set' command");
@@ -547,7 +571,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"psetex" => {
             if args.len() != 4 {
-                return error_op(session, "ERR wrong number of arguments for 'psetex' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'psetex' command",
+                );
             }
             let Some(ms) = parse_i64(&args[2]) else {
                 return error_op(session, "ERR value is not an integer or out of range");
@@ -556,25 +583,37 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"getset" => {
             let Some((key, value)) = parse_pair(&args[1..]) else {
-                return error_op(session, "ERR wrong number of arguments for 'getset' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'getset' command",
+                );
             };
             strings::get_set(session, key, value)
         }
         b"getdel" => {
             if args.len() != 2 {
-                return error_op(session, "ERR wrong number of arguments for 'getdel' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'getdel' command",
+                );
             }
             strings::get_del(session, &args[1])
         }
         b"strlen" => {
             if args.len() != 2 {
-                return error_op(session, "ERR wrong number of arguments for 'strlen' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'strlen' command",
+                );
             }
             strings::strlen(session, &args[1])
         }
         b"substr" => {
             if args.len() != 4 {
-                return error_op(session, "ERR wrong number of arguments for 'substr' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'substr' command",
+                );
             }
             let Some(start) = parse_i64(&args[2]) else {
                 return error_op(session, "ERR value is not an integer or out of range");
@@ -586,7 +625,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"getrange" => {
             if args.len() != 4 {
-                return error_op(session, "ERR wrong number of arguments for 'getrange' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'getrange' command",
+                );
             }
             let Some(start) = parse_i64(&args[2]) else {
                 return error_op(session, "ERR value is not an integer or out of range");
@@ -604,7 +646,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"append" => {
             let Some((key, value)) = parse_pair(&args[1..]) else {
-                return error_op(session, "ERR wrong number of arguments for 'append' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'append' command",
+                );
             };
             strings::append(session, key, value)
         }
@@ -616,7 +661,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"incrbyfloat" => {
             let Some((key, amount)) = parse_pair(&args[1..]) else {
-                return error_op(session, "ERR wrong number of arguments for 'incrbyfloat' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'incrbyfloat' command",
+                );
             };
             let Some(amount) = parse_f64(amount) else {
                 return error_op(session, "ERR value is not a float");
@@ -631,13 +679,19 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"msetnx" => {
             if args.len() < 3 || !(args.len() - 1).is_multiple_of(2) {
-                return error_op(session, "ERR wrong number of arguments for 'msetnx' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'msetnx' command",
+                );
             }
             strings::mset_nx(session, &args[1..])
         }
         b"setrange" => {
             if args.len() != 4 {
-                return error_op(session, "ERR wrong number of arguments for 'setrange' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'setrange' command",
+                );
             }
             let Some(offset) = parse_i64(&args[2]) else {
                 return error_op(session, "ERR value is not an integer or out of range");
@@ -655,7 +709,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"incrby" => {
             let Some((key, amount)) = parse_pair(&args[1..]) else {
-                return error_op(session, "ERR wrong number of arguments for 'incrby' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'incrby' command",
+                );
             };
             let Some(amount) = parse_i64(amount) else {
                 return error_op(session, "ERR value is not an integer or out of range");
@@ -670,7 +727,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"decrby" => {
             let Some((key, amount)) = parse_pair(&args[1..]) else {
-                return error_op(session, "ERR wrong number of arguments for 'decrby' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'decrby' command",
+                );
             };
             let Some(amount) = parse_i64(amount) else {
                 return error_op(session, "ERR value is not an integer or out of range");
@@ -679,7 +739,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"bf.reserve" => {
             if args.len() < 4 {
-                return error_op(session, "ERR wrong number of arguments for 'bf.reserve' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'bf.reserve' command",
+                );
             }
             let Some(err_rate) = parse_f64(&args[2]) else {
                 return error_op(session, "ERR value is not a float");
@@ -699,7 +762,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                     match parse_i64(&args[i]) {
                         Some(v) => expansion = v,
                         None => {
-                            return error_op(session, "ERR value is not an integer or out of range");
+                            return error_op(
+                                session,
+                                "ERR value is not an integer or out of range",
+                            );
                         }
                     }
                 } else if args[i].eq_ignore_ascii_case(b"nonscaling") {
@@ -718,31 +784,46 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"bf.add" => {
             let Some((key, item)) = parse_pair(&args[1..]) else {
-                return error_op(session, "ERR wrong number of arguments for 'bf.add' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'bf.add' command",
+                );
             };
             bloom::add(session, key, item)
         }
         b"bf.exists" => {
             let Some((key, item)) = parse_pair(&args[1..]) else {
-                return error_op(session, "ERR wrong number of arguments for 'bf.exists' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'bf.exists' command",
+                );
             };
             bloom::exists(session, key, item)
         }
         b"bf.madd" => {
             if args.len() < 3 {
-                return error_op(session, "ERR wrong number of arguments for 'bf.madd' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'bf.madd' command",
+                );
             }
             bloom::madd(session, &args[1], &args[2..])
         }
         b"bf.mexists" => {
             if args.len() < 3 {
-                return error_op(session, "ERR wrong number of arguments for 'bf.mexists' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'bf.mexists' command",
+                );
             }
             bloom::mexists(session, &args[1], &args[2..])
         }
         b"bf.insert" => {
             if args.len() < 3 {
-                return error_op(session, "ERR wrong number of arguments for 'bf.insert' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'bf.insert' command",
+                );
             }
             let mut capacity = 0u64;
             let mut error_rate = 0.0f64;
@@ -757,7 +838,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                     match parse_i64(&args[i]) {
                         Some(v) => capacity = v.max(0) as u64,
                         None => {
-                            return error_op(session, "ERR value is not an integer or out of range");
+                            return error_op(
+                                session,
+                                "ERR value is not an integer or out of range",
+                            );
                         }
                     }
                 } else if args[i].eq_ignore_ascii_case(b"error") && i + 1 < args.len() {
@@ -773,7 +857,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                     match parse_i64(&args[i]) {
                         Some(v) => expansion = v,
                         None => {
-                            return error_op(session, "ERR value is not an integer or out of range");
+                            return error_op(
+                                session,
+                                "ERR value is not an integer or out of range",
+                            );
                         }
                     }
                 } else if args[i].eq_ignore_ascii_case(b"nocreate") {
@@ -784,7 +871,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                     items = args.get(i + 1..).unwrap_or(&[]).to_vec();
                     break;
                 } else {
-                    return error_op(session, format!("ERR syntax error at {}", String::from_utf8_lossy(&args[i])),);
+                    return error_op(
+                        session,
+                        format!("ERR syntax error at {}", String::from_utf8_lossy(&args[i])),
+                    );
                 }
                 i += 1;
             }
@@ -803,13 +893,19 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"bf.info" => {
             let Some(key) = args.get(1) else {
-                return error_op(session, "ERR wrong number of arguments for 'bf.info' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'bf.info' command",
+                );
             };
             bloom::info(session, key)
         }
         b"json.set" => {
             if args.len() < 4 {
-                return error_op(session, "ERR wrong number of arguments for 'json.set' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'json.set' command",
+                );
             }
             let Some(value) = json::parse_json(&args[3]) else {
                 return error_op(session, "ERR invalid JSON");
@@ -851,7 +947,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"json.get" => {
             if args.len() < 2 {
-                return error_op(session, "ERR wrong number of arguments for 'json.get' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'json.get' command",
+                );
             }
             let paths: Vec<String> = args[2..]
                 .iter()
@@ -861,7 +960,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"json.del" => {
             if args.len() < 2 {
-                return error_op(session, "ERR wrong number of arguments for 'json.del' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'json.del' command",
+                );
             }
             let paths: Vec<String> = args[2..]
                 .iter()
@@ -871,7 +973,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"json.type" => {
             if args.len() < 2 {
-                return error_op(session, "ERR wrong number of arguments for 'json.type' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'json.type' command",
+                );
             }
             let path: Vec<u8> = if args.len() >= 3 {
                 args[2].to_vec()
@@ -882,7 +987,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"json.arrappend" => {
             if args.len() < 4 {
-                return error_op(session, "ERR wrong number of arguments for 'json.arrappend' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'json.arrappend' command",
+                );
             }
             let mut values = Vec::with_capacity(args.len() - 3);
             for v in &args[3..] {
@@ -897,7 +1005,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"json.arrindex" => {
             if args.len() < 4 {
-                return error_op(session, "ERR wrong number of arguments for 'json.arrindex' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'json.arrindex' command",
+                );
             }
             let Some(value) = json::parse_json(&args[3]) else {
                 return error_op(session, "ERR invalid JSON");
@@ -906,7 +1017,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"json.arrlen" => {
             if args.len() < 2 {
-                return error_op(session, "ERR wrong number of arguments for 'json.arrlen' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'json.arrlen' command",
+                );
             }
             let path: Vec<u8> = if args.len() >= 3 {
                 args[2].to_vec()
@@ -917,7 +1031,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"json.numincrby" => {
             if args.len() < 4 {
-                return error_op(session, "ERR wrong number of arguments for 'json.numincrby' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'json.numincrby' command",
+                );
             }
             let Some(delta) = parse_f64(&args[3]) else {
                 return error_op(session, "ERR value is not a number");
@@ -926,7 +1043,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"json.nummultby" => {
             if args.len() < 4 {
-                return error_op(session, "ERR wrong number of arguments for 'json.nummultby' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'json.nummultby' command",
+                );
             }
             let Some(factor) = parse_f64(&args[3]) else {
                 return error_op(session, "ERR value is not a number");
@@ -935,7 +1055,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"json.objkeys" => {
             if args.len() < 2 {
-                return error_op(session, "ERR wrong number of arguments for 'json.objkeys' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'json.objkeys' command",
+                );
             }
             let path: Vec<u8> = if args.len() >= 3 {
                 args[2].to_vec()
@@ -946,7 +1069,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"json.objlen" => {
             if args.len() < 2 {
-                return error_op(session, "ERR wrong number of arguments for 'json.objlen' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'json.objlen' command",
+                );
             }
             let path: Vec<u8> = if args.len() >= 3 {
                 args[2].to_vec()
@@ -957,7 +1083,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"json.strappend" => {
             if args.len() < 3 {
-                return error_op(session, "ERR wrong number of arguments for 'json.strappend' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'json.strappend' command",
+                );
             }
             let (path, value_idx) = if args.len() == 4 {
                 (args[2].clone(), 3)
@@ -973,7 +1102,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"json.strlen" => {
             if args.len() < 2 {
-                return error_op(session, "ERR wrong number of arguments for 'json.strlen' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'json.strlen' command",
+                );
             }
             let path: Vec<u8> = if args.len() >= 3 {
                 args[2].to_vec()
@@ -984,7 +1116,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"json.mget" => {
             if args.len() < 3 {
-                return error_op(session, "ERR wrong number of arguments for 'json.mget' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'json.mget' command",
+                );
             }
             let last = args.len() - 1;
             let path = String::from_utf8_lossy(&args[last]).into_owned();
@@ -993,7 +1128,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"json.resp" => {
             if args.len() < 2 {
-                return error_op(session, "ERR wrong number of arguments for 'json.resp' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'json.resp' command",
+                );
             }
             let path = if args.len() >= 3 {
                 String::from_utf8_lossy(&args[2]).into_owned()
@@ -1004,7 +1142,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"json.clear" => {
             if args.len() < 2 {
-                return error_op(session, "ERR wrong number of arguments for 'json.clear' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'json.clear' command",
+                );
             }
             let path: Vec<u8> = if args.len() >= 3 {
                 args[2].to_vec()
@@ -1015,7 +1156,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"json.arrpop" => {
             if args.len() < 2 {
-                return error_op(session, "ERR wrong number of arguments for 'json.arrpop' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'json.arrpop' command",
+                );
             }
             let path: Vec<u8> = if args.len() >= 3 {
                 args[2].to_vec()
@@ -1035,7 +1179,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"json.arrtrim" => {
             if args.len() < 4 {
-                return error_op(session, "ERR wrong number of arguments for 'json.arrtrim' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'json.arrtrim' command",
+                );
             }
             let Some(start) = parse_i64(&args[3]) else {
                 return error_op(session, "value is not an integer or out of range");
@@ -1053,7 +1200,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"json.arrinsert" => {
             if args.len() < 5 {
-                return error_op(session, "ERR wrong number of arguments for 'json.arrinsert' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'json.arrinsert' command",
+                );
             }
             let Some(index) = parse_i64(&args[3]) else {
                 return error_op(session, "ERR value is not an integer or out of range");
@@ -1077,13 +1227,19 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"pfcount" => {
             if args.len() < 2 {
-                return error_op(session, "ERR wrong number of arguments for 'pfcount' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'pfcount' command",
+                );
             }
             hll::pfcount(session, &args[1..])
         }
         b"pfmerge" => {
             if args.len() < 2 {
-                return error_op(session, "ERR wrong number of arguments for 'pfmerge' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'pfmerge' command",
+                );
             }
             hll::pfmerge(session, &args[1], &args[2..])
         }
@@ -1134,7 +1290,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"lrange" => {
             if args.len() != 4 {
-                return error_op(session, "ERR wrong number of arguments for 'lrange' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'lrange' command",
+                );
             }
             let Some(start) = parse_i64(&args[2]) else {
                 return error_op(session, "ERR value is not an integer or out of range");
@@ -1146,7 +1305,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"lindex" => {
             if args.len() != 3 {
-                return error_op(session, "ERR wrong number of arguments for 'lindex' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'lindex' command",
+                );
             }
             let Some(index) = parse_i64(&args[2]) else {
                 return error_op(session, "ERR value is not an integer or out of range");
@@ -1185,20 +1347,29 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"linsert" => {
             if args.len() != 5 {
-                return error_op(session, "ERR wrong number of arguments for 'linsert' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'linsert' command",
+                );
             }
             let before = args[2].eq_ignore_ascii_case(b"before");
             list::linsert(session, &args[1], before, &args[3], &args[4])
         }
         b"lpushx" => {
             if args.len() != 3 {
-                return error_op(session, "ERR wrong number of arguments for 'lpushx' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'lpushx' command",
+                );
             }
             list::lpushx(session, &args[1], &args[2])
         }
         b"rpushx" => {
             if args.len() != 3 {
-                return error_op(session, "ERR wrong number of arguments for 'rpushx' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'rpushx' command",
+                );
             }
             list::rpushx(session, &args[1], &args[2])
         }
@@ -1222,13 +1393,19 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"smembers" => {
             if args.len() != 2 {
-                return error_op(session, "ERR wrong number of arguments for 'smembers' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'smembers' command",
+                );
             }
             set::smembers(session, &args[1])
         }
         b"sismember" => {
             if args.len() != 3 {
-                return error_op(session, "ERR wrong number of arguments for 'sismember' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'sismember' command",
+                );
             }
             set::sismember(session, &args[1], &args[2])
         }
@@ -1240,7 +1417,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"srandmember" => {
             if args.len() != 2 {
-                return error_op(session, "ERR wrong number of arguments for 'srandmember' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'srandmember' command",
+                );
             }
             set::srandmember(session, &args[1], 1)
         }
@@ -1258,31 +1438,46 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"sinter" => {
             if args.len() < 2 {
-                return error_op(session, "ERR wrong number of arguments for 'sinter' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'sinter' command",
+                );
             }
             set::sinter(session, &args[1..])
         }
         b"sunion" => {
             if args.len() < 2 {
-                return error_op(session, "ERR wrong number of arguments for 'sunion' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'sunion' command",
+                );
             }
             set::sunion(session, &args[1..])
         }
         b"sdiffstore" => {
             if args.len() < 3 {
-                return error_op(session, "ERR wrong number of arguments for 'sdiffstore' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'sdiffstore' command",
+                );
             }
             set::sdiffstore(session, &args[1], &args[2..])
         }
         b"sinterstore" => {
             if args.len() < 3 {
-                return error_op(session, "ERR wrong number of arguments for 'sinterstore' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'sinterstore' command",
+                );
             }
             set::sinterstore(session, &args[1], &args[2..])
         }
         b"sunionstore" => {
             if args.len() < 3 {
-                return error_op(session, "ERR wrong number of arguments for 'sunionstore' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'sunionstore' command",
+                );
             }
             set::sunionstore(session, &args[1], &args[2..])
         }
@@ -1329,7 +1524,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"zcount" => {
             if args.len() != 4 {
-                return error_op(session, "ERR wrong number of arguments for 'zcount' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'zcount' command",
+                );
             }
             let min = String::from_utf8_lossy(&args[2]).into_owned();
             let max = String::from_utf8_lossy(&args[3]).into_owned();
@@ -1337,7 +1535,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"zincrby" => {
             if args.len() != 4 {
-                return error_op(session, "ERR wrong number of arguments for 'zincrby' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'zincrby' command",
+                );
             }
             let Some(incr) = parse_f64(&args[2]) else {
                 return error_op(session, "ERR value is not a float");
@@ -1347,7 +1548,13 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         b"zinter" | b"zinterstore" => {
             let is_store = name == b"zinterstore";
             if args.len() < 4 {
-                return error_op(session, format!( "ERR wrong number of arguments for '{}' command", String::from_utf8_lossy(&name) ),);
+                return error_op(
+                    session,
+                    format!(
+                        "ERR wrong number of arguments for '{}' command",
+                        String::from_utf8_lossy(&name)
+                    ),
+                );
             }
             let arg_start = if is_store { 2 } else { 1 };
             let Some(num_keys) = parse_i64(&args[arg_start]) else {
@@ -1358,7 +1565,13 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
             }
             let num_keys = num_keys as usize;
             if args.len() < arg_start + 1 + num_keys {
-                return error_op(session, format!( "ERR wrong number of arguments for '{}' command", String::from_utf8_lossy(&name) ),);
+                return error_op(
+                    session,
+                    format!(
+                        "ERR wrong number of arguments for '{}' command",
+                        String::from_utf8_lossy(&name)
+                    ),
+                );
             }
             let keys = args[arg_start + 1..arg_start + 1 + num_keys].to_vec();
             let mut i = arg_start + 1 + num_keys;
@@ -1403,18 +1616,15 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                 zset::zinterstore(session, &args[1], &aggregate, &weights, &keys)
             } else {
                 let has_with_scores = args.iter().any(|a| a.eq_ignore_ascii_case(b"withscores"));
-                zset::zinter(
-                    session,
-                    &aggregate,
-                    &weights,
-                    has_with_scores,
-                    &keys,
-                )
+                zset::zinter(session, &aggregate, &weights, has_with_scores, &keys)
             }
         }
         b"zlexcount" => {
             if args.len() != 4 {
-                return error_op(session, "ERR wrong number of arguments for 'zlexcount' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'zlexcount' command",
+                );
             }
             let min = String::from_utf8_lossy(&args[2]).into_owned();
             let max = String::from_utf8_lossy(&args[3]).into_owned();
@@ -1423,12 +1633,18 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         b"zpopmax" | b"zpopmin" => {
             let want_min = name == b"zpopmin";
             if args.len() < 2 {
-                return error_op(session, format!( "ERR wrong number of arguments for '{}' command", String::from_utf8_lossy(&name) ),);
+                return error_op(
+                    session,
+                    format!(
+                        "ERR wrong number of arguments for '{}' command",
+                        String::from_utf8_lossy(&name)
+                    ),
+                );
             }
-            let mut count = 1usize;
+            let mut count = None;
             if args.len() >= 3 {
                 match parse_i64(&args[2]) {
-                    Some(v) if v >= 0 => count = v as usize,
+                    Some(v) if v >= 0 => count = Some(v as usize),
                     _ => {
                         return error_op(session, "ERR value is not an integer or out of range");
                     }
@@ -1444,7 +1660,13 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
             let want_min = name == b"bzpopmin";
             // BZPOPMIN key [key ...] timeout
             if args.len() < 3 {
-                return error_op(session, format!("ERR wrong number of arguments for '{}' command", String::from_utf8_lossy(&name)));
+                return error_op(
+                    session,
+                    format!(
+                        "ERR wrong number of arguments for '{}' command",
+                        String::from_utf8_lossy(&name)
+                    ),
+                );
             }
             let timeout_arg = &args[args.len() - 1];
             let Some(timeout) = parse_f64(timeout_arg) else {
@@ -1458,7 +1680,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"exists" => {
             if args.len() < 2 {
-                return error_op(session, "ERR wrong number of arguments for 'exists' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'exists' command",
+                );
             }
             keys::exists(session, &args[1..])
         }
@@ -1472,7 +1697,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
             // TODO this is hard-wired to only implement the IDLETIME subcommand stub
             // Replace if/when we decide to implement more OBJECT subcommands
             if args.len() < 3 {
-                return error_op(session, "ERR wrong number of arguments for 'object' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'object' command",
+                );
             }
             keys::idle_time(session)
         }
@@ -1490,13 +1718,19 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"rename" => {
             let Some((old_key, new_key)) = parse_pair(&args[1..]) else {
-                return error_op(session, "ERR wrong number of arguments for 'rename' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'rename' command",
+                );
             };
             keys::rename(session, old_key, new_key)
         }
         b"renamenx" => {
             let Some((old_key, new_key)) = parse_pair(&args[1..]) else {
-                return error_op(session, "ERR wrong number of arguments for 'renamenx' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'renamenx' command",
+                );
             };
             keys::rename_nx(session, old_key, new_key)
         }
@@ -1514,7 +1748,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"expire" => {
             if args.len() != 3 {
-                return error_op(session, "ERR wrong number of arguments for 'expire' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'expire' command",
+                );
             }
             let Some(seconds) = parse_i64(&args[2]) else {
                 return error_op(session, "ERR value is not an integer or out of range");
@@ -1523,7 +1760,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"pexpire" => {
             if args.len() != 3 {
-                return error_op(session, "ERR wrong number of arguments for 'pexpire' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'pexpire' command",
+                );
             }
             let Some(millis) = parse_i64(&args[2]) else {
                 return error_op(session, "ERR value is not an integer or out of range");
@@ -1532,7 +1772,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"persist" => {
             if args.len() != 2 {
-                return error_op(session, "ERR wrong number of arguments for 'persist' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'persist' command",
+                );
             }
             keys::persist(session, &args[1])
         }
@@ -1549,7 +1792,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                 } else {
                     "unlink"
                 };
-                return error_op(session, format!("ERR wrong number of arguments for '{name}' command"),);
+                return error_op(
+                    session,
+                    format!("ERR wrong number of arguments for '{name}' command"),
+                );
             }
             keys::del(session, &args[1..])
         }
@@ -1601,17 +1847,14 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                 Some(p) if p == b"*" => None,
                 other => other,
             };
-            keys::scan(
-                session,
-                &args[1],
-                count,
-                pattern,
-                type_filter,
-            )
+            keys::scan(session, &args[1], count, pattern, type_filter)
         }
         b"zrange" => {
             if args.len() < 4 {
-                return error_op(session, "ERR wrong number of arguments for 'zrange' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'zrange' command",
+                );
             }
             let opts = match parse_zrange_options(&args[4..]) {
                 Ok(opts) => opts,
@@ -1637,9 +1880,23 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                     let first = String::from_utf8_lossy(&args[2]).into_owned();
                     let second = String::from_utf8_lossy(&args[3]).into_owned();
                     if opts.reverse {
-                        zset::zrevrangebyscore(session, &args[1], &first, &second, opts.with_scores, opts.limit)
+                        zset::zrevrangebyscore(
+                            session,
+                            &args[1],
+                            &first,
+                            &second,
+                            opts.with_scores,
+                            opts.limit,
+                        )
                     } else {
-                        zset::zrangebyscore(session, &args[1], &first, &second, opts.with_scores, opts.limit)
+                        zset::zrangebyscore(
+                            session,
+                            &args[1],
+                            &first,
+                            &second,
+                            opts.with_scores,
+                            opts.limit,
+                        )
                     }
                 }
                 ZRangeKind::Lex => {
@@ -1648,16 +1905,23 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                     let (offset, count) = opts.limit.unwrap_or((0, 0));
                     let has_limit = opts.limit.is_some();
                     if opts.reverse {
-                        zset::zrevrangebylex(session, &args[1], &first, &second, offset, count, has_limit)
+                        zset::zrevrangebylex(
+                            session, &args[1], &first, &second, offset, count, has_limit,
+                        )
                     } else {
-                        zset::zrangebylex(session, &args[1], &first, &second, offset, count, has_limit)
+                        zset::zrangebylex(
+                            session, &args[1], &first, &second, offset, count, has_limit,
+                        )
                     }
                 }
             }
         }
         b"zrangebylex" => {
             if args.len() < 4 {
-                return error_op(session, "ERR wrong number of arguments for 'zrangebylex' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'zrangebylex' command",
+                );
             }
             let min = String::from_utf8_lossy(&args[2]).into_owned();
             let max = String::from_utf8_lossy(&args[3]).into_owned();
@@ -1685,7 +1949,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"zrangebyscore" => {
             if args.len() < 4 {
-                return error_op(session, "ERR wrong number of arguments for 'zrangebyscore' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'zrangebyscore' command",
+                );
             }
             let min = String::from_utf8_lossy(&args[2]).into_owned();
             let max = String::from_utf8_lossy(&args[3]).into_owned();
@@ -1714,14 +1981,7 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
             } else {
                 None
             };
-            zset::zrangebyscore(
-                session,
-                &args[1],
-                &min,
-                &max,
-                with_scores,
-                limit,
-            )
+            zset::zrangebyscore(session, &args[1], &min, &max, with_scores, limit)
         }
         b"zrank" => {
             if args.len() != 3 {
@@ -1737,7 +1997,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"zremrangebylex" => {
             if args.len() != 4 {
-                return error_op(session, "ERR wrong number of arguments for 'zremrangebylex' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'zremrangebylex' command",
+                );
             }
             let min = String::from_utf8_lossy(&args[2]).into_owned();
             let max = String::from_utf8_lossy(&args[3]).into_owned();
@@ -1745,7 +2008,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"zremrangebyrank" => {
             if args.len() != 4 {
-                return error_op(session, "ERR wrong number of arguments for 'zremrangebyrank' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'zremrangebyrank' command",
+                );
             }
             let Some(start) = parse_i64(&args[2]) else {
                 return error_op(session, "ERR value is not an integer or out of range");
@@ -1757,7 +2023,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"zremrangebyscore" => {
             if args.len() != 4 {
-                return error_op(session, "ERR wrong number of arguments for 'zremrangebyscore' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'zremrangebyscore' command",
+                );
             }
             let min = String::from_utf8_lossy(&args[2]).into_owned();
             let max = String::from_utf8_lossy(&args[3]).into_owned();
@@ -1765,7 +2034,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"zrevrange" => {
             if args.len() < 4 {
-                return error_op(session, "ERR wrong number of arguments for 'zrevrange' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'zrevrange' command",
+                );
             }
             let Some(start) = parse_i64(&args[2]) else {
                 return error_op(session, "ERR value is not an integer or out of range");
@@ -1780,7 +2052,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"zrevrangebylex" => {
             if args.len() < 4 {
-                return error_op(session, "ERR wrong number of arguments for 'zrevrangebylex' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'zrevrangebylex' command",
+                );
             }
             let max = String::from_utf8_lossy(&args[2]).into_owned();
             let min = String::from_utf8_lossy(&args[3]).into_owned();
@@ -1808,7 +2083,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"zrevrangebyscore" => {
             if args.len() < 4 {
-                return error_op(session, "ERR wrong number of arguments for 'zrevrangebyscore' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'zrevrangebyscore' command",
+                );
             }
             let max = String::from_utf8_lossy(&args[2]).into_owned();
             let min = String::from_utf8_lossy(&args[3]).into_owned();
@@ -1837,24 +2115,23 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
             } else {
                 None
             };
-            zset::zrevrangebyscore(
-                session,
-                &args[1],
-                &max,
-                &min,
-                with_scores,
-                limit,
-            )
+            zset::zrevrangebyscore(session, &args[1], &max, &min, with_scores, limit)
         }
         b"zrevrank" => {
             if args.len() != 3 {
-                return error_op(session, "ERR wrong number of arguments for 'zrevrank' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'zrevrank' command",
+                );
             }
             zset::zrevrank(session, &args[1], &args[2])
         }
         b"zscore" => {
             if args.len() != 3 {
-                return error_op(session, "ERR wrong number of arguments for 'zscore' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'zscore' command",
+                );
             }
             zset::zscore(session, &args[1], &args[2])
         }
@@ -1880,7 +2157,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"zdiffstore" => {
             if args.len() < 4 {
-                return error_op(session, "ERR wrong number of arguments for 'zdiffstore' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'zdiffstore' command",
+                );
             }
             let Some(num_keys) = parse_i64(&args[2]) else {
                 return error_op(session, "ERR value is not an integer or out of range");
@@ -1890,20 +2170,29 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
             }
             let num_keys = num_keys as usize;
             if args.len() < 3 + num_keys {
-                return error_op(session, "ERR wrong number of arguments for 'zdiffstore' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'zdiffstore' command",
+                );
             }
             let keys = args[3..3 + num_keys].to_vec();
             zset::zdiffstore(session, &args[1], &keys)
         }
         b"zmscore" => {
             if args.len() < 3 {
-                return error_op(session, "ERR wrong number of arguments for 'zmscore' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'zmscore' command",
+                );
             }
             zset::zmscore(session, &args[1], &args[2..])
         }
         b"zrandmember" => {
             if args.len() < 2 {
-                return error_op(session, "ERR wrong number of arguments for 'zrandmember' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'zrandmember' command",
+                );
             }
             let mut count = 1i64;
             if args.len() >= 3 {
@@ -1917,7 +2206,13 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         b"zunion" | b"zunionstore" => {
             let is_store = name == b"zunionstore";
             if args.len() < 4 {
-                return error_op(session, format!( "ERR wrong number of arguments for '{}' command", String::from_utf8_lossy(&name) ),);
+                return error_op(
+                    session,
+                    format!(
+                        "ERR wrong number of arguments for '{}' command",
+                        String::from_utf8_lossy(&name)
+                    ),
+                );
             }
             let arg_start = if is_store { 2 } else { 1 };
             let Some(num_keys) = parse_i64(&args[arg_start]) else {
@@ -1928,7 +2223,13 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
             }
             let num_keys = num_keys as usize;
             if args.len() < arg_start + 1 + num_keys {
-                return error_op(session, format!( "ERR wrong number of arguments for '{}' command", String::from_utf8_lossy(&name) ),);
+                return error_op(
+                    session,
+                    format!(
+                        "ERR wrong number of arguments for '{}' command",
+                        String::from_utf8_lossy(&name)
+                    ),
+                );
             }
             let keys = args[arg_start + 1..arg_start + 1 + num_keys].to_vec();
             let mut i = arg_start + 1 + num_keys;
@@ -1973,18 +2274,15 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                 zset::zunionstore(session, &args[1], &aggregate, &weights, &keys)
             } else {
                 let has_with_scores = args.iter().any(|a| a.eq_ignore_ascii_case(b"withscores"));
-                zset::zunion(
-                    session,
-                    &aggregate,
-                    &weights,
-                    has_with_scores,
-                    &keys,
-                )
+                zset::zunion(session, &aggregate, &weights, has_with_scores, &keys)
             }
         }
         b"zrangestore" => {
             if args.len() != 5 {
-                return error_op(session, "ERR wrong number of arguments for 'zrangestore' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'zrangestore' command",
+                );
             }
             let Some(start) = parse_i64(&args[3]) else {
                 return error_op(session, "ERR value is not an integer or out of range");
@@ -2003,7 +2301,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"hsetnx" => {
             if args.len() != 4 {
-                return error_op(session, "ERR wrong number of arguments for 'hsetnx' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'hsetnx' command",
+                );
             }
             hash::hsetnx(session, &args[1], &args[2], &args[3])
         }
@@ -2027,7 +2328,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"hexists" => {
             if args.len() != 3 {
-                return error_op(session, "ERR wrong number of arguments for 'hexists' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'hexists' command",
+                );
             }
             hash::hexists(session, &args[1], &args[2])
         }
@@ -2051,7 +2355,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"hgetall" => {
             if args.len() != 2 {
-                return error_op(session, "ERR wrong number of arguments for 'hgetall' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'hgetall' command",
+                );
             }
             hash::hgetall(session, &args[1])
         }
@@ -2064,7 +2371,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"hincrby" => {
             if args.len() != 4 {
-                return error_op(session, "ERR wrong number of arguments for 'hincrby' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'hincrby' command",
+                );
             }
             let Some(amount) = parse_i64(&args[3]) else {
                 return error_op(session, "ERR value is not an integer or out of range");
@@ -2073,7 +2383,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"hincrbyfloat" => {
             if args.len() != 4 {
-                return error_op(session, "ERR wrong number of arguments for 'hincrbyfloat' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'hincrbyfloat' command",
+                );
             }
             let Some(amount) = parse_f64(&args[3]) else {
                 return error_op(session, "ERR value is not a float");
@@ -2082,7 +2395,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"hrandfield" => {
             if args.len() < 2 {
-                return error_op(session, "ERR wrong number of arguments for 'hrandfield' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'hrandfield' command",
+                );
             }
             let mut count = 1i64;
             let mut with_values = false;
@@ -2103,7 +2419,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"hstrlen" => {
             if args.len() != 3 {
-                return error_op(session, "ERR wrong number of arguments for 'hstrlen' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'hstrlen' command",
+                );
             }
             hash::hstrlen(session, &args[1], &args[2])
         }
@@ -2125,7 +2444,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                     match parse_i64(&args[i]) {
                         Some(v) => count = v,
                         None => {
-                            return error_op(session, "ERR value is not an integer or out of range");
+                            return error_op(
+                                session,
+                                "ERR value is not an integer or out of range",
+                            );
                         }
                     }
                 } else {
@@ -2145,8 +2467,8 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         // Inside a MULTI block they are not allowed at all — queuing them must
         // mark the transaction dirty and immediately return an error, so EXEC
         // aborts rather than executing a partial batch.
-        b"subscribe" | b"psubscribe" | b"ssubscribe"
-        | b"unsubscribe" | b"punsubscribe" | b"sunsubscribe" => {
+        b"subscribe" | b"psubscribe" | b"ssubscribe" | b"unsubscribe" | b"punsubscribe"
+        | b"sunsubscribe" => {
             // Reject inside MULTI: dirty the transaction and return an error.
             // Outside MULTI these commands are intercepted before dispatch_command
             // is called (in listener.rs), so if we reach here outside a MULTI
@@ -2157,7 +2479,13 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
             // SPUBLISH is a thin alias for PUBLISH in single-node mode.
             // TODO: distinguish SPUBLISH properly if horizontal scaling is added.
             if args.len() != 3 {
-                return error_op(session, format!( "ERR wrong number of arguments for '{}' command", String::from_utf8_lossy(&name) ),);
+                return error_op(
+                    session,
+                    format!(
+                        "ERR wrong number of arguments for '{}' command",
+                        String::from_utf8_lossy(&name)
+                    ),
+                );
             }
             let channel = args[1].clone();
             let payload = args[2].clone();
@@ -2165,7 +2493,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         }
         b"pubsub" => {
             if args.len() < 2 {
-                return error_op(session, "ERR wrong number of arguments for 'pubsub' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'pubsub' command",
+                );
             }
             let sub_cmd: Vec<u8> = args[1].iter().map(u8::to_ascii_lowercase).collect();
             match sub_cmd.as_slice() {
@@ -2177,15 +2508,15 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                     let channel_args: Vec<Bytes> = args[2..].to_vec();
                     session.pubsub().numsub(channel_args)
                 }
-                b"numpat" => {
-                    session.pubsub().numpat()
-                }
-                b"help" => {
-                    pubsub::help()
-                }
-                _ => {
-                    error_op(session, format!( "ERR unknown subcommand '{}'. Try PUBSUB HELP.", String::from_utf8_lossy(&sub_cmd)))
-                }
+                b"numpat" => session.pubsub().numpat(),
+                b"help" => pubsub::help(),
+                _ => error_op(
+                    session,
+                    format!(
+                        "ERR unknown subcommand '{}'. Try PUBSUB HELP.",
+                        String::from_utf8_lossy(&sub_cmd)
+                    ),
+                ),
             }
         }
         // --- Stream commands ---
@@ -2228,7 +2559,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                         return error_op(session, "ERR syntax error");
                     }
                     let Some(id) = stream::StreamEntryId::from_str_bytes(&args[i]) else {
-                        return error_op(session, "ERR invalid stream ID specified as MINID argument");
+                        return error_op(
+                            session,
+                            "ERR invalid stream ID specified as MINID argument",
+                        );
                     };
                     min_id = Some(id);
                     i += 1;
@@ -2246,7 +2580,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                 match stream::StreamEntryId::from_str_bytes(&args[i]) {
                     Some(id) => Some(id),
                     None => {
-                        return error_op(session, "ERR invalid stream ID specified as XADD argument");
+                        return error_op(
+                            session,
+                            "ERR invalid stream ID specified as XADD argument",
+                        );
                     }
                 }
             };
@@ -2266,7 +2603,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         b"xrange" => {
             // XRANGE key start end [COUNT count]
             if args.len() < 4 {
-                return error_op(session, "ERR wrong number of arguments for 'xrange' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'xrange' command",
+                );
             }
             let start = if args[2].as_ref() == b"-" {
                 None
@@ -2274,7 +2614,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                 match stream::StreamEntryId::from_str_bytes(&args[2]) {
                     Some(id) => Some(id),
                     None => {
-                        return error_op(session, "ERR invalid stream ID specified as XRANGE argument");
+                        return error_op(
+                            session,
+                            "ERR invalid stream ID specified as XRANGE argument",
+                        );
                     }
                 }
             };
@@ -2284,7 +2627,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                 match stream::StreamEntryId::from_str_bytes(&args[3]) {
                     Some(id) => Some(id),
                     None => {
-                        return error_op(session, "ERR invalid stream ID specified as XRANGE argument");
+                        return error_op(
+                            session,
+                            "ERR invalid stream ID specified as XRANGE argument",
+                        );
                     }
                 }
             };
@@ -2303,7 +2649,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         b"xrevrange" => {
             // XREVRANGE key end start [COUNT count]
             if args.len() < 4 {
-                return error_op(session, "ERR wrong number of arguments for 'xrevrange' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'xrevrange' command",
+                );
             }
             let start = if args[3].as_ref() == b"-" {
                 None
@@ -2311,7 +2660,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                 match stream::StreamEntryId::from_str_bytes(&args[3]) {
                     Some(id) => Some(id),
                     None => {
-                        return error_op(session, "ERR invalid stream ID specified as XREVRANGE argument");
+                        return error_op(
+                            session,
+                            "ERR invalid stream ID specified as XREVRANGE argument",
+                        );
                     }
                 }
             };
@@ -2321,7 +2673,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                 match stream::StreamEntryId::from_str_bytes(&args[2]) {
                     Some(id) => Some(id),
                     None => {
-                        return error_op(session, "ERR invalid stream ID specified as XREVRANGE argument");
+                        return error_op(
+                            session,
+                            "ERR invalid stream ID specified as XREVRANGE argument",
+                        );
                     }
                 }
             };
@@ -2392,7 +2747,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
                 match stream::parse_stream_id_arg(a) {
                     Some(id) => ids.push(id),
                     None => {
-                        return error_op(session, "ERR invalid stream ID specified in XREAD argument");
+                        return error_op(
+                            session,
+                            "ERR invalid stream ID specified in XREAD argument",
+                        );
                     }
                 }
             }
@@ -2449,7 +2807,10 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
         b"xsetid" => {
             // XSETID key last-entry-id
             if args.len() != 3 {
-                return error_op(session, "ERR wrong number of arguments for 'xsetid' command");
+                return error_op(
+                    session,
+                    "ERR wrong number of arguments for 'xsetid' command",
+                );
             }
             let Some(id) = stream::StreamEntryId::from_str_bytes(&args[2]) else {
                 return error_op(session, "ERR invalid stream ID specified in XSETID");
@@ -2464,15 +2825,19 @@ pub fn dispatch_command(session: &mut Session, args: &[Bytes]) -> QueuedOp {
             if args[1].eq_ignore_ascii_case(b"stream") {
                 stream::xinfo_stream(session, &args[2])
             } else {
-                error_op(session, format!(
-                    "ERR unknown XINFO subcommand '{}'",
-                    String::from_utf8_lossy(&args[1])
-                ))
+                error_op(
+                    session,
+                    format!(
+                        "ERR unknown XINFO subcommand '{}'",
+                        String::from_utf8_lossy(&args[1])
+                    ),
+                )
             }
         }
-        _ => {
-            error_op(session, format!("ERR unknown command '{}'", String::from_utf8_lossy(&name)))
-        }
+        _ => error_op(
+            session,
+            format!("ERR unknown command '{}'", String::from_utf8_lossy(&name)),
+        ),
     }
 }
 
@@ -2576,7 +2941,8 @@ fn parse_zrange_options(opts: &[Bytes]) -> Result<ZRangeOptions, &'static str> {
         if opt.eq_ignore_ascii_case(b"withscores") {
             with_scores = true;
         } else if opt.eq_ignore_ascii_case(b"limit") && remaining >= 2 {
-            let (Some(offset), Some(count)) = (parse_i64(&opts[i + 1]), parse_i64(&opts[i + 2])) else {
+            let (Some(offset), Some(count)) = (parse_i64(&opts[i + 1]), parse_i64(&opts[i + 2]))
+            else {
                 return Err("ERR value is not an integer or out of range");
             };
             limit = Some((offset, count));
@@ -2594,12 +2960,19 @@ fn parse_zrange_options(opts: &[Bytes]) -> Result<ZRangeOptions, &'static str> {
     }
     let kind = kind.unwrap_or(ZRangeKind::Rank);
     if limit.is_some() && matches!(kind, ZRangeKind::Rank) {
-        return Err("ERR syntax error, LIMIT is only supported in combination with either BYSCORE or BYLEX");
+        return Err(
+            "ERR syntax error, LIMIT is only supported in combination with either BYSCORE or BYLEX",
+        );
     }
     if with_scores && matches!(kind, ZRangeKind::Lex) {
         return Err("ERR syntax error, WITHSCORES not supported in combination with BYLEX");
     }
-    Ok(ZRangeOptions { kind, reverse, with_scores, limit })
+    Ok(ZRangeOptions {
+        kind,
+        reverse,
+        with_scores,
+        limit,
+    })
 }
 
 fn parse_f64(bytes: &[u8]) -> Option<f64> {
@@ -2617,7 +2990,257 @@ mod tests {
             .iter()
             .map(|arg| Bytes::copy_from_slice(arg.as_bytes()))
             .collect();
+        enqueue_command(session, &args)
+            .await
+            .into_iter()
+            .map(crate::testutil::resp2)
+            .collect()
+    }
+
+    /// Like [`dispatch`], but leaves the RESP3 types in the replies.
+    async fn dispatch_raw(session: &mut Session, args: &[&str]) -> Vec<RespValue> {
+        let args: Vec<Bytes> = args
+            .iter()
+            .map(|arg| Bytes::copy_from_slice(arg.as_bytes()))
+            .collect();
         enqueue_command(session, &args).await
+    }
+
+    /// Asserts the exact bytes a command's reply takes on each protocol.
+    async fn assert_wire(session: &mut Session, args: &[&str], resp2: &str, resp3: &str) {
+        use crate::resp::Protocol::{Resp2, Resp3};
+        let reply = dispatch_raw(session, args).await.remove(0);
+        assert_eq!(
+            crate::testutil::wire(Resp2, reply.clone()),
+            resp2,
+            "{args:?} on RESP2"
+        );
+        assert_eq!(
+            crate::testutil::wire(Resp3, reply),
+            resp3,
+            "{args:?} on RESP3"
+        );
+    }
+
+    #[tokio::test]
+    async fn hash_and_set_reply_shapes_per_protocol() {
+        let mut s = test_session();
+        dispatch(&mut s, &["hset", "h", "f", "v"]).await;
+        assert_wire(
+            &mut s,
+            &["hgetall", "h"],
+            "*2\r\n$1\r\nf\r\n$1\r\nv\r\n",
+            "%1\r\n$1\r\nf\r\n$1\r\nv\r\n",
+        )
+        .await;
+        assert_wire(&mut s, &["hgetall", "nope"], "*0\r\n", "%0\r\n").await;
+        assert_wire(
+            &mut s,
+            &["hrandfield", "h", "2", "withvalues"],
+            "*2\r\n$1\r\nf\r\n$1\r\nv\r\n",
+            "*1\r\n*2\r\n$1\r\nf\r\n$1\r\nv\r\n",
+        )
+        .await;
+        // Without WITHVALUES it stays a plain array on both.
+        assert_wire(
+            &mut s,
+            &["hrandfield", "h", "2"],
+            "*1\r\n$1\r\nf\r\n",
+            "*1\r\n$1\r\nf\r\n",
+        )
+        .await;
+        assert_wire(&mut s, &["hrandfield", "nope"], "$-1\r\n", "_\r\n").await;
+
+        dispatch(&mut s, &["sadd", "s1", "a", "b"]).await;
+        dispatch(&mut s, &["sadd", "s2", "b"]).await;
+        assert_wire(
+            &mut s,
+            &["smembers", "s2"],
+            "*1\r\n$1\r\nb\r\n",
+            "~1\r\n$1\r\nb\r\n",
+        )
+        .await;
+        assert_wire(
+            &mut s,
+            &["sdiff", "s1", "s2"],
+            "*1\r\n$1\r\na\r\n",
+            "~1\r\n$1\r\na\r\n",
+        )
+        .await;
+        assert_wire(
+            &mut s,
+            &["sinter", "s1", "s2"],
+            "*1\r\n$1\r\nb\r\n",
+            "~1\r\n$1\r\nb\r\n",
+        )
+        .await;
+        assert_wire(&mut s, &["smembers", "nope"], "*0\r\n", "~0\r\n").await;
+        let u = dispatch_raw(&mut s, &["sunion", "s1", "s2"]).await;
+        assert!(matches!(&u[0], RespValue::Set(items) if items.len() == 2));
+    }
+
+    #[tokio::test]
+    async fn zset_reply_shapes_per_protocol() {
+        let mut s = test_session();
+        dispatch(&mut s, &["zadd", "z", "1", "a", "2", "b"]).await;
+
+        // Doubles.
+        assert_wire(&mut s, &["zscore", "z", "a"], "$1\r\n1\r\n", ",1\r\n").await;
+        assert_wire(&mut s, &["zscore", "z", "nope"], "$-1\r\n", "_\r\n").await;
+        assert_wire(
+            &mut s,
+            &["zmscore", "z", "a", "nope"],
+            "*2\r\n$1\r\n1\r\n$-1\r\n",
+            "*2\r\n,1\r\n_\r\n",
+        )
+        .await;
+        assert_wire(
+            &mut s,
+            &["zincrby", "z", "0.5", "a"],
+            "$3\r\n1.5\r\n",
+            ",1.5\r\n",
+        )
+        .await;
+        dispatch(&mut s, &["zadd", "z", "1", "a"]).await;
+
+        // WITHSCORES: pairs on RESP3, flat on RESP2; plain members unchanged.
+        let flat = "*4\r\n$1\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n$1\r\n2\r\n";
+        let pairs = "*2\r\n*2\r\n$1\r\na\r\n,1\r\n*2\r\n$1\r\nb\r\n,2\r\n";
+        assert_wire(
+            &mut s,
+            &["zrange", "z", "0", "-1", "withscores"],
+            flat,
+            pairs,
+        )
+        .await;
+        assert_wire(
+            &mut s,
+            &["zrangebyscore", "z", "-inf", "+inf", "withscores"],
+            flat,
+            pairs,
+        )
+        .await;
+        let plain = "*2\r\n$1\r\na\r\n$1\r\nb\r\n";
+        assert_wire(&mut s, &["zrange", "z", "0", "-1"], plain, plain).await;
+        let rev_flat = "*4\r\n$1\r\nb\r\n$1\r\n2\r\n$1\r\na\r\n$1\r\n1\r\n";
+        let rev_pairs = "*2\r\n*2\r\n$1\r\nb\r\n,2\r\n*2\r\n$1\r\na\r\n,1\r\n";
+        assert_wire(
+            &mut s,
+            &["zrevrange", "z", "0", "-1", "withscores"],
+            rev_flat,
+            rev_pairs,
+        )
+        .await;
+        assert_wire(
+            &mut s,
+            &["zrevrangebyscore", "z", "+inf", "-inf", "withscores"],
+            rev_flat,
+            rev_pairs,
+        )
+        .await;
+
+        // Set operations with scores, and ZRANDMEMBER (single member, so
+        // deterministic).
+        dispatch(&mut s, &["zadd", "r", "1", "only"]).await;
+        let one_flat = "*2\r\n$4\r\nonly\r\n$1\r\n1\r\n";
+        let one_pairs = "*1\r\n*2\r\n$4\r\nonly\r\n,1\r\n";
+        for cmd in ["zunion", "zinter", "zdiff"] {
+            assert_wire(&mut s, &[cmd, "1", "r", "withscores"], one_flat, one_pairs).await;
+        }
+        assert_wire(&mut s, &["zrandmember", "r", "-1"], one_flat, one_pairs).await;
+
+        // Pops: without a count a single flat [member, score]; with one, pairs.
+        assert_wire(
+            &mut s,
+            &["zpopmin", "z"],
+            "*2\r\n$1\r\na\r\n$1\r\n1\r\n",
+            "*2\r\n$1\r\na\r\n,1\r\n",
+        )
+        .await;
+        assert_wire(
+            &mut s,
+            &["zpopmax", "z", "1"],
+            "*2\r\n$1\r\nb\r\n$1\r\n2\r\n",
+            "*1\r\n*2\r\n$1\r\nb\r\n,2\r\n",
+        )
+        .await;
+        assert_wire(&mut s, &["zpopmin", "z", "5"], "*0\r\n", "*0\r\n").await;
+        dispatch(&mut s, &["zadd", "z", "7", "m"]).await;
+        assert_wire(
+            &mut s,
+            &["bzpopmin", "z", "0"],
+            "*3\r\n$1\r\nz\r\n$1\r\nm\r\n$1\r\n7\r\n",
+            "*3\r\n$1\r\nz\r\n$1\r\nm\r\n,7\r\n",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn stream_reply_shapes_per_protocol() {
+        let mut s = test_session();
+        dispatch(&mut s, &["xadd", "st", "1-1", "f", "v"]).await;
+        // XREAD: array of [name, entries] on RESP2, a map on RESP3. Entries
+        // keep their flat field list on both.
+        assert_wire(
+            &mut s,
+            &["xread", "streams", "st", "0-0"],
+            "*1\r\n*2\r\n$2\r\nst\r\n*1\r\n*2\r\n$3\r\n1-1\r\n*2\r\n$1\r\nf\r\n$1\r\nv\r\n",
+            "%1\r\n$2\r\nst\r\n*1\r\n*2\r\n$3\r\n1-1\r\n*2\r\n$1\r\nf\r\n$1\r\nv\r\n",
+        )
+        .await;
+        // Nothing to read: the null array / RESP3 null.
+        assert_wire(&mut s, &["xread", "streams", "st", "$"], "*-1\r\n", "_\r\n").await;
+
+        let info = dispatch_raw(&mut s, &["xinfo", "stream", "st"])
+            .await
+            .remove(0);
+        let RespValue::Map(pairs) = &info else {
+            panic!("XINFO STREAM must be a map, got {info:?}");
+        };
+        assert_eq!(
+            pairs[0].0,
+            RespValue::BulkString(Some(Bytes::from_static(b"length")))
+        );
+        assert_eq!(pairs[0].1, RespValue::Integer(1));
+        // Flat alternating array on RESP2, as before.
+        let flat = crate::testutil::wire(crate::resp::Protocol::Resp2, info);
+        assert!(
+            flat.starts_with("*20\r\n$6\r\nlength\r\n:1\r\n"),
+            "{flat:?}"
+        );
+    }
+
+    /// RESET wipes the session clean: protocol, DB, name, MULTI and WATCH.
+    #[tokio::test]
+    async fn reset_wipes_session_state() {
+        let mut session = test_session();
+        session.set_protocol(crate::resp::Protocol::Resp3);
+        session.set_client_name("conn".into());
+        dispatch(&mut session, &["select", "3"]).await;
+        dispatch(&mut session, &["watch", "k"]).await;
+        dispatch(&mut session, &["multi"]).await;
+        dispatch(&mut session, &["set", "k", "v"]).await;
+
+        assert_eq!(
+            dispatch(&mut session, &["reset"]).await,
+            vec![RespValue::SimpleString(Bytes::from_static(b"RESET"))]
+        );
+        assert_eq!(session.protocol(), crate::resp::Protocol::Resp2);
+        assert_eq!(session.current_db(), 0);
+        assert_eq!(session.client_name(), "");
+        assert!(!session.in_multi());
+        assert!(!session.is_dirty());
+        // The queued SET was discarded along with the transaction.
+        assert_eq!(
+            dispatch(&mut session, &["exec"]).await,
+            vec![RespValue::Error(Bytes::from_static(
+                b"ERR EXEC without MULTI"
+            ))]
+        );
+        assert_eq!(
+            dispatch(&mut session, &["get", "k"]).await,
+            vec![RespValue::BulkString(None)]
+        );
     }
 
     /// WATCH must abort EXEC if the watched key was *written* after WATCH,
@@ -2742,40 +3365,76 @@ mod tests {
 
     #[async_trait::async_trait]
     impl kv::kv::Tx for ConflictingTx {
-        async fn get(&self, key: &[u8]) -> Result<kv::kv::Item, kv::kv::Error> { self.inner.get(key).await }
-        fn set(&self, entry: kv::kv::Entry) -> Result<(), kv::kv::Error> { self.inner.set(entry) }
-        fn delete(&self, key: &[u8]) -> Result<(), kv::kv::Error> { self.inner.delete(key) }
-        async fn new_range_iterator(&self, start: std::ops::Bound<&[u8]>, end: std::ops::Bound<&[u8]>)
-            -> Result<Box<dyn kv::kv::KeyValueIterator>, kv::kv::Error> { self.inner.new_range_iterator(start, end).await }
-        async fn new_prefix_iterator(&self, prefix: &[u8]) -> Result<Box<dyn kv::kv::KeyValueIterator>, kv::kv::Error> {
+        async fn get(&self, key: &[u8]) -> Result<kv::kv::Item, kv::kv::Error> {
+            self.inner.get(key).await
+        }
+        fn set(&self, entry: kv::kv::Entry) -> Result<(), kv::kv::Error> {
+            self.inner.set(entry)
+        }
+        fn delete(&self, key: &[u8]) -> Result<(), kv::kv::Error> {
+            self.inner.delete(key)
+        }
+        async fn new_range_iterator(
+            &self,
+            start: std::ops::Bound<&[u8]>,
+            end: std::ops::Bound<&[u8]>,
+        ) -> Result<Box<dyn kv::kv::KeyValueIterator>, kv::kv::Error> {
+            self.inner.new_range_iterator(start, end).await
+        }
+        async fn new_prefix_iterator(
+            &self,
+            prefix: &[u8],
+        ) -> Result<Box<dyn kv::kv::KeyValueIterator>, kv::kv::Error> {
             self.inner.new_prefix_iterator(prefix).await
         }
         async fn commit(self: Box<Self>) -> Result<Option<kv::kv::WriteHandle>, kv::kv::Error> {
             use std::sync::atomic::Ordering::SeqCst;
             self.commit_attempts.fetch_add(1, SeqCst);
-            if self.failures.try_update(SeqCst, SeqCst, |n| n.checked_sub(1)).is_ok() {
+            if self
+                .failures
+                .try_update(SeqCst, SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
                 self.inner.discard();
                 return Err(kv::kv::Error::Conflict);
             }
             self.inner.commit().await
         }
-        fn discard(self: Box<Self>) { self.inner.discard() }
+        fn discard(self: Box<Self>) {
+            self.inner.discard()
+        }
     }
 
     #[async_trait::async_trait]
     impl crate::common::RedisStore for ConflictingStore {
-        async fn begin(&self, mutating: bool, isolation: kv::kv::TxIsolation) -> Result<Box<dyn kv::kv::Tx>, kv::kv::Error> {
+        async fn begin(
+            &self,
+            mutating: bool,
+            isolation: kv::kv::TxIsolation,
+        ) -> Result<Box<dyn kv::kv::Tx>, kv::kv::Error> {
             Ok(Box::new(ConflictingTx {
                 inner: self.inner.begin(mutating, isolation).await?,
                 failures: self.failures.clone(),
                 commit_attempts: self.commit_attempts.clone(),
             }))
         }
-        async fn close(&self) -> Result<(), kv::kv::Error> { self.inner.close().await }
-        async fn sync(&self) -> Result<(), kv::kv::Error> { self.inner.sync().await }
-        async fn destroy(&self) -> Result<(), kv::kv::Error> { self.inner.destroy().await }
-        async fn drop_prefix(&self, p: &[u8]) -> Result<(), kv::kv::Error> { self.inner.drop_prefix(p).await }
-        async fn await_until(&self, h: kv::kv::WriteHandle, d: std::time::Duration) -> Result<bool, kv::kv::Error> {
+        async fn close(&self) -> Result<(), kv::kv::Error> {
+            self.inner.close().await
+        }
+        async fn sync(&self) -> Result<(), kv::kv::Error> {
+            self.inner.sync().await
+        }
+        async fn destroy(&self) -> Result<(), kv::kv::Error> {
+            self.inner.destroy().await
+        }
+        async fn drop_prefix(&self, p: &[u8]) -> Result<(), kv::kv::Error> {
+            self.inner.drop_prefix(p).await
+        }
+        async fn await_until(
+            &self,
+            h: kv::kv::WriteHandle,
+            d: std::time::Duration,
+        ) -> Result<bool, kv::kv::Error> {
             self.inner.await_until(h, d).await
         }
     }
@@ -2791,7 +3450,10 @@ mod tests {
             failures: std::sync::Arc::new(AtomicUsize::new(failures)),
             commit_attempts: attempts.clone(),
         });
-        let mut session = Session::new(store, std::sync::Arc::new(crate::common::WatchRegistry::new()));
+        let mut session = Session::new(
+            store,
+            std::sync::Arc::new(crate::common::WatchRegistry::new()),
+        );
         session.set_conflict_retry_count(retry_count);
         let reply = dispatch(&mut session, &["set", "k", "v"]).await.remove(0);
         (reply, attempts.load(SeqCst))
@@ -2805,14 +3467,21 @@ mod tests {
         // (retries allowed, conflicts injected, succeeds, commit attempts made)
         for (retries, conflicts, succeeds, attempts) in [
             (0, 0, true, 1),
-            (0, 1, false, 1),   // no retries: the first conflict is fatal
-            (2, 2, true, 3),    // exactly enough retries
-            (2, 3, false, 3),   // one conflict too many
+            (0, 1, false, 1), // no retries: the first conflict is fatal
+            (2, 2, true, 3),  // exactly enough retries
+            (2, 3, false, 3), // one conflict too many
             (5, 3, true, 4),
         ] {
             let (reply, made) = set_with_conflicts(retries, conflicts).await;
-            assert_eq!(reply, if succeeds { ok.clone() } else { failed.clone() }, "retries={retries} conflicts={conflicts}");
-            assert_eq!(made, attempts, "commit attempts for retries={retries} conflicts={conflicts}");
+            assert_eq!(
+                reply,
+                if succeeds { ok.clone() } else { failed.clone() },
+                "retries={retries} conflicts={conflicts}"
+            );
+            assert_eq!(
+                made, attempts,
+                "commit attempts for retries={retries} conflicts={conflicts}"
+            );
         }
     }
 
@@ -2916,7 +3585,10 @@ mod tests {
     async fn select_switches_database() {
         let mut session = test_session();
         dispatch(&mut session, &["set", "foo", "one"]).await;
-        assert_eq!(dispatch(&mut session, &["select", "1"]).await, vec![ok_resp()]);
+        assert_eq!(
+            dispatch(&mut session, &["select", "1"]).await,
+            vec![ok_resp()]
+        );
         assert_eq!(
             dispatch(&mut session, &["get", "foo"]).await,
             vec![RespValue::BulkString(None)]
@@ -3386,8 +4058,11 @@ mod tests {
     async fn json_set_get_roundtrip() {
         let mut session = test_session();
         assert_eq!(
-            dispatch(&mut session, &["json.set", "doc", "$", r#"{"name":"Alice","age":30}"#])
-                .await,
+            dispatch(
+                &mut session,
+                &["json.set", "doc", "$", r#"{"name":"Alice","age":30}"#]
+            )
+            .await,
             vec![ok_resp()]
         );
         assert_eq!(
@@ -3409,11 +4084,7 @@ mod tests {
     #[tokio::test]
     async fn json_get_multi_path() {
         let mut session = test_session();
-        dispatch(
-            &mut session,
-            &["json.set", "doc", "$", r#"{"a":1,"b":2}"#],
-        )
-        .await;
+        dispatch(&mut session, &["json.set", "doc", "$", r#"{"a":1,"b":2}"#]).await;
         assert_eq!(
             json_bulk(&mut session, &["json.get", "doc", "$.a", "$.b"]).await,
             r#"{"$.a":1,"$.b":2}"#
@@ -3470,7 +4141,11 @@ mod tests {
         ));
         // FPHA with a value out of range.
         assert!(matches!(
-            dispatch(&mut session, &["json.set", "doc", "$", "1e40", "FPHA", "FP16"]).await[0],
+            dispatch(
+                &mut session,
+                &["json.set", "doc", "$", "1e40", "FPHA", "FP16"]
+            )
+            .await[0],
             RespValue::Error(_)
         ));
         // Wrong arity.
@@ -3589,7 +4264,12 @@ mod tests {
         let mut session = test_session();
         dispatch(
             &mut session,
-            &["json.set", "doc", "$", r#"{"n":10,"o":{"a":1,"b":2},"s":"hello"}"#],
+            &[
+                "json.set",
+                "doc",
+                "$",
+                r#"{"n":10,"o":{"a":1,"b":2},"s":"hello"}"#,
+            ],
         )
         .await;
 
@@ -3613,7 +4293,11 @@ mod tests {
         );
 
         assert_eq!(
-            dispatch(&mut session, &["json.strappend", "doc", "$.s", r#"" world""#]).await,
+            dispatch(
+                &mut session,
+                &["json.strappend", "doc", "$.s", r#"" world""#]
+            )
+            .await,
             vec![RespValue::Integer(11)]
         );
         assert_eq!(
@@ -3827,7 +4511,10 @@ mod tests {
         match &dispatch(&mut session, &["client", "info"]).await[0] {
             RespValue::BulkString(Some(info)) => {
                 let info = String::from_utf8_lossy(info).to_string();
-                assert!(info.starts_with(&format!("id={} addr=", session.id())), "got {info:?}");
+                assert!(
+                    info.starts_with(&format!("id={} addr=", session.id())),
+                    "got {info:?}"
+                );
                 assert!(info.contains("db=0"), "got {info:?}");
             }
             other => panic!("expected bulk string, got {other:?}"),
@@ -3890,10 +4577,16 @@ mod tests {
         dispatch(&mut session, &["set", "baz", "qux"]).await;
         assert_eq!(dispatch(&mut session, &["dbsize"]).await, vec![int(2)]);
         // SELECT then DBSIZE is scoped to the new DB.
-        assert_eq!(dispatch(&mut session, &["select", "3"]).await, vec![ok_resp()]);
+        assert_eq!(
+            dispatch(&mut session, &["select", "3"]).await,
+            vec![ok_resp()]
+        );
         assert_eq!(dispatch(&mut session, &["dbsize"]).await, vec![int(0)]);
         // Select back to DB 0: still two keys.
-        assert_eq!(dispatch(&mut session, &["select", "0"]).await, vec![ok_resp()]);
+        assert_eq!(
+            dispatch(&mut session, &["select", "0"]).await,
+            vec![ok_resp()]
+        );
         assert_eq!(dispatch(&mut session, &["dbsize"]).await, vec![int(2)]);
     }
 
@@ -3963,10 +4656,7 @@ mod tests {
     #[tokio::test]
     async fn quit_replies_ok_and_requests_close() {
         let mut session = test_session();
-        assert_eq!(
-            dispatch(&mut session, &["quit"]).await,
-            vec![ok_resp()]
-        );
+        assert_eq!(dispatch(&mut session, &["quit"]).await, vec![ok_resp()]);
         assert!(session.should_close());
     }
 
@@ -3974,16 +4664,10 @@ mod tests {
     async fn flushall_and_flushdb_through_dispatch() {
         let mut session = test_session();
         dispatch(&mut session, &["set", "keep", "1"]).await;
-        assert_eq!(
-            dispatch(&mut session, &["flushdb"]).await,
-            vec![ok_resp()]
-        );
+        assert_eq!(dispatch(&mut session, &["flushdb"]).await, vec![ok_resp()]);
         assert_eq!(dispatch(&mut session, &["dbsize"]).await, vec![int(0)]);
         dispatch(&mut session, &["set", "other", "2"]).await;
-        assert_eq!(
-            dispatch(&mut session, &["flushall"]).await,
-            vec![ok_resp()]
-        );
+        assert_eq!(dispatch(&mut session, &["flushall"]).await, vec![ok_resp()]);
         assert_eq!(dispatch(&mut session, &["dbsize"]).await, vec![int(0)]);
     }
 
@@ -3994,8 +4678,9 @@ mod tests {
         for cmd in [&["flushall"][..], &["flushdb"][..]] {
             assert_eq!(
                 dispatch(&mut session, cmd).await,
-                vec![RespValue::Error(
-                    Bytes::from("Command not allowed inside a transaction".to_string()))]
+                vec![RespValue::Error(Bytes::from(
+                    "Command not allowed inside a transaction".to_string()
+                ))]
             );
         }
         // The rejection dirties the transaction, so EXEC aborts.

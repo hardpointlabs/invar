@@ -14,11 +14,11 @@ use bytes::Bytes;
 use kv::kv::{BoxFuture, Entry, Error as KvError, Tx};
 
 use crate::common::op::{err_resp, DbError, DbOp, DbResult, QueuedOp, WireOp};
-use smallvec::SmallVec;
 use crate::common::session::Session;
 use crate::common::set_keeping_ttl;
 use crate::common::ValueType;
 use crate::resp::RespValue;
+use smallvec::SmallVec;
 
 /// The metadata byte stamped on every stored bitmap (a plain string).
 const TYPE_STRING: u8 = ValueType::String as u8;
@@ -182,8 +182,11 @@ impl DbOp for GetBitOp {
                 return Ok(result);
             }
             let bit_pos = (7 - offset % 8) as u32;
-            let result: DbResult =
-                Box::new(if data[byte_index] & (1u8 << bit_pos) != 0 { 1i64 } else { 0i64 });
+            let result: DbResult = Box::new(if data[byte_index] & (1u8 << bit_pos) != 0 {
+                1i64
+            } else {
+                0i64
+            });
             Ok(result)
         })
     }
@@ -442,7 +445,11 @@ pub fn bit_op(session: &Session, dest_key: &[u8], op: BitOpType, src_keys: &[&[u
         keys: Some({
             let mut ks = SmallVec::<[String; 2]>::new();
             ks.push(String::from_utf8_lossy(&session.public_key(dest_key)).into_owned());
-            ks.extend(src_keys.iter().map(|k| String::from_utf8_lossy(&session.public_key(k)).into_owned()));
+            ks.extend(
+                src_keys
+                    .iter()
+                    .map(|k| String::from_utf8_lossy(&session.public_key(k)).into_owned()),
+            );
             ks
         }),
     }
@@ -488,11 +495,7 @@ impl DbOp for BitOpOp {
                             }
                             Some(s) => {
                                 for j in 0..max_len {
-                                    result[j] = if j < s.len() {
-                                        result[j] & s[j]
-                                    } else {
-                                        0
-                                    };
+                                    result[j] = if j < s.len() { result[j] & s[j] } else { 0 };
                                 }
                             }
                         }
@@ -512,16 +515,14 @@ impl DbOp for BitOpOp {
                         }
                     }
                 }
-                BitOpType::Not => {
-                    match &sources[0] {
-                        None => result.fill(0xFF),
-                        Some(s) => {
-                            for j in 0..max_len {
-                                result[j] = !s[j];
-                            }
+                BitOpType::Not => match &sources[0] {
+                    None => result.fill(0xFF),
+                    Some(s) => {
+                        for j in 0..max_len {
+                            result[j] = !s[j];
                         }
                     }
-                }
+                },
                 BitOpType::Diff => {
                     if let Some(s) = &sources[0] {
                         let n = s.len().min(max_len);
@@ -620,13 +621,16 @@ impl WireOp for IntWire {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kv::kv::TxIsolation;
     use crate::testutil::test_session;
+    use kv::kv::TxIsolation;
 
     /// Runs a queued op through its own transaction and renders the reply.
     async fn exec(session: &Session, op: QueuedOp) -> RespValue {
         let store = session.store();
-        let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
+        let tx = store
+            .begin(op.is_mutating, TxIsolation::Snapshot)
+            .await
+            .expect("tx");
         let outcome = op.db_op.run(&*tx).await;
         if op.is_mutating {
             tx.commit().await.expect("commit");
@@ -708,29 +712,59 @@ mod tests {
     async fn bit_count_whole_and_ranges() {
         let session = test_session();
         assert_eq!(
-            expect_int(&exec(&session, bit_count(&session, b"missing", false, false, 0, 0, false)).await),
+            expect_int(
+                &exec(
+                    &session,
+                    bit_count(&session, b"missing", false, false, 0, 0, false)
+                )
+                .await
+            ),
             0
         );
         // 0b10101010 → 4 bits.
         set_value(&session, b"k", &[0b10101010]).await;
         assert_eq!(
-            expect_int(&exec(&session, bit_count(&session, b"k", false, false, 0, 0, false)).await),
+            expect_int(
+                &exec(
+                    &session,
+                    bit_count(&session, b"k", false, false, 0, 0, false)
+                )
+                .await
+            ),
             4
         );
         // Byte range [0,0] on 0xFF, 0x00 → 8.
         set_value(&session, b"k2", &[0xFF, 0x00]).await;
         assert_eq!(
-            expect_int(&exec(&session, bit_count(&session, b"k2", true, true, 0, 0, false)).await),
+            expect_int(
+                &exec(
+                    &session,
+                    bit_count(&session, b"k2", true, true, 0, 0, false)
+                )
+                .await
+            ),
             8
         );
         // Byte range [1,1] → 0.
         assert_eq!(
-            expect_int(&exec(&session, bit_count(&session, b"k2", true, true, 1, 1, false)).await),
+            expect_int(
+                &exec(
+                    &session,
+                    bit_count(&session, b"k2", true, true, 1, 1, false)
+                )
+                .await
+            ),
             0
         );
         // Negative start: [ -1, -1 ] = last byte → 0.
         assert_eq!(
-            expect_int(&exec(&session, bit_count(&session, b"k2", true, true, -1, -1, false)).await),
+            expect_int(
+                &exec(
+                    &session,
+                    bit_count(&session, b"k2", true, true, -1, -1, false)
+                )
+                .await
+            ),
             0
         );
         // Bit range [0,3] on 0xFF → 4.
@@ -740,7 +774,13 @@ mod tests {
         );
         // Bit range [8,15] on 0x00 → 0.
         assert_eq!(
-            expect_int(&exec(&session, bit_count(&session, b"k2", true, true, 8, 15, true)).await),
+            expect_int(
+                &exec(
+                    &session,
+                    bit_count(&session, b"k2", true, true, 8, 15, true)
+                )
+                .await
+            ),
             0
         );
     }
@@ -750,11 +790,23 @@ mod tests {
         let session = test_session();
         // Missing key: bit 0 → 0, bit 1 → -1.
         assert_eq!(
-            expect_int(&exec(&session, bit_pos(&session, b"missing", 0, false, 0, 0, false)).await),
+            expect_int(
+                &exec(
+                    &session,
+                    bit_pos(&session, b"missing", 0, false, 0, 0, false)
+                )
+                .await
+            ),
             0
         );
         assert_eq!(
-            expect_int(&exec(&session, bit_pos(&session, b"missing", 1, false, 0, 0, false)).await),
+            expect_int(
+                &exec(
+                    &session,
+                    bit_pos(&session, b"missing", 1, false, 0, 0, false)
+                )
+                .await
+            ),
             -1
         );
         // 0b01000000 → first 1 at bit 1.

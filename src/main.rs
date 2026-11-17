@@ -1,22 +1,26 @@
-use std::net::{SocketAddr, ToSocketAddrs};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use clap::{Parser, ValueEnum};
 use kv::{
     fjall::FjallDb,
     slate::{SlateDb, SlateDbOpts},
 };
-use redis::{ListenAddr, RedisListener, RedisStore, DEFAULT_CONFLICT_RETRY_COUNT};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use redis::{ListenAddr, RedisListener, RedisStore, DEFAULT_CONFLICT_RETRY_COUNT};
+use std::net::{SocketAddr, ToSocketAddrs};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::task::{JoinHandle, JoinSet};
-use tokio::time::{Duration, timeout};
+use tokio::time::{timeout, Duration};
 
 /// Maps a request line (`<METHOD> <PATH> HTTP/1.x`) to a status line and body.
-fn route(request_line: &str, ready: &AtomicBool, metrics: &PrometheusHandle) -> (&'static str, String) {
+fn route(
+    request_line: &str,
+    ready: &AtomicBool,
+    metrics: &PrometheusHandle,
+) -> (&'static str, String) {
     let mut parts = request_line.split_whitespace();
     let (method, target) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
     if method != "GET" && method != "HEAD" {
@@ -32,7 +36,11 @@ fn route(request_line: &str, ready: &AtomicBool, metrics: &PrometheusHandle) -> 
     }
 }
 
-async fn handle_conn(mut sock: TcpStream, ready: Arc<AtomicBool>, metrics: PrometheusHandle) -> std::io::Result<()> {
+async fn handle_conn(
+    mut sock: TcpStream,
+    ready: Arc<AtomicBool>,
+    metrics: PrometheusHandle,
+) -> std::io::Result<()> {
     let mut buf = [0u8; 4096];
     let mut len = 0;
     // Only the request line is needed; read until it is complete.
@@ -125,11 +133,7 @@ enum Backend {
 }
 
 #[derive(Parser)]
-#[command(
-    name = "invar",
-    version,
-    about = "Invar: the diskless document store"
-)]
+#[command(name = "invar", version, about = "Invar: the diskless document store")]
 struct Cli {
     /// Specify which storage backend to use
     #[arg(long, env = "INVAR_BACKEND", value_enum)]
@@ -187,9 +191,7 @@ async fn main() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .init();
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let ready = Arc::new(AtomicBool::new(false));
 
@@ -218,20 +220,24 @@ async fn main() {
                     cache_path: cli.cache_path,
                     cache_mem_limit: cli.cache_mem_limit.unwrap_or(16),
                 })
-                .await.inspect_err(|e| tracing::error!(error = %e, "operation failed"))
+                .await
+                .inspect_err(|e| tracing::error!(error = %e, "operation failed"))
                 .expect("failed to open SlateDB store"),
             )
         }
-        Backend::Memory => {
-            Arc::new(SlateDb::in_memory()
-                .await.inspect_err(|e| tracing::error!(error = %e, "operation failed"))
-                .expect("failed to open in-memory store"))
-        }
+        Backend::Memory => Arc::new(
+            SlateDb::in_memory()
+                .await
+                .inspect_err(|e| tracing::error!(error = %e, "operation failed"))
+                .expect("failed to open in-memory store"),
+        ),
         Backend::Fjall => {
             let path = cli.path.expect("path is required for the Fjall backend");
-            Arc::new(FjallDb::open(path)
-                .inspect_err(|e| tracing::error!(error = %e, "operation failed"))
-                .expect("failed to open Fjall store"))
+            Arc::new(
+                FjallDb::open(path)
+                    .inspect_err(|e| tracing::error!(error = %e, "operation failed"))
+                    .expect("failed to open Fjall store"),
+            )
         }
     };
 
@@ -241,15 +247,15 @@ async fn main() {
         .with_conflict_retry_count(cli.conflict_retry_count);
 
     tokio::select! {
-            result = listener.serve() => {
-                if let Err(e) = result {
-                    tracing::error!(error = %e, "redis listener failed");
-                }
-            },
-            _ = tokio::signal::ctrl_c() => {
-                tracing::info!("shutdown signal received, closing store");
+        result = listener.serve() => {
+            if let Err(e) = result {
+                tracing::error!(error = %e, "redis listener failed");
             }
+        },
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("shutdown signal received, closing store");
         }
+    }
 
     // Fail readiness first so orchestrators stop routing traffic before the store goes away.
     ready.store(false, Ordering::Release);
@@ -257,7 +263,9 @@ async fn main() {
     match timeout(cli.shutdown_timeout, store.close()).await {
         Ok(Ok(())) => tracing::info!("store closed cleanly"),
         Ok(Err(e)) => tracing::error!(error = %e, "error closing store"),
-        Err(_) => tracing::warn!(timeout = ?cli.shutdown_timeout, "store close timed out, exiting anyway"),
+        Err(_) => {
+            tracing::warn!(timeout = ?cli.shutdown_timeout, "store close timed out, exiting anyway")
+        }
     }
 
     if let ListenAddr::Unix(path) = &cli.redis_addr {

@@ -4,8 +4,8 @@
 //! RESP codec ([`resp`]), command dispatch ([`commands`]), and the shared
 //! per-connection plumbing ([`common`]).
 
-pub mod bloom;
 pub mod bitmap;
+pub mod bloom;
 pub mod commands;
 pub mod common;
 pub mod conn;
@@ -23,10 +23,10 @@ pub mod set;
 pub mod strings;
 pub mod zset;
 
-#[cfg(test)]
-pub mod testutil;
 mod script;
 mod stream;
+#[cfg(test)]
+pub mod testutil;
 #[cfg(test)]
 mod watch_tests;
 
@@ -34,4 +34,4 @@ pub use common::session::DEFAULT_CONFLICT_RETRY_COUNT;
 pub use common::{RedisStore, Session, WatchRegistry};
 pub use listener::{ListenAddr, RedisListener};
 pub use pubsub::PubSubRegistry;
-pub use resp::{RespDecoder, RespError, RespValue};
+pub use resp::{downgrade_to_resp2, Protocol, RespDecoder, RespError, RespValue};

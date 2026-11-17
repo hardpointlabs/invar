@@ -6,9 +6,9 @@
 //! and the whole-store teardown operations — which is extracted here into
 //! [`RedisStore`] and blanket-implemented for every concrete backend.
 
-use std::time::Duration;
 use async_trait::async_trait;
 use kv::kv::{Error as KvError, Error, KeyValueStore, Tx, TxIsolation, WriteHandle};
+use std::time::Duration;
 
 /// The subset of [`KeyValueStore`] the Redis server needs, usable through a
 /// trait object so sessions, commands and the listener stay backend-agnostic.

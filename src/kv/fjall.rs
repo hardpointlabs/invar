@@ -18,7 +18,7 @@ use crate::time::now_millis;
 use std::collections::Bound;
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::{Duration};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use fjall::{
@@ -26,7 +26,9 @@ use fjall::{
     OptimisticWriteTx, PersistMode, Readable,
 };
 
-use crate::kv::{BoxFuture, Entry, Error, Item, KeyValueIterator, KeyValueStore, Tx, TxIsolation, WriteHandle};
+use crate::kv::{
+    BoxFuture, Entry, Error, Item, KeyValueIterator, KeyValueStore, Tx, TxIsolation, WriteHandle,
+};
 
 /// Length of the metadata byte prefix on each stored value.
 const META_LEN: usize = 1;
@@ -255,12 +257,16 @@ impl Tx for FjallTx {
         Ok(())
     }
 
-    async fn new_range_iterator(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<Box<dyn KeyValueIterator>, Error> {
+    async fn new_range_iterator(
+        &self,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+    ) -> Result<Box<dyn KeyValueIterator>, Error> {
         let range = (start, end);
         let tx = self.tx.lock().expect("fjall tx mutex poisoned");
         let iter = tx.range::<&[u8], _>(&self.keyspace, range);
         drop(tx);
-        Ok(Box::new(FjallIterator{
+        Ok(Box::new(FjallIterator {
             iter: Some(Mutex::new(iter)),
             cur: None,
             err: None,
@@ -541,7 +547,10 @@ mod tests {
         let store = temp_store();
         write(&store, b"rkey", b"rval").await;
 
-        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("begin");
+        let tx = store
+            .begin(false, TxIsolation::Snapshot)
+            .await
+            .expect("begin");
         let item = tx.get(b"rkey").await.expect("get failed");
         assert_eq!(item.value(), b"rval");
         tx.discard();
@@ -551,7 +560,10 @@ mod tests {
     #[tokio::test]
     async fn begin_mutating() {
         let store = temp_store();
-        let tx = store.begin(true, TxIsolation::Snapshot).await.expect("begin");
+        let tx = store
+            .begin(true, TxIsolation::Snapshot)
+            .await
+            .expect("begin");
         tx.set(Entry::new(b"mkey".to_vec(), b"mval".to_vec()))
             .expect("set failed");
         tx.commit().await.expect("commit failed");
@@ -563,7 +575,10 @@ mod tests {
     #[tokio::test]
     async fn begin_discard() {
         let store = temp_store();
-        let tx = store.begin(true, TxIsolation::Snapshot).await.expect("begin");
+        let tx = store
+            .begin(true, TxIsolation::Snapshot)
+            .await
+            .expect("begin");
         tx.set(Entry::new(b"dkey".to_vec(), b"dval".to_vec()))
             .expect("set failed");
         tx.discard();
@@ -871,7 +886,10 @@ mod tests {
             .await
             .expect("set failed");
 
-        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("begin");
+        let tx = store
+            .begin(false, TxIsolation::Snapshot)
+            .await
+            .expect("begin");
         let mut it = tx.new_prefix_iterator(b"user:").await.expect("iterator");
         let mut keys = Vec::new();
         while it.next().await {
@@ -893,7 +911,10 @@ mod tests {
             write(&store, k.as_bytes(), v.as_bytes()).await;
         }
 
-        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("begin");
+        let tx = store
+            .begin(false, TxIsolation::Snapshot)
+            .await
+            .expect("begin");
         let mut it = tx
             .new_range_iterator(Bound::Included(b"b"), Bound::Excluded(b"d"))
             .await
@@ -915,7 +936,10 @@ mod tests {
             write(&store, k.as_bytes(), v.as_bytes()).await;
         }
 
-        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("begin");
+        let tx = store
+            .begin(false, TxIsolation::Snapshot)
+            .await
+            .expect("begin");
         let mut it = tx
             .new_range_iterator(Bound::Unbounded, Bound::Unbounded)
             .await
@@ -925,10 +949,7 @@ mod tests {
             keys.push(it.item().expect("item after next").key().to_vec());
         }
         assert!(it.err().is_none());
-        assert_eq!(
-            keys,
-            vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
-        );
+        assert_eq!(keys, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
         tx.discard();
         store.close().await.expect("close");
     }
@@ -940,7 +961,10 @@ mod tests {
             write(&store, k.as_bytes(), v.as_bytes()).await;
         }
 
-        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("begin");
+        let tx = store
+            .begin(false, TxIsolation::Snapshot)
+            .await
+            .expect("begin");
         let mut it = tx
             .new_range_iterator(Bound::Excluded(b"b"), Bound::Unbounded)
             .await
@@ -963,7 +987,10 @@ mod tests {
         }
 
         // The end bound must be exclusive: only user:* keys are in range.
-        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("begin");
+        let tx = store
+            .begin(false, TxIsolation::Snapshot)
+            .await
+            .expect("begin");
         let mut it = tx
             .new_range_iterator(Bound::Included(b"user:"), Bound::Excluded(b"user;"))
             .await
@@ -984,7 +1011,10 @@ mod tests {
         write(&store, b"a", b"1").await;
         write(&store, b"b", b"2").await;
 
-        let tx = store.begin(false, TxIsolation::Snapshot).await.expect("begin");
+        let tx = store
+            .begin(false, TxIsolation::Snapshot)
+            .await
+            .expect("begin");
         let mut it = tx
             .new_range_iterator(Bound::Included(b"x"), Bound::Unbounded)
             .await

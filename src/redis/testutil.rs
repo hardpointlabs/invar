@@ -15,6 +15,22 @@ pub(crate) fn test_store() -> Arc<dyn RedisStore> {
     Arc::new(FjallDb::temporary(&path).expect("fjall"))
 }
 
+/// Renders a reply the way a RESP2 connection would see it.
+pub(crate) fn resp2(mut reply: crate::resp::RespValue) -> crate::resp::RespValue {
+    crate::resp::downgrade_to_resp2(&mut reply);
+    reply
+}
+
+/// The bytes a connection speaking `protocol` would receive for `reply`.
+pub(crate) fn wire(protocol: crate::resp::Protocol, reply: crate::resp::RespValue) -> String {
+    use tokio_util::codec::Encoder;
+    let mut codec = crate::resp::RespDecoder::new();
+    codec.set_protocol(protocol);
+    let mut dst = bytes::BytesMut::new();
+    codec.encode(reply, &mut dst).expect("encode");
+    String::from_utf8_lossy(&dst).into_owned()
+}
+
 /// Builds a session over a fresh test store.
 pub(crate) fn test_session() -> Session {
     Session::new(test_store(), Arc::new(WatchRegistry::new()))
@@ -25,7 +41,10 @@ pub(crate) fn test_session() -> Session {
 pub(crate) async fn exec(session: &Session, op: crate::common::QueuedOp) -> crate::resp::RespValue {
     use kv::kv::TxIsolation;
     let store = session.store();
-    let tx = store.begin(op.is_mutating, TxIsolation::Snapshot).await.expect("tx");
+    let tx = store
+        .begin(op.is_mutating, TxIsolation::Snapshot)
+        .await
+        .expect("tx");
     let outcome = op.db_op.run(&*tx).await;
     if op.is_mutating {
         tx.commit().await.expect("commit");
@@ -82,7 +101,9 @@ pub(crate) async fn namespace_of(session: &Session, key: &[u8]) -> Vec<u8> {
     let tx = store.begin(false, TxIsolation::Snapshot).await.expect("tx");
     let item = tx.get(&public).await.expect("key exists");
     assert!(is_namespaced(item.metadata()), "key has no namespace");
-    prefix_of(&item, &session.private_key(key)).expect("trailer").to_vec()
+    prefix_of(&item, &session.private_key(key))
+        .expect("trailer")
+        .to_vec()
 }
 
 /// Converts the compound key `key` from the namespaced layout to the legacy
@@ -98,13 +119,21 @@ pub(crate) async fn legacy_key(session: &Session, key: &[u8]) {
     let store = session.store();
     let tx = store.begin(true, TxIsolation::Snapshot).await.expect("tx");
     let item = tx.get(&public).await.expect("key exists");
-    assert!(is_namespaced(item.metadata()), "key is already in the legacy layout");
+    assert!(
+        is_namespaced(item.metadata()),
+        "key is already in the legacy layout"
+    );
 
     let from = prefix_of(&item, &legacy).expect("trailer");
     crate::keys::move_elements(&*tx, &public, base_type(item.metadata()), &from, &legacy)
         .await
         .expect("move elements");
     let value = payload(&item).expect("payload").to_vec();
-    tx.set(Entry::new(public, value).metadata(base_type(item.metadata())).keep_ttl_of(&item)).expect("set");
+    tx.set(
+        Entry::new(public, value)
+            .metadata(base_type(item.metadata()))
+            .keep_ttl_of(&item),
+    )
+    .expect("set");
     tx.commit().await.expect("commit");
 }
