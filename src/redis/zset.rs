@@ -2506,7 +2506,9 @@ impl WireOp for ScoredArrayWire {
         match result {
             Ok(res) => match res.downcast::<Vec<Vec<u8>>>() {
                 Ok(flat) => RespValue::Pairs(
-                    flat.chunks_exact(2)
+                    flat.as_chunks::<2>()
+                        .0
+                        .iter()
                         .map(|p| {
                             (
                                 RespValue::BulkString(Some(Bytes::copy_from_slice(&p[0]))),

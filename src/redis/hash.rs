@@ -1173,7 +1173,9 @@ impl WireOp for HGetAllWire {
 
 /// Pairs up a flat `[a, b, a, b, ...]` list of bulk strings.
 fn bulk_pairs(flat: &[Vec<u8>]) -> Vec<(RespValue, RespValue)> {
-    flat.chunks_exact(2)
+    flat.as_chunks::<2>()
+        .0
+        .iter()
         .map(|kv| {
             (
                 RespValue::BulkString(Some(Bytes::copy_from_slice(&kv[0]))),

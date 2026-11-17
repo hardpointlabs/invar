@@ -1404,7 +1404,9 @@ impl WireOp for XInfoStreamWire {
                 // on RESP2.
                 RespValue::Map(
                     items
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .map(|kv| (kv[0].clone(), kv[1].clone()))
                         .collect(),
                 )
