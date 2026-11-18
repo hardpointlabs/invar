@@ -1,0 +1,70 @@
+name: build-binaries
+
+# Manually-triggered, lightweight build of the invar binaries (no GoReleaser,
+# Zig or Docker). Produces one tar.gz artifact per target; versioning,
+# publishing, signing and OCI packaging are intentionally out of scope.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  INVAR_COMMIT: ${{ github.sha }}
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: blacksmith-4vcpu-ubuntu-2204
+            archive: Linux_x86_64
+          - target: aarch64-unknown-linux-gnu
+            runner: blacksmith-4vcpu-ubuntu-2204-arm
+            archive: Linux_arm64
+          - target: aarch64-apple-darwin
+            runner: blacksmith-6vcpu-macos-latest
+            archive: Darwin_arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: useblacksmith/checkout@v1
+      - name: Set up Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+          cache: false # use Blacksmith's caching instead
+      - name: Sticky disk - cargo registry
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-cargo-registry-${{ matrix.target }}
+          path: ~/.cargo/registry
+      - name: Sticky disk - cargo git
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-cargo-git-${{ matrix.target }}
+          path: ~/.cargo/git
+      - name: Sticky disk - target
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-cargo-target-release-${{ matrix.target }}
+          path: target
+      - name: Build
+        run: cargo build --release --locked -p invar --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          set -euo pipefail
+          name="invar_${{ matrix.archive }}"
+          mkdir -p "dist/${name}"
+          cp "target/${{ matrix.target }}/release/invar" "dist/${name}/"
+          cp LICENSE README.md "dist/${name}/"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: invar_${{ matrix.archive }}
+          path: dist/invar_${{ matrix.archive }}.tar.gz
+          if-no-files-found: error
