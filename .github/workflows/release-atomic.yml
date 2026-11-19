@@ -150,11 +150,11 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            runner: blacksmith-4vcpu-ubuntu-2204
+            runner: blacksmith-4vcpu-ubuntu-2404
             archive: Linux_x86_64
             artifact: invar_Linux_x86_64
           - target: aarch64-unknown-linux-gnu
-            runner: blacksmith-4vcpu-ubuntu-2204-arm
+            runner: blacksmith-4vcpu-ubuntu-2404-arm
             archive: Linux_arm64
             artifact: invar_Linux_arm64
           - target: aarch64-apple-darwin
@@ -363,6 +363,26 @@ jobs:
           # Untagged: the digest is promoted to version tags after the git
           # release exists, so no candidate tag is ever left in a registry.
           outputs: type=image,"name=${{ env.IMAGE_GHCR }},${{ env.IMAGE_HUB }}",push-by-digest=true,name-canonical=true,push=true
+      # Kick the tyres: run the pushed image for the runner's own architecture
+      # (the other one can't run natively here). Catches a rootfs missing the
+      # dynamic loader or libc/libgcc_s, and a wrong binary in the image.
+      - name: Smoke test image
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) platform=linux/amd64 ;;
+            aarch64 | arm64) platform=linux/arm64 ;;
+            *) echo "::error::unsupported runner architecture $(uname -m)"; exit 1 ;;
+          esac
+          out="$(docker run --rm --platform "${platform}" "${IMAGE_GHCR}@${DIGEST}" --version)"
+          echo "${out}"
+          [ "${out}" = "invar ${VERSION}" ] || {
+            echo "::error::expected 'invar ${VERSION}', got '${out}'"
+            exit 1
+          }
 
   # Atomically publish the candidate commit and tag. This is the point of no
   # return: everything before it touched no git refs.
