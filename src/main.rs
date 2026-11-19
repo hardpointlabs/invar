@@ -156,6 +156,15 @@ struct Cli {
     #[arg(long, env = "INVAR_METRICS_ADDR")]
     metrics_addr: Option<String>,
 
+    /// Optional listen address for the Redis-over-HTTP listener (`host:port`).
+    /// The listener is unauthenticated: bind it to loopback or put it behind a proxy
+    #[arg(long, env = "INVAR_HTTP_ADDR")]
+    http_addr: Option<String>,
+
+    /// Maximum HTTP request body size in bytes
+    #[arg(long, env = "INVAR_HTTP_MAX_BODY", default_value_t = redis::http::DEFAULT_MAX_BODY)]
+    http_max_body: usize,
+
     /// Bucket prefix to use with the slate backend
     #[arg(long, env = "INVAR_BUCKET_PREFIX", default_value = "/invar")]
     prefix: String,
@@ -246,6 +255,21 @@ async fn main() {
     let listener = RedisListener::new(cli.redis_addr.clone(), store.clone())
         .with_conflict_retry_count(cli.conflict_retry_count);
 
+    let mut http_server = None;
+    if let Some(addr) = &cli.http_addr {
+        match addr.to_socket_addrs().map(|mut a| a.next()) {
+            Ok(Some(resolved)) => {
+                let http = listener
+                    .http_listener(resolved)
+                    .with_max_body(cli.http_max_body);
+                let token = http.shutdown_token();
+                http_server = Some((token, tokio::spawn(http.serve())));
+            }
+            Ok(None) => tracing::warn!("http listener disabled: '{addr}' resolved to no addresses"),
+            Err(e) => tracing::warn!("http listener disabled: couldn't resolve '{addr}': {e}"),
+        }
+    }
+
     tokio::select! {
         result = listener.serve() => {
             if let Err(e) = result {
@@ -254,6 +278,13 @@ async fn main() {
         },
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("shutdown signal received, closing store");
+        }
+    }
+
+    if let Some((token, task)) = http_server {
+        token.cancel();
+        if let Ok(Err(e)) = task.await {
+            tracing::error!(error = %e, "http listener failed");
         }
     }
 

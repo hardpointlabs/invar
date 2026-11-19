@@ -11,6 +11,7 @@ pub mod common;
 pub mod conn;
 pub mod hash;
 pub mod hll;
+pub mod http;
 pub mod json;
 pub mod keys;
 pub mod list;
@@ -32,6 +33,7 @@ mod watch_tests;
 
 pub use common::session::DEFAULT_CONFLICT_RETRY_COUNT;
 pub use common::{RedisStore, Session, WatchRegistry};
+pub use http::HttpListener;
 pub use listener::{ListenAddr, RedisListener};
 pub use pubsub::PubSubRegistry;
 pub use resp::{downgrade_to_resp2, Protocol, RespDecoder, RespError, RespValue};
