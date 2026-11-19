@@ -3,8 +3,8 @@ name: build-binaries
 # Manually-triggered, lightweight build of the invar binaries (no GoReleaser,
 # Zig or Docker). Produces one tar.gz artifact per target, then packages the
 # two Linux binaries into a multi-arch OCI image pushed to GHCR and Docker Hub.
-# Versioning, signing and SBOMs are intentionally out of scope; images are
-# tagged by commit SHA only.
+# The image is built with max-mode provenance and an SBOM, and signed keylessly
+# with Cosign. Versioning is out of scope; images are tagged by commit SHA only.
 on:
   workflow_dispatch:
 
@@ -78,6 +78,7 @@ jobs:
     permissions:
       contents: read
       packages: write # push to GHCR with GITHUB_TOKEN, as in release.yml
+      id-token: write # keyless Cosign signing via GitHub OIDC
     steps:
       - uses: useblacksmith/checkout@v1
       - name: Download Linux binaries
@@ -112,12 +113,26 @@ jobs:
       - name: Setup Blacksmith Builder
         uses: useblacksmith/setup-docker-builder@v1
       - name: Build and push
+        id: build
         uses: useblacksmith/build-push-action@v2
         with:
           context: ctx
           file: ctx/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          provenance: mode=max
+          sbom: true
           tags: |
             ghcr.io/hardpointlabs/invar:sha-${{ github.sha }}
             docker.io/hardpointlabs/invar:sha-${{ github.sha }}
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+      # The digest is that of the multi-arch index, identical in both registries.
+      - name: Sign images
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes \
+            "ghcr.io/hardpointlabs/invar@${DIGEST}" \
+            "docker.io/hardpointlabs/invar@${DIGEST}"
