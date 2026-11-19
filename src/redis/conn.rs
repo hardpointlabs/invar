@@ -26,7 +26,7 @@ use crate::resp::RespValue;
 
 /// The Invar version and commit banners reported by `LOLWUT`, matching the
 /// Go `config` package defaults. Overridden at release build time via the
-/// INVAR_VERSION/INVAR_COMMIT env vars (see .goreleaser.yaml).
+/// INVAR_VERSION/INVAR_COMMIT env vars.
 pub const VERSION: &str = match option_env!("INVAR_VERSION") {
     Some(v) => v,
     None => "dev",
