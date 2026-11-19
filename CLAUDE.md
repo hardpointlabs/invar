@@ -46,6 +46,11 @@ To run, the storage backend is a mandatory subcommand. For example, invoke the r
 
 Create a new branch based on latest master for new feature development. Create a PR with a clear description of changes made once you're ready and wait for the checks to pass before merging. Direct pushes to master are blocked.
 
+Commit subjects must follow Conventional Commits (`type(scope): description`), because git-cliff builds the changelog from
+them. Allowed types: feat, fix, perf, revert, docs, test, ci, build, chore, style, refactor, rfc. Only `feat`, `fix`,
+`perf`, `revert` and `rfc` appear in the changelog. Hidden types are still valid in commit messages. Enforced locally by `.githooks/commit-msg` (enable in a fresh
+clone with `git config core.hooksPath .githooks`) and in CI by the `commit_messages` job on PRs; GitHub merge commits are exempt.
+
 ## Test
 
 As a general rule, prefer the highest level of test abstraction available- this means the repertoire of integration tests
