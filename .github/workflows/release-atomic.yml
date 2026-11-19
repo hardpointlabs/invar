@@ -509,12 +509,13 @@ jobs:
             "${IMAGE_GHCR}@${DIGEST}" \
             "${IMAGE_HUB}@${DIGEST}"
 
-  # Point the Homebrew cask at the new release. Checksums are taken from the
+  # Point the Homebrew cask at the new release, once the GitHub Release (and so
+  # the download URLs) exists. Checksums are taken from the
   # exact archives the GitHub Release uploads (same artifacts), not rebuilt.
   # The version and every platform's sha256 change together, since they share
   # one `version`. Idempotent: no commit if the cask is already up to date.
   update-homebrew:
-    needs: [prepare, publish-git]
+    needs: [prepare, github-release]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: useblacksmith/checkout@v1
