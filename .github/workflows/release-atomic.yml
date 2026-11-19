@@ -214,6 +214,10 @@ jobs:
           # Flat archive (binary at the root), as GoReleaser produced and the
           # Homebrew cask's `binary "invar"` expects.
           tar -C "dist/${name}" -czf "dist/${name}.tar.gz" invar LICENSE README.md
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          "target/${{ matrix.target }}/release/invar" --version
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
