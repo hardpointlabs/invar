@@ -56,10 +56,14 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: false
-      - name: Install cargo-edit and git-cliff
+      - name: Install cargo-edit, git-cliff and cargo-audit
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-edit,git-cliff
+          tool: cargo-edit,git-cliff,cargo-audit
+      # Fail fast: don't cut a release with a known vulnerability. (Advisory in
+      # ci.yml for PRs, but a hard gate here.)
+      - name: Audit dependencies
+        run: cargo audit
       - name: Create candidate
         id: candidate
         env:
