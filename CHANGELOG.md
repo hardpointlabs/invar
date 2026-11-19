@@ -1,4 +1,6 @@
 
+# [1.1.4](https://github.com/hardpointlabs/invar/compare/v1.1.3...v1.1.4) (2026-11-19)
+
 # [1.1.3](https://github.com/hardpointlabs/invar/compare/v1.1.2...v1.1.3) (2026-11-19)
 
 # [1.1.2](https://github.com/hardpointlabs/invar/compare/v1.1.1...v1.1.2) (2026-11-19)
