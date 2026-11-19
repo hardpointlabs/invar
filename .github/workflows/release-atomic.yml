@@ -313,7 +313,7 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: "4818605" # hardpoint-labs-releaser
+          client-id: Iv23liF6eyCAhWcc271g # hardpoint-labs-releaser
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: invar
@@ -370,7 +370,7 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: "4818605" # hardpoint-labs-releaser
+          client-id: Iv23liF6eyCAhWcc271g # hardpoint-labs-releaser
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: invar
