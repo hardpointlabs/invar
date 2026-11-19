@@ -1,0 +1,25 @@
+#!/bin/sh
+# Enforce Conventional Commits so git-cliff can build the changelog.
+# Enable with: git config core.hooksPath .githooks
+msg_file="$1"
+subject=$(grep -v '^#' "$msg_file" | sed -n '/./{p;q;}')
+
+# Let git-generated subjects through (merges, reverts, fixup/squash autosquash).
+case "$subject" in
+  "Merge "*|"Revert "*|"fixup! "*|"squash! "*|"amend! "*) exit 0 ;;
+esac
+
+types='feat|fix|perf|revert|docs|test|ci|build|chore|style|refactor|rfc'
+if ! printf '%s\n' "$subject" | grep -Eq "^($types)(\([A-Za-z0-9._/-]+\))?!?: .+"; then
+  cat >&2 <<MSG
+Commit message rejected: subject must follow Conventional Commits.
+
+  <type>(<optional scope>): <description>
+
+Allowed types: $(printf '%s' "$types" | sed 's/|/, /g')
+Examples: feat(resp): add HELLO 3, fix(list): off-by-one in LRANGE, rfc: RESP3 support
+
+Got: $subject
+MSG
+  exit 1
+fi
