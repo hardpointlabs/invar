@@ -6,7 +6,7 @@ name: release-atomic
 # Phase 1 (prepare): build a local candidate commit (version bump + changelog)
 #   and tag it. Nothing is pushed to the remote; the candidate travels between
 #   jobs as a git bundle. Every artifact is built and tested from it, and the
-#   images are pushed under a temporary `candidate-<sha>` tag.
+#   images are pushed by digest only, with no tag at all.
 # Phase 2 (publish): only if everything passed, atomically push the candidate
 #   commit and tag to master, then create the GitHub Release and promote the
 #   already-built image digest to the version tags and sign it.
@@ -243,8 +243,8 @@ jobs:
           cargo clippy
           ./run-tests.sh
 
-  # Builds the multi-arch image from the Linux binaries and pushes it under a
-  # temporary tag. Version tags are only applied after the git release exists.
+  # Builds the multi-arch image from the Linux binaries and pushes it by
+  # digest only (no tag). Version tags are only applied after the git release exists.
   image:
     name: image (candidate)
     needs: [prepare, build]
@@ -296,12 +296,11 @@ jobs:
           context: ctx
           file: ctx/Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: true
           provenance: mode=max
           sbom: true
-          tags: |
-            ${{ env.IMAGE_GHCR }}:candidate-${{ needs.prepare.outputs.sha }}
-            ${{ env.IMAGE_HUB }}:candidate-${{ needs.prepare.outputs.sha }}
+          # Untagged: the digest is promoted to version tags after the git
+          # release exists, so no candidate tag is ever left in a registry.
+          outputs: type=image,"name=${{ env.IMAGE_GHCR }},${{ env.IMAGE_HUB }}",push-by-digest=true,name-canonical=true,push=true
 
   # Atomically publish the candidate commit and tag. This is the point of no
   # return: everything before it touched no git refs.
