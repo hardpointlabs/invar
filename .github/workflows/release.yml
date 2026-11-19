@@ -5,10 +5,10 @@ permissions:
   deployments: write
   packages: write
 
+# Disabled as a push trigger: releases are now cut by release-atomic.yml. This
+# workflow is kept for reference and can only be started manually.
 on:
-  push:
-    branches:
-      - master
+  workflow_dispatch:
 
 env:
   ZIG_BUNDLE_URL: "https://ziglang.org/builds/zig-aarch64-linux-0.18.0-dev.4+5a23bf4b2.tar.xz"
