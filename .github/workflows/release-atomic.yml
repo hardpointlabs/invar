@@ -267,12 +267,14 @@ jobs:
           ./run-tests.sh
 
   # Quill signs and notarizes the macOS binary only (Linux binaries aren't
-  # signed). It is cross-platform, so this runs on Linux. Credentials come from
+  # signed). Quill itself is cross-platform, but this runs on an Apple Silicon
+  # runner so the unsigned binary can be smoke-tested before it is signed.
+  # Credentials come from
   # the same secrets the GoReleaser `notarize:` block used, mapped onto the
   # QUILL_* names Quill reads when invoked directly.
   sign-macos:
     needs: [prepare, build]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: blacksmith-6vcpu-macos-latest
     steps:
       - name: Download unsigned macOS binary
         uses: actions/download-artifact@v7
@@ -285,6 +287,12 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/bin"
           curl -sSfL https://get.anchore.io/quill | sh -s -- -b "${RUNNER_TEMP}/bin"
           echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
+      - name: Smoke test unsigned binary
+        run: |
+          set -euo pipefail
+          mkdir -p macos signed
+          tar -xzf unsigned/invar_Darwin_arm64.tar.gz -C macos
+          ./macos/invar --version
       - name: Sign and notarize
         env:
           QUILL_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
@@ -294,8 +302,6 @@ jobs:
           QUILL_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
         run: |
           set -euo pipefail
-          mkdir -p macos signed
-          tar -xzf unsigned/invar_Darwin_arm64.tar.gz -C macos
           quill sign-and-notarize macos/invar -vv
           tar -C macos -czf signed/invar_Darwin_arm64.tar.gz invar LICENSE README.md
       - name: Upload signed artifact
