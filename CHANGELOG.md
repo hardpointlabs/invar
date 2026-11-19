@@ -1,3 +1,29 @@
+
+# [1.1.1](https://github.com/hardpointlabs/invar/compare/v1.1.0...v1.1.1) (2026-11-19)
+
+### Bug Fixes
+
+* **listener:** RESET in subscribe mode no longer closes the connection ([0f4fa3d](https://github.com/hardpointlabs/invar/commit/0f4fa3df02e267c5a9d896a81e3065127d4722aa))
+* **clippy:** Use as_chunks for constant-size chunks ([30073cb](https://github.com/hardpointlabs/invar/commit/30073cb33175ff27f9d30ce3b5aa12d98b4f04db))
+
+
+### Features
+
+* **resp:** RESP3 codec types and protocol-aware encoder (RFC 0002, step 1) ([3a96809](https://github.com/hardpointlabs/invar/commit/3a968095b8453fd9d513e8fdf01581771c7d8c82))
+* **resp:** Session protocol state, HELLO 2|3 and RESET (RFC 0002, step 2) ([cb7fe24](https://github.com/hardpointlabs/invar/commit/cb7fe243796f3d162d044970af6c46b357b86f20))
+* **resp:** Pairs variant for arrays of pairs that RESP2 flattens (RFC 0002) ([88cf047](https://github.com/hardpointlabs/invar/commit/88cf0474df20a176065246e82e4078ae608ce446))
+* **resp:** Pub/sub push frames, PUBSUB NUMSUB map, RESP3 subscribed PING (RFC 0002, step 3) ([8a55682](https://github.com/hardpointlabs/invar/commit/8a55682c0d60695a33c4a1fcc2e3b7a0c57205d4))
+* **resp:** HGETALL map, HRANDFIELD WITHVALUES pairs, set replies (RFC 0002, step 3) ([49f527e](https://github.com/hardpointlabs/invar/commit/49f527e39df11f02228d7d235fcbf2cc713d44f0))
+* **resp:** Zset doubles and WITHSCORES pair replies (RFC 0002, step 3) ([ec1e775](https://github.com/hardpointlabs/invar/commit/ec1e775d0e7cdb694374a202c81d6bdfb5e5a395))
+* **resp:** XREAD and XINFO STREAM maps, NestedMap variant (RFC 0002, step 3) ([2aed12f](https://github.com/hardpointlabs/invar/commit/2aed12f2d7f5f8bed3afed8557f2e1c22a52b72a))
+* **resp:** Dual-protocol integration tests and enable HELLO 3 (RFC 0002, step 4) ([422cbc2](https://github.com/hardpointlabs/invar/commit/422cbc2971ff093f80f4c3b25f2c80fb99270613))
+
+
+### Rfc
+
+* RESP3 support via HELLO negotiation (RFC 0002) ([6de8ff8](https://github.com/hardpointlabs/invar/commit/6de8ff806c1a898991843191f95732268684c63a))
+* Align RESP3 audit list with supported commands ([f651b66](https://github.com/hardpointlabs/invar/commit/f651b667b900c6a07f060803a8a8e0953f13f277))
+
 # [1.1.0](https://github.com/hardpointlabs/invar/compare/v1.0.36...v1.1.0) (2026-10-14)
 
 
