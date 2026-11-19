@@ -1,0 +1,446 @@
+name: release-atomic
+
+# Cuts a release from a manually supplied version (e.g. `1.2.3`; the git tag
+# and image tags are `v1.2.3`). The top-level Cargo.toml is the source of truth.
+#
+# Phase 1 (prepare): build a local candidate commit (version bump + changelog)
+#   and tag it. Nothing is pushed to the remote; the candidate travels between
+#   jobs as a git bundle. Every artifact is built and tested from it, and the
+#   images are pushed under a temporary `candidate-<sha>` tag.
+# Phase 2 (publish): only if everything passed, atomically push the candidate
+#   commit and tag to master, then create the GitHub Release and promote the
+#   already-built image digest to the version tags and sign it.
+#
+# Git, GitHub Releases and registries share no transaction, so phase 2 is split
+# into separate jobs, each idempotent, so "re-run failed jobs" recovers a
+# partial publish without rebuilding anything.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, without the v prefix (e.g. 1.2.3)"
+        required: true
+        type: string
+
+concurrency:
+  group: invar-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  IMAGE_GHCR: ghcr.io/hardpointlabs/invar
+  IMAGE_HUB: docker.io/hardpointlabs/invar
+
+jobs:
+  prepare:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    outputs:
+      version: ${{ steps.candidate.outputs.version }}
+      base: ${{ steps.candidate.outputs.base }}
+      sha: ${{ steps.candidate.outputs.sha }}
+    steps:
+      - name: Require master
+        run: |
+          if [ "${GITHUB_REF}" != "refs/heads/master" ]; then
+            echo "::error::Releases must be dispatched from master (got ${GITHUB_REF})"
+            exit 1
+          fi
+      - uses: useblacksmith/checkout@v1
+        with:
+          fetch-depth: 0 # full history and tags, for git-cliff
+      - name: Set up Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - name: Install cargo-edit and git-cliff
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-edit,git-cliff
+      - name: Create candidate
+        id: candidate
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          if ! [[ "${VERSION}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::version must look like 1.2.3 (no v prefix, no suffix); got '${VERSION}'"
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
+            echo "::error::tag v${VERSION} already exists"
+            exit 1
+          fi
+          current="$(cargo metadata --no-deps --format-version 1 --locked \
+            | jq -r '.packages[] | select(.name == "invar") | .version')"
+          highest="$(printf '%s\n%s\n' "${current}" "${VERSION}" | sort -V | tail -n1)"
+          if [ "${VERSION}" = "${current}" ] || [ "${highest}" != "${VERSION}" ]; then
+            echo "::error::version ${VERSION} must be greater than the current Cargo.toml version ${current}"
+            exit 1
+          fi
+
+          BASE="$(git rev-parse HEAD)"
+          git switch -c "release/v${VERSION}"
+
+          # Cargo.toml (and Cargo.lock) are the source of truth for the version.
+          cargo set-version -p invar "${VERSION}"
+          cargo metadata --locked --format-version 1 >/dev/null # lockfile consistent
+          bumped="$(cargo metadata --no-deps --format-version 1 --locked \
+            | jq -r '.packages[] | select(.name == "invar") | .version')"
+          [ "${bumped}" = "${VERSION}" ] || { echo "::error::version bump failed"; exit 1; }
+
+          # The tag doesn't exist yet; --tag tells git-cliff what to call the release.
+          git cliff --unreleased --tag "v${VERSION}" --strip header -o RELEASE_NOTES.md
+          git cliff --unreleased --tag "v${VERSION}" --prepend CHANGELOG.md
+
+          git add Cargo.toml Cargo.lock CHANGELOG.md
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "chore(release): v${VERSION}"
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              tag -a "v${VERSION}" -m "Release v${VERSION}"
+
+          SHA="$(git rev-parse HEAD)"
+          mkdir -p candidate
+          # Only the commits on top of BASE; consumers check out BASE first.
+          git bundle create candidate/candidate.bundle \
+            "refs/heads/release/v${VERSION}" "refs/tags/v${VERSION}" "^${BASE}"
+          mv RELEASE_NOTES.md candidate/RELEASE_NOTES.md
+
+          {
+            echo "version=${VERSION}"
+            echo "base=${BASE}"
+            echo "sha=${SHA}"
+          } >> "$GITHUB_OUTPUT"
+          cat candidate/RELEASE_NOTES.md
+      - name: Upload candidate
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-candidate
+          path: candidate/
+          if-no-files-found: error
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: prepare
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: blacksmith-4vcpu-ubuntu-2204
+            archive: Linux_x86_64
+          - target: aarch64-unknown-linux-gnu
+            runner: blacksmith-4vcpu-ubuntu-2204-arm
+            archive: Linux_arm64
+          - target: aarch64-apple-darwin
+            runner: blacksmith-6vcpu-macos-latest
+            archive: Darwin_arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      INVAR_VERSION: ${{ needs.prepare.outputs.version }}
+      INVAR_COMMIT: ${{ needs.prepare.outputs.sha }}
+    steps:
+      - uses: useblacksmith/checkout@v1
+        with:
+          ref: ${{ needs.prepare.outputs.base }}
+      - name: Download candidate
+        uses: actions/download-artifact@v7
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/candidate
+      - name: Check out candidate commit
+        run: |
+          set -euo pipefail
+          git fetch "${RUNNER_TEMP}/candidate/candidate.bundle" \
+            "refs/heads/release/v${INVAR_VERSION}:refs/heads/candidate"
+          git checkout -q candidate
+          [ "$(git rev-parse HEAD)" = "${INVAR_COMMIT}" ]
+      - name: Set up Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+          cache: false # use Blacksmith's caching instead
+      - name: Sticky disk - cargo registry
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-cargo-registry-${{ matrix.target }}
+          path: ~/.cargo/registry
+      - name: Sticky disk - cargo git
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-cargo-git-${{ matrix.target }}
+          path: ~/.cargo/git
+      - name: Sticky disk - target
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-cargo-target-release-${{ matrix.target }}
+          path: target
+      - name: Build
+        run: cargo build --release --locked -p invar --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          set -euo pipefail
+          name="invar_${{ matrix.archive }}"
+          mkdir -p "dist/${name}"
+          cp "target/${{ matrix.target }}/release/invar" "dist/${name}/"
+          cp LICENSE README.md "dist/${name}/"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: invar_${{ matrix.archive }}
+          path: dist/invar_${{ matrix.archive }}.tar.gz
+          if-no-files-found: error
+
+  test:
+    needs: prepare
+    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+    steps:
+      - uses: useblacksmith/checkout@v1
+        with:
+          ref: ${{ needs.prepare.outputs.base }}
+      - name: Download candidate
+        uses: actions/download-artifact@v7
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/candidate
+      - name: Check out candidate commit
+        run: |
+          set -euo pipefail
+          git fetch "${RUNNER_TEMP}/candidate/candidate.bundle" \
+            "refs/heads/release/v${{ needs.prepare.outputs.version }}:refs/heads/candidate"
+          git checkout -q candidate
+          [ "$(git rev-parse HEAD)" = "${{ needs.prepare.outputs.sha }}" ]
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - name: Sticky disk - cargo registry
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-cargo-registry
+          path: ~/.cargo/registry
+      - name: Sticky disk - cargo git
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-cargo-git
+          path: ~/.cargo/git
+      - name: Sticky disk - target
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-cargo-target
+          path: target
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: lts
+      - name: Unit and integration tests
+        run: |
+          cargo clippy
+          ./run-tests.sh
+
+  # Builds the multi-arch image from the Linux binaries and pushes it under a
+  # temporary tag. Version tags are only applied after the git release exists.
+  image:
+    name: image (candidate)
+    needs: [prepare, build]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: useblacksmith/checkout@v1
+        with:
+          ref: ${{ needs.prepare.outputs.base }}
+      - name: Download Linux binaries
+        uses: actions/download-artifact@v7
+        with:
+          pattern: invar_Linux_*
+          path: artifacts
+      # Dockerfile copies $TARGETPLATFORM/invar (e.g. linux/amd64/invar).
+      - name: Stage Docker build context
+        run: |
+          set -euo pipefail
+          for pair in "Linux_x86_64:linux/amd64" "Linux_arm64:linux/arm64"; do
+            archive="${pair%%:*}"
+            platform="${pair#*:}"
+            mkdir -p "ctx/${platform}"
+            tar -xzf "artifacts/invar_${archive}/invar_${archive}.tar.gz" \
+              -C "ctx/${platform}" --strip-components=1 "invar_${archive}/invar"
+          done
+          cp Dockerfile ctx/Dockerfile
+          find ctx -type f
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKER_HUB_USER }}
+          password: ${{ secrets.DOCKER_HUB_PAT }}
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
+      - name: Build and push
+        id: build
+        uses: useblacksmith/build-push-action@v2
+        with:
+          context: ctx
+          file: ctx/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: |
+            ${{ env.IMAGE_GHCR }}:candidate-${{ needs.prepare.outputs.sha }}
+            ${{ env.IMAGE_HUB }}:candidate-${{ needs.prepare.outputs.sha }}
+
+  # Atomically publish the candidate commit and tag. This is the point of no
+  # return: everything before it touched no git refs.
+  publish-git:
+    needs: [prepare, build, test, image]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - name: Generate App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: Iv23liF6eyCAhWcc271g # hardpoint-labs-releaser
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: invar
+      - uses: useblacksmith/checkout@v1
+        with:
+          ref: ${{ needs.prepare.outputs.base }}
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+      - name: Download candidate
+        uses: actions/download-artifact@v7
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/candidate
+      - name: Push candidate commit and tag
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BASE: ${{ needs.prepare.outputs.base }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git fetch "${RUNNER_TEMP}/candidate/candidate.bundle" \
+            "refs/heads/release/v${VERSION}:refs/heads/candidate" \
+            "refs/tags/v${VERSION}:refs/tags/v${VERSION}"
+          [ "$(git rev-parse candidate)" = "${SHA}" ]
+
+          # Re-run safety: already published this exact candidate?
+          remote_tag="$(git ls-remote origin "refs/tags/v${VERSION}^{}" | cut -f1)"
+          if [ "${remote_tag}" = "${SHA}" ]; then
+            echo "v${VERSION} already points at ${SHA}; nothing to push"
+            exit 0
+          fi
+          if [ -n "${remote_tag}" ]; then
+            echo "::error::v${VERSION} already exists on the remote at ${remote_tag}, not ${SHA}"
+            exit 1
+          fi
+
+          # Strict concurrency check: master must still be exactly where the
+          # candidate started. Never force-push; re-run the release instead.
+          remote_master="$(git ls-remote origin refs/heads/master | cut -f1)"
+          if [ "${remote_master}" != "${BASE}" ]; then
+            echo "::error::master moved (${remote_master}) since the candidate was based on ${BASE}; re-run the release"
+            exit 1
+          fi
+
+          git push --atomic origin \
+            "${SHA}:refs/heads/master" \
+            "refs/tags/v${VERSION}"
+
+  github-release:
+    needs: [prepare, publish-git]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - name: Generate App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: Iv23liF6eyCAhWcc271g # hardpoint-labs-releaser
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: invar
+      - name: Download candidate (release notes)
+        uses: actions/download-artifact@v7
+        with:
+          name: release-candidate
+          path: candidate
+      - name: Download binaries
+        uses: actions/download-artifact@v7
+        with:
+          pattern: invar_*
+          path: dist
+          merge-multiple: true
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum invar_*.tar.gz > checksums.txt && cat checksums.txt)
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            gh release upload "v${VERSION}" dist/* --clobber
+          else
+            gh release create "v${VERSION}" \
+              --verify-tag \
+              --title "v${VERSION}" \
+              --notes-file candidate/RELEASE_NOTES.md \
+              dist/*
+          fi
+
+  # Promote the already-built digest; no rebuild after the git release.
+  promote-images:
+    needs: [prepare, image, publish-git]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # keyless Cosign signing via GitHub OIDC
+    env:
+      DIGEST: ${{ needs.image.outputs.digest }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKER_HUB_USER }}
+          password: ${{ secrets.DOCKER_HUB_PAT }}
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+      - name: Tag and sign
+        run: |
+          set -euo pipefail
+          test -n "${DIGEST}"
+          for image in "${IMAGE_GHCR}" "${IMAGE_HUB}"; do
+            docker buildx imagetools create \
+              --tag "${image}:v${VERSION}" \
+              --tag "${image}:latest" \
+              "${image}@${DIGEST}"
+          done
+          # Signatures attach to the digest, shared by both registries.
+          cosign sign --yes \
+            "${IMAGE_GHCR}@${DIGEST}" \
+            "${IMAGE_HUB}@${DIGEST}"
