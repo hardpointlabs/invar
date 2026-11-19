@@ -237,7 +237,7 @@ When the path is `/` (empty) and the method is `POST`, the body is always the JS
 | array | array of the above, recursively |
 
 This is the RESP2 reply model on purpose: the Upstash API is RESP2-shaped (the SDKs turn flat `[k, v, k, v, …]` arrays into
-objects themselves), so a reply must reach this table in its RESP2 form even once Invar can produce RESP3 types. See
+objects themselves), so a reply must reach this table in its RESP2 form even though Invar can now produce RESP3 types. See
 *Interaction with RESP3* below.
 
 *Failure*: `{"error": "<message>"}`, where the message is the Redis error text without the leading `-`, including its
@@ -387,28 +387,24 @@ hyper service  ->  parse (path | json | pipeline | multi-exec)
 * **Restricted commands** are filtered before dispatch, as above, and counted as an enqueue-time error in
   `/multi-exec`.
 
-### Interaction with RESP3 (RFC 0002)
+### Interaction with RESP3 (RFC 0002, implemented)
 
-[RFC 0002](0002-resp3-support.md) (in flight) extends `RespValue` with `Null`, `Boolean`, `Double`, `Map`, `Set`, `Push`
-and optionally `Verbatim`, and makes the *encoder* downgrade them to today's RESP2 shapes on RESP2 connections. It also
-exposes that downgrade as a function. This RFC depends on that design in one way:
+[RFC 0002](0002-resp3-support.md) is implemented. `RespValue` now has `Null`, `Boolean`, `Double`, `Map`, `Set`, `Push`,
+`Pairs` and `NestedMap`; command `WireOp`s return the richer value and the *encoder* downgrades it on RESP2 connections.
+Replies coming out of `enqueue_command` are therefore **not** RESP2-shaped until something downgrades them. This RFC
+depends on that design as follows:
 
-* **HTTP replies are always RESP2-shaped.** Each `RespValue` from `enqueue_command` is passed through RESP2 downgrade
-  (map to flat array, set to array, double to a bulk string rendered as `ZSCORE` is today, boolean to `0`/`1`, push to
-  array, verbatim to bulk string, all nulls to `null`) and only then through the JSON table above. The JSON mapper must
-  not match on the RESP3 variants itself; it calls the shared downgrade, so the rules exist once.
-* **HTTP sessions stay on RESP2.** `HELLO` and `RESET` are denied over HTTP (see *Command availability*), so
-  `session.protocol` is never changed from its RESP2 default and commands never see a RESP3 connection.
-* **No dependency on the command audit.** The audit changes which variants commands *emit*; because HTTP downgrades
-  every reply, it needs only RFC 0002's codec work (its step 1: variants, protocol-aware encoder, shared downgrade) and
-  nothing from the `NOPROTO` flip.
-* **Sequencing.** Preferably RFC 0002's step 1 lands first, so the HTTP mapper is written once against the final
-  `RespValue`. If this RFC lands first, its mapper is an exhaustive match over the five RESP2 variants and RFC 0002's
-  step 1 must update it. Either order works, but HTTP integration tests covering `HGETALL`, `ZRANGE ... WITHSCORES`,
-  `SMEMBERS` and `ZSCORE` should exist before RFC 0002's command audit (its step 3) changes reply shapes, because they
-  are what would catch a RESP3 shape leaking into JSON.
-* SSE events are built from the pub/sub registry's messages, not from the `Push` frames the RESP listener sends, and
-  are unaffected.
+* **HTTP replies are always RESP2-shaped.** Each reply is passed through `resp::downgrade_to_resp2` (`Null` to the null
+  bulk string, `Boolean` to `0`/`1`, `Double` to a bulk string rendered as `ZSCORE` is today, `Map` and `Pairs` to a flat
+  array, `NestedMap` to an array of `[key, value]` arrays, `Set` and `Push` to arrays) and only then through the JSON
+  table above. The JSON mapper must not match on the RESP3 variants itself; it calls the shared function, as the Lua
+  bridge and the RESP2 encoder do, so the rules exist once. Forgetting the call is the failure to guard against: an
+  un-downgraded `Map` has no JSON mapping and would be a bug, not a feature.
+* **HTTP sessions stay on RESP2.** `Session` defaults to `Protocol::Resp2`, and `HELLO` and `RESET` are denied over HTTP
+  (see *Command availability*), so the protocol is never changed.
+* **`Upstash-Response-Format: resp2`** needs no special handling: the same downgrade, then the RESP2 encoder.
+* SSE events are built from the pub/sub registry's messages, not from the `Push` frames the RESP listener sends, and are
+  unaffected.
 
 ### Shared state with the RESP listener
 
@@ -460,7 +456,8 @@ in-flight SSE streams).
   SDK defaults (base64 off), `responseEncoding: "base64"`, auto-pipelining, `multi()`, `Script.exec()` falling back from
   `EVALSHA` to `EVAL`, `subscribe`, and a raw-`fetch` file for status codes and path-form behaviour the SDK never sends.
 * **RESP2-shape guard** (see *Interaction with RESP3*): SDK-level tests that `hgetall`, `zrange` with scores,
-  `smembers` and `zscore` return the same values before and after RFC 0002's command audit.
+  `smembers`, `zscore`, `hrandfield` with values and `xread` return RESP2-shaped values (flat arrays, string scores), so
+  that a RESP3 reply type that is added or changed later cannot leak into JSON.
 * **Cross-listener tests**: write over HTTP and read over RESP, `PUBLISH` over HTTP received by a RESP subscriber, an
   HTTP write invalidating a RESP `WATCH`.
 * **Python SDK** is not exercised by the Deno suite. A CI job running a small `upstash-redis` script against the daemon
