@@ -211,7 +211,9 @@ jobs:
           mkdir -p "dist/${name}"
           cp "target/${{ matrix.target }}/release/invar" "dist/${name}/"
           cp LICENSE README.md "dist/${name}/"
-          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          # Flat archive (binary at the root), as GoReleaser produced and the
+          # Homebrew cask's `binary "invar"` expects.
+          tar -C "dist/${name}" -czf "dist/${name}.tar.gz" invar LICENSE README.md
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
@@ -292,10 +294,10 @@ jobs:
           QUILL_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
         run: |
           set -euo pipefail
-          tar -xzf unsigned/invar_Darwin_arm64.tar.gz
-          quill sign-and-notarize invar_Darwin_arm64/invar -vv
-          mkdir -p signed
-          tar -czf signed/invar_Darwin_arm64.tar.gz invar_Darwin_arm64
+          mkdir -p macos signed
+          tar -xzf unsigned/invar_Darwin_arm64.tar.gz -C macos
+          quill sign-and-notarize macos/invar -vv
+          tar -C macos -czf signed/invar_Darwin_arm64.tar.gz invar LICENSE README.md
       - name: Upload signed artifact
         uses: actions/upload-artifact@v6
         with:
@@ -332,7 +334,7 @@ jobs:
             platform="${pair#*:}"
             mkdir -p "ctx/${platform}"
             tar -xzf "artifacts/invar_${archive}/invar_${archive}.tar.gz" \
-              -C "ctx/${platform}" --strip-components=1 "invar_${archive}/invar"
+              -C "ctx/${platform}" invar
           done
           cp Dockerfile ctx/Dockerfile
           find ctx -type f
@@ -506,3 +508,60 @@ jobs:
           cosign sign --yes \
             "${IMAGE_GHCR}@${DIGEST}" \
             "${IMAGE_HUB}@${DIGEST}"
+
+  # Point the Homebrew cask at the new release. Checksums are taken from the
+  # exact archives the GitHub Release uploads (same artifacts), not rebuilt.
+  # The version and every platform's sha256 change together, since they share
+  # one `version`. Idempotent: no commit if the cask is already up to date.
+  update-homebrew:
+    needs: [prepare, publish-git]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: useblacksmith/checkout@v1
+        with:
+          ref: ${{ needs.prepare.outputs.base }}
+      - name: Download release archives
+        uses: actions/download-artifact@v7
+        with:
+          pattern: invar_*
+          path: dist
+          merge-multiple: true
+      - name: Generate App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: Iv23liF6eyCAhWcc271g # hardpoint-labs-releaser
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: homebrew-tap
+      - name: Check out tap
+        uses: useblacksmith/checkout@v1
+        with:
+          repository: ${{ github.repository_owner }}/homebrew-tap
+          token: ${{ steps.app-token.outputs.token }}
+          path: tap
+      - name: Update cask
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          args=()
+          for f in dist/invar_*.tar.gz; do
+            name="$(basename "${f}" .tar.gz)"
+            args+=("${name}=$(sha256sum "${f}" | cut -d' ' -f1)")
+          done
+          printf '%s\n' "${args[@]}"
+          python3 scripts/update-homebrew-cask.py tap/Casks/invar.rb "${VERSION}" "${args[@]}"
+          cd tap
+          if git diff --quiet; then
+            echo "cask already up to date"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -qam "Brew formula update for invar version v${VERSION}"
+          for attempt in 1 2 3; do
+            git pull -q --rebase && git push && exit 0
+            sleep $((attempt * 3))
+          done
+          exit 1
