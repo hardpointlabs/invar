@@ -177,6 +177,19 @@ impl RedisListener {
         self
     }
 
+    /// Builds an HTTP listener (RFC 0003) over this listener's store, watch
+    /// registry, pub/sub registry and conflict retry count, so both front ends
+    /// operate on the same state.
+    pub fn http_listener(&self, addr: std::net::SocketAddr) -> crate::http::HttpListener {
+        crate::http::HttpListener::new(
+            addr,
+            self.store.clone(),
+            self.registry.clone(),
+            self.pubsub.clone(),
+        )
+        .with_conflict_retry_count(self.conflict_retry_count)
+    }
+
     /// Binds and accepts connections forever. Each connection is handled on
     /// its own Tokio task.
     pub async fn serve(self) -> std::io::Result<()> {
