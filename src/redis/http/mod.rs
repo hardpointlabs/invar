@@ -316,7 +316,7 @@ async fn route(req: Request<Incoming>, ctx: &Arc<Ctx>) -> (Endpoint, Response<Bo
 
     let body = match read_body(req, ctx.max_body).await {
         Ok(b) => b,
-        Err(resp) => return (endpoint, resp),
+        Err((status, msg)) => return (endpoint, json_error(status, msg)),
     };
 
     let resp = match endpoint {
@@ -349,14 +349,16 @@ async fn route(req: Request<Incoming>, ctx: &Arc<Ctx>) -> (Endpoint, Response<Bo
     (endpoint, resp)
 }
 
-/// Reads the request body, enforcing the size limit before buffering it.
-async fn read_body(req: Request<Incoming>, max: usize) -> Result<Bytes, Response<Body>> {
-    let too_large = || {
-        json_error(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "ERR max request size exceeded",
-        )
-    };
+/// Reads the request body, enforcing the size limit before buffering it. The
+/// error is the status and message to answer with.
+async fn read_body(
+    req: Request<Incoming>,
+    max: usize,
+) -> Result<Bytes, (StatusCode, &'static str)> {
+    const TOO_LARGE: (StatusCode, &str) = (
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "ERR max request size exceeded",
+    );
     if let Some(len) = req
         .headers()
         .get(CONTENT_LENGTH)
@@ -364,7 +366,7 @@ async fn read_body(req: Request<Incoming>, max: usize) -> Result<Bytes, Response
         .and_then(|v| v.parse::<usize>().ok())
     {
         if len > max {
-            return Err(too_large());
+            return Err(TOO_LARGE);
         }
     }
     let collect = Limited::new(req.into_body(), max).collect();
@@ -374,16 +376,10 @@ async fn read_body(req: Request<Incoming>, max: usize) -> Result<Bytes, Response
             if e.downcast_ref::<http_body_util::LengthLimitError>()
                 .is_some() =>
         {
-            Err(too_large())
+            Err(TOO_LARGE)
         }
-        Ok(Err(_)) => Err(json_error(
-            StatusCode::BAD_REQUEST,
-            "ERR could not read request body",
-        )),
-        Err(_) => Err(json_error(
-            StatusCode::REQUEST_TIMEOUT,
-            "ERR request body timed out",
-        )),
+        Ok(Err(_)) => Err((StatusCode::BAD_REQUEST, "ERR could not read request body")),
+        Err(_) => Err((StatusCode::REQUEST_TIMEOUT, "ERR request body timed out")),
     }
 }
 
