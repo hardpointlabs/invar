@@ -38,31 +38,59 @@ jobs:
       - uses: taiki-e/install-action@cargo-audit
       - run: cargo audit
   test:
+    # This is a required check, so it can't be filtered with `on.paths` (a
+    # skipped workflow leaves the check pending forever). Instead it always
+    # runs, but exits early (green) unless the PR touches something that can
+    # change the binary or its tests; every later step is gated on `relevant`.
     runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     steps:
       - uses: useblacksmith/checkout@v1
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          fetch-depth: 2 # the PR merge commit and its first parent (the base)
+      - name: Detect relevant changes
+        id: changes
+        run: |
+          # HEAD is the PR's merge commit; HEAD^1 is the base branch tip, so
+          # this diff is exactly what the PR would change.
+          git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed"
+          echo "Changed files:"
+          sed 's/^/  /' "$RUNNER_TEMP/changed"
+          # Anything that can alter the built binary, the unit tests, the
+          # integration tests, or how they are run.
+          if grep -qE '^(src/|test/|\.cargo/|Cargo\.toml$|Cargo\.lock$|build\.rs$|rust-toolchain(\.toml)?$|run-tests\.sh$|\.github/workflows/ci\.yml$)' "$RUNNER_TEMP/changed"; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+            echo "No build- or test-relevant changes; skipping build and tests."
+          fi
+      - if: steps.changes.outputs.relevant == 'true'
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: false # use Blacksmith's caching instead
-      - name: Sticky disk - cargo registry
+      - if: steps.changes.outputs.relevant == 'true'
+        name: Sticky disk - cargo registry
         uses: useblacksmith/stickydisk@v1
         with:
           key: ${{ github.repository }}-cargo-registry
           path: ~/.cargo/registry
-      - name: Sticky disk - cargo git
+      - if: steps.changes.outputs.relevant == 'true'
+        name: Sticky disk - cargo git
         uses: useblacksmith/stickydisk@v1
         with:
           key: ${{ github.repository }}-cargo-git
           path: ~/.cargo/git
-      - name: Sticky disk - target
+      - if: steps.changes.outputs.relevant == 'true'
+        name: Sticky disk - target
         uses: useblacksmith/stickydisk@v1
         with:
           key: ${{ github.repository }}-cargo-target
           path: target
-      - uses: denoland/setup-deno@v2
+      - if: steps.changes.outputs.relevant == 'true'
+        uses: denoland/setup-deno@v2
         with:
           deno-version: lts
-      - name: Build, unit tests, and integration tests
+      - if: steps.changes.outputs.relevant == 'true'
+        name: Build, unit tests, and integration tests
         run: |
           cargo clippy
           ./run-tests.sh
