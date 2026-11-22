@@ -33,7 +33,7 @@
 //! where the data is stored and the value can be renamed without moving it.
 //! The suffixes appended to the prefix are the same either way.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -135,6 +135,10 @@ struct Linked {
     /// entries must be deleted when the list is persisted, or they are left
     /// behind forever.
     removed: Vec<[u8; KEY_LENGTH]>,
+    /// Nodes created or whose value/links changed since load. Only these are
+    /// written by [`persist_list`]; every other loaded node is already stored
+    /// exactly as it is in memory.
+    dirty: HashSet<[u8; KEY_LENGTH]>,
 }
 
 impl Linked {
@@ -145,6 +149,27 @@ impl Linked {
             tail: None,
             nodes: HashMap::new(),
             removed: Vec::new(),
+            dirty: HashSet::new(),
+        }
+    }
+
+    /// Sets a loaded node's `prev` link, marking it dirty if it changed.
+    fn set_prev(&mut self, key: [u8; KEY_LENGTH], prev: Option<[u8; KEY_LENGTH]>) {
+        if let Some(n) = self.nodes.get_mut(&key) {
+            if n.prev != prev {
+                n.prev = prev;
+                self.dirty.insert(key);
+            }
+        }
+    }
+
+    /// Sets a loaded node's `next` link, marking it dirty if it changed.
+    fn set_next(&mut self, key: [u8; KEY_LENGTH], next: Option<[u8; KEY_LENGTH]>) {
+        if let Some(n) = self.nodes.get_mut(&key) {
+            if n.next != next {
+                n.next = next;
+                self.dirty.insert(key);
+            }
         }
     }
 
@@ -176,14 +201,13 @@ impl Linked {
         keys
     }
 
-    /// Prepends `value`, returning the new size.
+    /// Prepends `value`, returning the new size. The current head, if any,
+    /// must be loaded.
     fn add_first(&mut self, value: Vec<u8>) -> u32 {
         let key = random_key();
         let next = self.head;
         if let Some(old) = next {
-            if let Some(n) = self.nodes.get_mut(&old) {
-                n.prev = Some(key);
-            }
+            self.set_prev(old, Some(key));
         } else {
             self.tail = Some(key);
         }
@@ -196,19 +220,19 @@ impl Linked {
                 next,
             },
         );
+        self.dirty.insert(key);
         self.head = Some(key);
         self.size += 1;
         self.size
     }
 
-    /// Appends `value`, returning the new size.
+    /// Appends `value`, returning the new size. The current tail, if any,
+    /// must be loaded.
     fn add_last(&mut self, value: Vec<u8>) -> u32 {
         let key = random_key();
         let prev = self.tail;
         if let Some(old) = prev {
-            if let Some(n) = self.nodes.get_mut(&old) {
-                n.next = Some(key);
-            }
+            self.set_next(old, Some(key));
         } else {
             self.head = Some(key);
         }
@@ -221,12 +245,14 @@ impl Linked {
                 next: None,
             },
         );
+        self.dirty.insert(key);
         self.tail = Some(key);
         self.size += 1;
         self.size
     }
 
-    /// Removes and returns the head element, if any.
+    /// Removes and returns the head element, if any. The head and its
+    /// successor must be loaded.
     fn remove_first(&mut self) -> Option<Vec<u8>> {
         let head = self.head?;
         let node = self.nodes.remove(&head)?;
@@ -235,18 +261,15 @@ impl Linked {
         let new_head = node.next;
         self.head = new_head;
         match new_head {
-            Some(nh) => {
-                if let Some(n) = self.nodes.get_mut(&nh) {
-                    n.prev = None;
-                }
-            }
+            Some(nh) => self.set_prev(nh, None),
             None => self.tail = None,
         }
         self.size = self.size.saturating_sub(1);
         Some(value)
     }
 
-    /// Removes and returns the tail element, if any.
+    /// Removes and returns the tail element, if any. The tail and its
+    /// predecessor must be loaded.
     fn remove_last(&mut self) -> Option<Vec<u8>> {
         let tail = self.tail?;
         let node = self.nodes.remove(&tail)?;
@@ -255,15 +278,29 @@ impl Linked {
         let new_tail = node.prev;
         self.tail = new_tail;
         match new_tail {
-            Some(nt) => {
-                if let Some(n) = self.nodes.get_mut(&nt) {
-                    n.next = None;
-                }
-            }
+            Some(nt) => self.set_next(nt, None),
             None => self.head = None,
         }
         self.size = self.size.saturating_sub(1);
         Some(value)
+    }
+
+    /// Unlinks the loaded node `k` from its neighbours and drops it.
+    fn unlink(
+        &mut self,
+        k: [u8; KEY_LENGTH],
+        prev: Option<[u8; KEY_LENGTH]>,
+        next: Option<[u8; KEY_LENGTH]>,
+    ) {
+        if let Some(p) = prev {
+            self.set_next(p, next);
+        }
+        if let Some(nx) = next {
+            self.set_prev(nx, prev);
+        }
+        self.nodes.remove(&k);
+        self.removed.push(k);
+        self.size = self.size.saturating_sub(1);
     }
 
     /// Removes matching elements from the head for `count == 0` (all) or
@@ -278,20 +315,8 @@ impl Linked {
             let is_match = self.nodes.get(&k).is_some_and(|n| n.value == value)
                 && (count == 0 || removed < count);
             if is_match {
-                if let Some(p) = prev {
-                    if let Some(n) = self.nodes.get_mut(&p) {
-                        n.next = next;
-                    }
-                }
-                if let Some(nx) = next {
-                    if let Some(n) = self.nodes.get_mut(&nx) {
-                        n.prev = prev;
-                    }
-                }
-                self.nodes.remove(&k);
-                self.removed.push(k);
+                self.unlink(k, prev, next);
                 removed += 1;
-                self.size = self.size.saturating_sub(1);
             } else {
                 if new_head.is_none() {
                     new_head = Some(k);
@@ -322,20 +347,8 @@ impl Linked {
                 let n = self.nodes.get(&k).expect("key present");
                 (n.prev, n.next)
             };
-            if let Some(p) = prev {
-                if let Some(n) = self.nodes.get_mut(&p) {
-                    n.next = next;
-                }
-            }
-            if let Some(nx) = next {
-                if let Some(n) = self.nodes.get_mut(&nx) {
-                    n.prev = prev;
-                }
-            }
-            self.nodes.remove(&k);
-            self.removed.push(k);
+            self.unlink(k, prev, next);
             removed += 1;
-            self.size = self.size.saturating_sub(1);
         }
         self.head = keys.iter().copied().find(|k| self.nodes.contains_key(k));
         self.tail = keys
@@ -347,35 +360,23 @@ impl Linked {
     }
 
     /// Keeps only the elements at indices `[start, stop]` (inclusive),
-    /// relinking the survivors.
+    /// relinking the survivors. Only the two boundary nodes change.
     fn trim_to(&mut self, start: usize, stop: usize) {
         let keys = self.ordered_keys();
-        let mut new_head: Option<[u8; KEY_LENGTH]> = None;
-        let mut new_tail: Option<[u8; KEY_LENGTH]> = None;
-        let mut prev: Option<[u8; KEY_LENGTH]> = None;
         for (i, &k) in keys.iter().enumerate() {
             if i < start || i > stop {
                 self.nodes.remove(&k);
                 self.removed.push(k);
-                continue;
             }
-            if let Some(n) = self.nodes.get_mut(&k) {
-                n.prev = prev;
-                n.next = None;
-            }
-            if let Some(p) = prev {
-                if let Some(n) = self.nodes.get_mut(&p) {
-                    n.next = Some(k);
-                }
-            }
-            if new_head.is_none() {
-                new_head = Some(k);
-            }
-            prev = Some(k);
-            new_tail = Some(k);
         }
-        self.head = new_head;
-        self.tail = new_tail;
+        self.head = keys.get(start).copied();
+        self.tail = keys.get(stop).or(keys.last()).copied();
+        if let Some(h) = self.head {
+            self.set_prev(h, None);
+        }
+        if let Some(t) = self.tail {
+            self.set_next(t, None);
+        }
         self.size = (stop - start + 1) as u32;
     }
 
@@ -404,28 +405,19 @@ impl Linked {
                 next: if before { Some(pivot_key) } else { pivot_next },
             },
         );
+        self.dirty.insert(new_key);
         if before {
-            if let Some(pp) = pivot_prev {
-                if let Some(n) = self.nodes.get_mut(&pp) {
-                    n.next = Some(new_key);
-                }
-            } else {
-                self.head = Some(new_key);
+            match pivot_prev {
+                Some(pp) => self.set_next(pp, Some(new_key)),
+                None => self.head = Some(new_key),
             }
-            if let Some(p) = self.nodes.get_mut(&pivot_key) {
-                p.prev = Some(new_key);
-            }
+            self.set_prev(pivot_key, Some(new_key));
         } else {
-            if let Some(pn) = pivot_next {
-                if let Some(n) = self.nodes.get_mut(&pn) {
-                    n.prev = Some(new_key);
-                }
-            } else {
-                self.tail = Some(new_key);
+            match pivot_next {
+                Some(pn) => self.set_prev(pn, Some(new_key)),
+                None => self.tail = Some(new_key),
             }
-            if let Some(p) = self.nodes.get_mut(&pivot_key) {
-                p.next = Some(new_key);
-            }
+            self.set_next(pivot_key, Some(new_key));
         }
         self.size += 1;
         true
@@ -598,8 +590,11 @@ async fn load_list(tx: &dyn Tx, public_key: &[u8], node_prefix: &[u8]) -> Result
     }
     for (k, prev, next) in resolve {
         if let Some(node) = ll.nodes.get_mut(&k) {
-            node.prev = prev;
-            node.next = next;
+            if node.prev != prev || node.next != next {
+                node.prev = prev;
+                node.next = next;
+                ll.dirty.insert(k);
+            }
         }
     }
 
@@ -608,7 +603,50 @@ async fn load_list(tx: &dyn Tx, public_key: &[u8], node_prefix: &[u8]) -> Result
     Ok(ll)
 }
 
-/// Persists the sentinel and every live node, mirroring Go's `persistList`.
+/// Loads only the nodes at one end of the list: up to `depth` nodes starting
+/// from the head (following `next`) or the tail (following `prev`). The
+/// sentinel already records both end keys, so push/pop style operations need
+/// not walk the whole chain. `depth` 1 suffices for a push (the old end node
+/// gets a new link); a pop needs 2 (the node being removed and its neighbour).
+/// The result must only be mutated at the loaded end.
+async fn load_end(
+    tx: &dyn Tx,
+    public_key: &[u8],
+    node_prefix: &[u8],
+    from_tail: bool,
+    depth: usize,
+) -> Result<Linked, DbError> {
+    let (size, head_key, tail_key) = read_sentinel(tx, public_key).await?;
+    let mut ll = Linked::new_empty();
+    ll.size = size;
+    ll.head = to_opt_key(&head_key);
+    ll.tail = to_opt_key(&tail_key);
+
+    let mut current = if from_tail { ll.tail } else { ll.head };
+    for _ in 0..depth {
+        let Some(key) = current else { break };
+        let item = tx.get(&node_key(node_prefix, &key)).await?;
+        let val = item.value();
+        if val.len() < 2 * KEY_LENGTH {
+            return Err(DbError::Kv(KvError::KeyNotFound));
+        }
+        let split = val.len() - 2 * KEY_LENGTH;
+        let node = ListNode {
+            key,
+            value: val[..split].to_vec(),
+            prev: to_opt_key(&val[split..split + KEY_LENGTH]),
+            next: to_opt_key(&val[split + KEY_LENGTH..]),
+        };
+        current = if from_tail { node.prev } else { node.next };
+        if ll.nodes.insert(key, node).is_some() {
+            break; // cycle
+        }
+    }
+    Ok(ll)
+}
+
+/// Persists the sentinel and the nodes that were created or changed since
+/// load, and deletes removed nodes. Untouched nodes are not rewritten.
 async fn persist_list(
     tx: &dyn Tx,
     public_key: &[u8],
@@ -617,7 +655,10 @@ async fn persist_list(
 ) -> Result<(), DbError> {
     write_sentinel(tx, public_key, ll.head, ll.tail, ll.size, node_prefix).await?;
     ll.delete_removed_nodes(tx, node_prefix)?;
-    for node in ll.nodes.values() {
+    for key in &ll.dirty {
+        let Some(node) = ll.nodes.get(key) else {
+            continue; // created and removed within the same operation
+        };
         let mut buf = Vec::with_capacity(node.value.len() + 2 * KEY_LENGTH);
         buf.extend_from_slice(&node.value);
         buf.extend_from_slice(&node.prev.unwrap_or([0u8; KEY_LENGTH]));
@@ -921,7 +962,7 @@ impl DbOp for PushOp {
         let only_if_exists = self.only_if_exists;
         Box::pin(async move {
             let node_prefix = resolve_prefix_for_write(tx, &public_key, &node_prefix).await?;
-            let mut ll = match load_list(tx, &public_key, &node_prefix).await {
+            let mut ll = match load_end(tx, &public_key, &node_prefix, at_tail, 1).await {
                 Ok(ll) => ll,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
                     if only_if_exists {
@@ -959,7 +1000,7 @@ impl DbOp for PopOp {
         let from_tail = self.from_tail;
         Box::pin(async move {
             let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
-            let mut ll = match load_list(tx, &public_key, &node_prefix).await {
+            let mut ll = match load_end(tx, &public_key, &node_prefix, from_tail, 2).await {
                 Ok(ll) => ll,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
                     let result: DbResult = Box::new(None::<Vec<u8>>);
@@ -1154,6 +1195,7 @@ impl DbOp for LSetOp {
                 return Err(DbError::Kv(KvError::KeyNotFound));
             };
             ll.nodes.get_mut(&k).expect("node present").value = value;
+            ll.dirty.insert(k);
             persist_list(tx, &public_key, &node_prefix, &ll).await?;
             let result: DbResult = Box::new(());
             Ok(result)
@@ -1189,7 +1231,9 @@ impl DbOp for LRemOp {
             } else {
                 ll.remove_matching(count, &value)
             };
-            if ll.size == 0 {
+            if removed == 0 {
+                // Nothing changed: skip the write entirely.
+            } else if ll.size == 0 {
                 ll.delete_removed_nodes(tx, &node_prefix)?;
                 tx.delete(&public_key)?;
             } else {
@@ -1305,7 +1349,7 @@ impl DbOp for RPopLPushOp {
         Box::pin(async move {
             let src_prefix = resolve_prefix(tx, &src_public, &src_prefix).await?;
             // Pop tail of source.
-            let mut src_ll = match load_list(tx, &src_public, &src_prefix).await {
+            let mut src_ll = match load_end(tx, &src_public, &src_prefix, true, 2).await {
                 Ok(ll) => ll,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
                     let result: DbResult = Box::new(None::<Vec<u8>>);
@@ -1330,7 +1374,7 @@ impl DbOp for RPopLPushOp {
             // Push to head of destination. Resolved only now: it may be the
             // source list, whose sentinel was just rewritten or deleted.
             let dst_prefix = resolve_prefix_for_write(tx, &dst_public, &dst_prefix).await?;
-            let mut dst_ll = match load_list(tx, &dst_public, &dst_prefix).await {
+            let mut dst_ll = match load_end(tx, &dst_public, &dst_prefix, false, 1).await {
                 Ok(ll) => ll,
                 Err(DbError::Kv(KvError::KeyNotFound)) => Linked::new_empty(),
                 Err(e) => return Err(e),
@@ -1655,6 +1699,72 @@ mod tests {
             let key = random_key();
             assert!(!is_zero_key(&key));
             assert!(seen.insert(key), "duplicate key");
+        }
+    }
+
+    /// Mixed head/tail ops (which load only the list ends and write only
+    /// dirty nodes) must leave the stored chain identical to a model deque.
+    #[tokio::test]
+    async fn end_ops_match_model_and_keep_chain_consistent() {
+        use std::collections::VecDeque;
+        let s = test_session();
+        let mut model: VecDeque<Vec<u8>> = VecDeque::new();
+        let mut seed = 12345u64;
+        for i in 0..400u32 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let v = format!("v{}", i % 7).into_bytes();
+            match (seed >> 33) % 6 {
+                0 => {
+                    exec(&s, lpush(&s, b"m", &[Bytes::from(v.clone())])).await;
+                    model.push_front(v);
+                }
+                1 => {
+                    exec(&s, rpush(&s, b"m", &[Bytes::from(v.clone())])).await;
+                    model.push_back(v);
+                }
+                2 => {
+                    let r = exec(&s, lpop(&s, b"m")).await;
+                    let want = model.pop_front();
+                    assert_eq!(expect_bulk(&[r]).map(|b| b.to_vec()), want);
+                }
+                3 => {
+                    let r = exec(&s, rpop(&s, b"m")).await;
+                    let want = model.pop_back();
+                    assert_eq!(expect_bulk(&[r]).map(|b| b.to_vec()), want);
+                }
+                4 => {
+                    exec(&s, rpoplpush(&s, b"m", b"m")).await;
+                    if let Some(x) = model.pop_back() {
+                        model.push_front(x);
+                    }
+                }
+                _ => {
+                    exec(&s, lrem(&s, b"m", 1, &v)).await;
+                    if let Some(pos) = model.iter().position(|x| *x == v) {
+                        model.remove(pos);
+                    }
+                }
+            }
+            if model.is_empty() {
+                let r = exec(&s, llen(&s, b"m")).await;
+                assert_eq!(expect_int(&[r]), 0);
+            } else {
+                let ll = load(&s, b"m").await;
+                assert_eq!(values(&ll), Vec::from(model.clone()), "step {i}");
+                assert_eq!(ll.size as usize, model.len());
+                // The tail must be reachable by following prev links too.
+                let mut back = Vec::new();
+                let mut cur = ll.tail;
+                while let Some(k) = cur {
+                    let n = ll.nodes.get(&k).expect("node");
+                    back.push(n.value.clone());
+                    cur = n.prev;
+                }
+                back.reverse();
+                assert_eq!(back, Vec::from(model.clone()), "step {i} (reverse)");
+            }
         }
     }
 
