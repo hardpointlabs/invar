@@ -163,6 +163,21 @@ impl Linked {
         }
     }
 
+    /// Sets the link pointing away from the walk's start: `next` when walking
+    /// forward, `prev` when walking backward.
+    fn set_fwd(&mut self, key: [u8; KEY_LENGTH], v: Option<[u8; KEY_LENGTH]>, fwd: bool) {
+        if fwd {
+            self.set_next(key, v)
+        } else {
+            self.set_prev(key, v)
+        }
+    }
+
+    /// Sets the link pointing back towards the walk's start.
+    fn set_back(&mut self, key: [u8; KEY_LENGTH], v: Option<[u8; KEY_LENGTH]>, fwd: bool) {
+        self.set_fwd(key, v, !fwd)
+    }
+
     /// Sets a loaded node's `next` link, marking it dirty if it changed.
     fn set_next(&mut self, key: [u8; KEY_LENGTH], next: Option<[u8; KEY_LENGTH]>) {
         if let Some(n) = self.nodes.get_mut(&key) {
@@ -190,7 +205,8 @@ impl Linked {
         Ok(())
     }
 
-    /// The node keys in chain order, head to tail.
+    /// The node keys in chain order, head to tail (fully loaded lists only).
+    #[cfg(test)]
     fn ordered_keys(&self) -> Vec<[u8; KEY_LENGTH]> {
         let mut keys = Vec::with_capacity(self.size as usize);
         let mut cur = self.head;
@@ -285,112 +301,9 @@ impl Linked {
         Some(value)
     }
 
-    /// Unlinks the loaded node `k` from its neighbours and drops it.
-    fn unlink(
-        &mut self,
-        k: [u8; KEY_LENGTH],
-        prev: Option<[u8; KEY_LENGTH]>,
-        next: Option<[u8; KEY_LENGTH]>,
-    ) {
-        if let Some(p) = prev {
-            self.set_next(p, next);
-        }
-        if let Some(nx) = next {
-            self.set_prev(nx, prev);
-        }
-        self.nodes.remove(&k);
-        self.removed.push(k);
-        self.size = self.size.saturating_sub(1);
-    }
-
-    /// Removes matching elements from the head for `count == 0` (all) or
-    /// `count > 0` (up to `count`), returning how many were removed.
-    fn remove_matching(&mut self, count: i64, value: &[u8]) -> i64 {
-        let mut removed = 0i64;
-        let mut new_head: Option<[u8; KEY_LENGTH]> = None;
-        let mut prev: Option<[u8; KEY_LENGTH]> = None;
-        let mut cur = self.head;
-        while let Some(k) = cur {
-            let next = self.nodes.get(&k).and_then(|n| n.next);
-            let is_match = self.nodes.get(&k).is_some_and(|n| n.value == value)
-                && (count == 0 || removed < count);
-            if is_match {
-                self.unlink(k, prev, next);
-                removed += 1;
-            } else {
-                if new_head.is_none() {
-                    new_head = Some(k);
-                }
-                prev = Some(k);
-            }
-            cur = next;
-        }
-        self.head = new_head;
-        self.tail = prev;
-        removed
-    }
-
-    /// Removes the last `-count` matching elements (scanning from the tail),
-    /// returning how many were removed.
-    fn remove_matching_from_tail(&mut self, count: i64, value: &[u8]) -> i64 {
-        let keys = self.ordered_keys();
-        let target = (-count) as usize;
-        let mut removed = 0usize;
-        for &k in keys.iter().rev() {
-            if removed >= target {
-                break;
-            }
-            if self.nodes.get(&k).is_none_or(|n| n.value != value) {
-                continue;
-            }
-            let (prev, next) = {
-                let n = self.nodes.get(&k).expect("key present");
-                (n.prev, n.next)
-            };
-            self.unlink(k, prev, next);
-            removed += 1;
-        }
-        self.head = keys.iter().copied().find(|k| self.nodes.contains_key(k));
-        self.tail = keys
-            .iter()
-            .rev()
-            .copied()
-            .find(|k| self.nodes.contains_key(k));
-        removed as i64
-    }
-
-    /// Keeps only the elements at indices `[start, stop]` (inclusive),
-    /// relinking the survivors. Only the two boundary nodes change.
-    fn trim_to(&mut self, start: usize, stop: usize) {
-        let keys = self.ordered_keys();
-        for (i, &k) in keys.iter().enumerate() {
-            if i < start || i > stop {
-                self.nodes.remove(&k);
-                self.removed.push(k);
-            }
-        }
-        self.head = keys.get(start).copied();
-        self.tail = keys.get(stop).or(keys.last()).copied();
-        if let Some(h) = self.head {
-            self.set_prev(h, None);
-        }
-        if let Some(t) = self.tail {
-            self.set_next(t, None);
-        }
-        self.size = (stop - start + 1) as u32;
-    }
-
-    /// Inserts `value` before or after the first node holding `pivot`,
-    /// returning whether the pivot was found.
-    fn insert(&mut self, before: bool, pivot: &[u8], value: Vec<u8>) -> bool {
-        let Some(pivot_key) = self
-            .ordered_keys()
-            .iter()
-            .copied()
-            .find(|&k| self.nodes.get(&k).is_some_and(|n| n.value == pivot))
-        else {
-            return false;
-        };
+    /// Inserts `value` before or after the loaded node `pivot_key`. The
+    /// pivot's neighbour on the insertion side must be loaded too, if any.
+    fn insert_at(&mut self, pivot_key: [u8; KEY_LENGTH], before: bool, value: Vec<u8>) {
         let (pivot_prev, pivot_next) = {
             let p = self.nodes.get(&pivot_key).expect("pivot present");
             (p.prev, p.next)
@@ -420,7 +333,6 @@ impl Linked {
             self.set_next(pivot_key, Some(new_key));
         }
         self.size += 1;
-        true
     }
 }
 
@@ -603,11 +515,33 @@ async fn load_list(tx: &dyn Tx, public_key: &[u8], node_prefix: &[u8]) -> Result
     Ok(ll)
 }
 
+/// Reads and decodes one node. A missing or truncated entry is
+/// [`KvError::KeyNotFound`], as in [`load_list`].
+async fn read_node(
+    tx: &dyn Tx,
+    node_prefix: &[u8],
+    key: [u8; KEY_LENGTH],
+) -> Result<ListNode, DbError> {
+    let item = tx.get(&node_key(node_prefix, &key)).await?;
+    let val = item.value();
+    if val.len() < 2 * KEY_LENGTH {
+        return Err(DbError::Kv(KvError::KeyNotFound));
+    }
+    let split = val.len() - 2 * KEY_LENGTH;
+    Ok(ListNode {
+        key,
+        value: val[..split].to_vec(),
+        prev: to_opt_key(&val[split..split + KEY_LENGTH]),
+        next: to_opt_key(&val[split + KEY_LENGTH..]),
+    })
+}
+
 /// Loads only the nodes at one end of the list: up to `depth` nodes starting
 /// from the head (following `next`) or the tail (following `prev`). The
-/// sentinel already records both end keys, so push/pop style operations need
-/// not walk the whole chain. `depth` 1 suffices for a push (the old end node
-/// gets a new link); a pop needs 2 (the node being removed and its neighbour).
+/// sentinel already records both end keys, so operations touching only the
+/// ends need not walk the whole chain. `depth` 0 loads just the sentinel
+/// (size, head, tail). `depth` 1 suffices for a push (the old end node gets a
+/// new link); a pop needs 2 (the node being removed and its neighbour).
 /// The result must only be mutated at the loaded end.
 async fn load_end(
     tx: &dyn Tx,
@@ -625,24 +559,205 @@ async fn load_end(
     let mut current = if from_tail { ll.tail } else { ll.head };
     for _ in 0..depth {
         let Some(key) = current else { break };
-        let item = tx.get(&node_key(node_prefix, &key)).await?;
-        let val = item.value();
-        if val.len() < 2 * KEY_LENGTH {
-            return Err(DbError::Kv(KvError::KeyNotFound));
-        }
-        let split = val.len() - 2 * KEY_LENGTH;
-        let node = ListNode {
-            key,
-            value: val[..split].to_vec(),
-            prev: to_opt_key(&val[split..split + KEY_LENGTH]),
-            next: to_opt_key(&val[split + KEY_LENGTH..]),
-        };
+        let node = read_node(tx, node_prefix, key).await?;
         current = if from_tail { node.prev } else { node.next };
         if ll.nodes.insert(key, node).is_some() {
             break; // cycle
         }
     }
     Ok(ll)
+}
+
+/// Reads the node at `index` (which must be below `ll.size`), walking from
+/// whichever end is nearer, like Redis. `ll` need only carry the sentinel.
+async fn node_at(
+    tx: &dyn Tx,
+    node_prefix: &[u8],
+    ll: &Linked,
+    index: usize,
+) -> Result<ListNode, DbError> {
+    let back = ll.size as usize - 1 - index;
+    let (mut cur, steps, fwd) = if index <= back {
+        (ll.head, index, true)
+    } else {
+        (ll.tail, back, false)
+    };
+    for i in 0..=steps {
+        let key = cur.ok_or(DbError::Kv(KvError::KeyNotFound))?;
+        let node = read_node(tx, node_prefix, key).await?;
+        if i == steps {
+            return Ok(node);
+        }
+        cur = if fwd { node.next } else { node.prev };
+    }
+    Err(DbError::Kv(KvError::KeyNotFound))
+}
+
+/// Reads the values at indices `start..=stop` (already clamped to the list),
+/// walking from whichever end makes for fewer skipped nodes.
+async fn values_in_range(
+    tx: &dyn Tx,
+    node_prefix: &[u8],
+    ll: &Linked,
+    start: usize,
+    stop: usize,
+) -> Result<Vec<Vec<u8>>, DbError> {
+    let len = stop - start + 1;
+    let back = ll.size as usize - 1 - stop;
+    let fwd = start <= back;
+    let (mut cur, skip) = if fwd {
+        (ll.head, start)
+    } else {
+        (ll.tail, back)
+    };
+    let mut out = Vec::with_capacity(len);
+    for i in 0..skip + len {
+        let key = cur.ok_or(DbError::Kv(KvError::KeyNotFound))?;
+        let node = read_node(tx, node_prefix, key).await?;
+        cur = if fwd { node.next } else { node.prev };
+        if i >= skip {
+            out.push(node.value);
+        }
+    }
+    if !fwd {
+        out.reverse();
+    }
+    Ok(out)
+}
+
+/// Walks forward from the head until a node holds `value`, returning its
+/// position and the node. Stops at the first match.
+async fn find_first(
+    tx: &dyn Tx,
+    node_prefix: &[u8],
+    ll: &Linked,
+    value: &[u8],
+) -> Result<Option<(usize, ListNode)>, DbError> {
+    let mut cur = ll.head;
+    for pos in 0..ll.size as usize {
+        let Some(key) = cur else { break };
+        let node = read_node(tx, node_prefix, key).await?;
+        if node.value == value {
+            return Ok(Some((pos, node)));
+        }
+        cur = node.next;
+    }
+    Ok(None)
+}
+
+/// Removes elements equal to `value`, walking from the head (`fwd`) or the
+/// tail and stopping once `limit` have been removed (`None` removes all).
+/// Only the visited nodes, and the one node after the last visited, are
+/// loaded. `ll` need only carry the sentinel. Returns how many were removed.
+async fn remove_matching_walk(
+    tx: &dyn Tx,
+    node_prefix: &[u8],
+    ll: &mut Linked,
+    fwd: bool,
+    limit: Option<usize>,
+    value: &[u8],
+) -> Result<i64, DbError> {
+    let total = ll.size as usize;
+    let mut cur = if fwd { ll.head } else { ll.tail };
+    // Last retained node on the start side, and the first one.
+    let mut prev_kept: Option<[u8; KEY_LENGTH]> = None;
+    let mut first_kept: Option<[u8; KEY_LENGTH]> = None;
+    let mut removed = 0usize;
+    let mut visited = 0usize;
+    while let Some(k) = cur {
+        if visited >= total || limit.is_some_and(|l| removed >= l) {
+            break;
+        }
+        visited += 1;
+        let node = read_node(tx, node_prefix, k).await?;
+        let onward = if fwd { node.next } else { node.prev };
+        let is_match = node.value == value;
+        ll.nodes.insert(k, node);
+        // Re-point at the previous retained node (a no-op unless a removal
+        // happened in between).
+        ll.set_back(k, prev_kept, fwd);
+        if is_match {
+            if let Some(p) = prev_kept {
+                ll.set_fwd(p, onward, fwd);
+            }
+            ll.nodes.remove(&k);
+            ll.removed.push(k);
+            ll.size = ll.size.saturating_sub(1);
+            removed += 1;
+        } else {
+            first_kept.get_or_insert(k);
+            prev_kept = Some(k);
+        }
+        cur = onward;
+    }
+    if removed == 0 {
+        return Ok(0);
+    }
+    // `cur` is now the first unvisited node, if any; its back link must skip
+    // whatever was removed before it.
+    if let Some(rest) = cur {
+        let node = read_node(tx, node_prefix, rest).await?;
+        ll.nodes.insert(rest, node);
+        ll.set_back(rest, prev_kept, fwd);
+    }
+    let start_end = first_kept.or(cur);
+    let far_end = if cur.is_none() { Some(prev_kept) } else { None };
+    if fwd {
+        ll.head = start_end;
+        if let Some(t) = far_end {
+            ll.tail = t;
+        }
+    } else {
+        ll.tail = start_end;
+        if let Some(h) = far_end {
+            ll.head = h;
+        }
+    }
+    Ok(removed as i64)
+}
+
+/// Trims the list to indices `[start, stop]` (clamped, and not the whole
+/// list), loading only the nodes being removed plus the two new ends. `ll`
+/// need only carry the sentinel.
+async fn trim_ends(
+    tx: &dyn Tx,
+    node_prefix: &[u8],
+    ll: &mut Linked,
+    start: usize,
+    stop: usize,
+) -> Result<(), DbError> {
+    let size = ll.size as usize;
+    let (old_head, old_tail) = (ll.head, ll.tail);
+    if start > 0 {
+        let mut cur = old_head;
+        for _ in 0..start {
+            let k = cur.ok_or(DbError::Kv(KvError::KeyNotFound))?;
+            cur = read_node(tx, node_prefix, k).await?.next;
+            ll.removed.push(k);
+        }
+        let k = cur.ok_or(DbError::Kv(KvError::KeyNotFound))?;
+        let node = read_node(tx, node_prefix, k).await?;
+        ll.nodes.insert(k, node);
+        ll.set_prev(k, None);
+        ll.head = Some(k);
+    }
+    if stop + 1 < size {
+        let mut cur = old_tail;
+        for _ in 0..size - 1 - stop {
+            let k = cur.ok_or(DbError::Kv(KvError::KeyNotFound))?;
+            cur = read_node(tx, node_prefix, k).await?.prev;
+            ll.removed.push(k);
+        }
+        let k = cur.ok_or(DbError::Kv(KvError::KeyNotFound))?;
+        if !ll.nodes.contains_key(&k) {
+            let node = read_node(tx, node_prefix, k).await?;
+            ll.nodes.entry(k).or_insert(node);
+        }
+        ll.set_next(k, None);
+        ll.tail = Some(k);
+    }
+    ll.size = (stop - start + 1) as u32;
+    Ok(())
 }
 
 /// Persists the sentinel and the nodes that were created or changed since
@@ -1063,7 +1178,7 @@ impl DbOp for LRangeOp {
         let stop = self.stop;
         Box::pin(async move {
             let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
-            let ll = match load_list(tx, &public_key, &node_prefix).await {
+            let ll = match load_end(tx, &public_key, &node_prefix, false, 0).await {
                 Ok(ll) => ll,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
                     let empty: Vec<Vec<u8>> = Vec::new();
@@ -1092,15 +1207,7 @@ impl DbOp for LRangeOp {
                 let result: DbResult = Box::new(empty);
                 return Ok(result);
             }
-            let keys = ll.ordered_keys();
-            let mut out = Vec::new();
-            for i in start..=stop {
-                if let Some(k) = keys.get(i as usize).copied() {
-                    if let Some(n) = ll.nodes.get(&k) {
-                        out.push(n.value.clone());
-                    }
-                }
-            }
+            let out = values_in_range(tx, &node_prefix, &ll, start as usize, stop as usize).await?;
             let result: DbResult = Box::new(out);
             Ok(result)
         })
@@ -1120,7 +1227,7 @@ impl DbOp for LIndexOp {
         let index = self.index;
         Box::pin(async move {
             let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
-            let ll = match load_list(tx, &public_key, &node_prefix).await {
+            let ll = match load_end(tx, &public_key, &node_prefix, false, 0).await {
                 Ok(ll) => ll,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
                     let result: DbResult = Box::new(None::<Vec<u8>>);
@@ -1137,18 +1244,8 @@ impl DbOp for LIndexOp {
                 let result: DbResult = Box::new(None::<Vec<u8>>);
                 return Ok(result);
             }
-            let mut cur = ll.head;
-            for _ in 0..index {
-                cur = match cur {
-                    Some(k) => ll.nodes.get(&k).and_then(|n| n.next),
-                    None => None,
-                };
-            }
-            let value = match cur {
-                Some(k) => ll.nodes.get(&k).map(|n| n.value.clone()),
-                None => None,
-            };
-            let result: DbResult = Box::new(value);
+            let value = node_at(tx, &node_prefix, &ll, index as usize).await?.value;
+            let result: DbResult = Box::new(Some(value));
             Ok(result)
         })
     }
@@ -1169,7 +1266,7 @@ impl DbOp for LSetOp {
         let value = self.value.clone();
         Box::pin(async move {
             let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
-            let mut ll = match load_list(tx, &public_key, &node_prefix).await {
+            let mut ll = match load_end(tx, &public_key, &node_prefix, false, 0).await {
                 Ok(ll) => ll,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
                     return Err(DbError::Kv(KvError::KeyNotFound))
@@ -1184,17 +1281,10 @@ impl DbOp for LSetOp {
             if index < 0 || index >= size {
                 return Err(DbError::Kv(KvError::KeyNotFound));
             }
-            let mut cur = ll.head;
-            for _ in 0..index {
-                cur = match cur {
-                    Some(k) => ll.nodes.get(&k).and_then(|n| n.next),
-                    None => None,
-                };
-            }
-            let Some(k) = cur else {
-                return Err(DbError::Kv(KvError::KeyNotFound));
-            };
-            ll.nodes.get_mut(&k).expect("node present").value = value;
+            let mut node = node_at(tx, &node_prefix, &ll, index as usize).await?;
+            let k = node.key;
+            node.value = value;
+            ll.nodes.insert(k, node);
             ll.dirty.insert(k);
             persist_list(tx, &public_key, &node_prefix, &ll).await?;
             let result: DbResult = Box::new(());
@@ -1218,7 +1308,7 @@ impl DbOp for LRemOp {
         let value = self.value.clone();
         Box::pin(async move {
             let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
-            let mut ll = match load_list(tx, &public_key, &node_prefix).await {
+            let mut ll = match load_end(tx, &public_key, &node_prefix, false, 0).await {
                 Ok(ll) => ll,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
                     let result: DbResult = Box::new(0i64);
@@ -1226,11 +1316,9 @@ impl DbOp for LRemOp {
                 }
                 Err(e) => return Err(e),
             };
-            let removed = if count < 0 {
-                ll.remove_matching_from_tail(count, &value)
-            } else {
-                ll.remove_matching(count, &value)
-            };
+            let limit = (count != 0).then(|| count.unsigned_abs() as usize);
+            let removed =
+                remove_matching_walk(tx, &node_prefix, &mut ll, count >= 0, limit, &value).await?;
             if removed == 0 {
                 // Nothing changed: skip the write entirely.
             } else if ll.size == 0 {
@@ -1260,7 +1348,7 @@ impl DbOp for LTrimOp {
         let stop = self.stop;
         Box::pin(async move {
             let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
-            let mut ll = match load_list(tx, &public_key, &node_prefix).await {
+            let mut ll = match load_end(tx, &public_key, &node_prefix, false, 0).await {
                 Ok(ll) => ll,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
                     let result: DbResult = Box::new(());
@@ -1284,12 +1372,18 @@ impl DbOp for LTrimOp {
                 stop = size - 1;
             }
             if start > stop || start >= size {
+                // Everything goes, so every node has to be visited anyway.
+                let ll = load_list(tx, &public_key, &node_prefix).await?;
                 ll.delete_all_nodes(tx, &node_prefix)?;
                 tx.delete(&public_key)?;
                 let result: DbResult = Box::new(());
                 return Ok(result);
             }
-            ll.trim_to(start as usize, stop as usize);
+            if start == 0 && stop == size - 1 {
+                let result: DbResult = Box::new(());
+                return Ok(result); // nothing to trim
+            }
+            trim_ends(tx, &node_prefix, &mut ll, start as usize, stop as usize).await?;
             persist_list(tx, &public_key, &node_prefix, &ll).await?;
             let result: DbResult = Box::new(());
             Ok(result)
@@ -1314,7 +1408,7 @@ impl DbOp for LInsertOp {
         let value = self.value.clone();
         Box::pin(async move {
             let node_prefix = resolve_prefix(tx, &public_key, &node_prefix).await?;
-            let mut ll = match load_list(tx, &public_key, &node_prefix).await {
+            let mut ll = match load_end(tx, &public_key, &node_prefix, false, 0).await {
                 Ok(ll) => ll,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
                     let result: DbResult = Box::new(-1i64);
@@ -1322,10 +1416,23 @@ impl DbOp for LInsertOp {
                 }
                 Err(e) => return Err(e),
             };
-            if !ll.insert(before, &pivot, value) {
+            let Some((_, pivot_node)) = find_first(tx, &node_prefix, &ll, &pivot).await? else {
                 let result: DbResult = Box::new(-1i64);
                 return Ok(result);
+            };
+            // The neighbour on the insertion side gets a new link too.
+            let pivot_key = pivot_node.key;
+            let neighbour = if before {
+                pivot_node.prev
+            } else {
+                pivot_node.next
+            };
+            ll.nodes.insert(pivot_key, pivot_node);
+            if let Some(nk) = neighbour {
+                let n = read_node(tx, &node_prefix, nk).await?;
+                ll.nodes.insert(nk, n);
             }
+            ll.insert_at(pivot_key, before, value);
             persist_list(tx, &public_key, &node_prefix, &ll).await?;
             let result: DbResult = Box::new(ll.size as i64);
             Ok(result)
@@ -1406,7 +1513,7 @@ impl DbOp for LPosOp {
                     return Err(DbError::WrongType);
                 }
             }
-            let ll = match load_list(tx, &public_key, &node_prefix).await {
+            let ll = match load_end(tx, &public_key, &node_prefix, false, 0).await {
                 Ok(ll) => ll,
                 Err(DbError::Kv(KvError::KeyNotFound)) => {
                     let result: DbResult = Box::new(None::<i64>);
@@ -1414,18 +1521,10 @@ impl DbOp for LPosOp {
                 }
                 Err(e) => return Err(e),
             };
-            let mut pos = 0i64;
-            let mut cur = ll.head;
-            while let Some(k) = cur {
-                let node = ll.nodes.get(&k).expect("node present");
-                if node.value == element {
-                    let result: DbResult = Box::new(Some(pos));
-                    return Ok(result);
-                }
-                cur = node.next;
-                pos += 1;
-            }
-            let result: DbResult = Box::new(None::<i64>);
+            let pos = find_first(tx, &node_prefix, &ll, &element)
+                .await?
+                .map(|(pos, _)| pos as i64);
+            let result: DbResult = Box::new(pos);
             Ok(result)
         })
     }
@@ -1766,6 +1865,207 @@ mod tests {
                 assert_eq!(back, Vec::from(model.clone()), "step {i} (reverse)");
             }
         }
+    }
+
+    /// Asserts the stored chain equals `model` forwards and backwards.
+    async fn assert_chain(s: &Session, model: &[Vec<u8>], ctx: &str) {
+        if model.is_empty() {
+            let r = exec(s, llen(s, b"w")).await;
+            assert_eq!(expect_int(&[r]), 0, "{ctx}");
+            return;
+        }
+        let ll = load(s, b"w").await;
+        assert_eq!(values(&ll), model, "{ctx}");
+        assert_eq!(ll.size as usize, model.len(), "{ctx}");
+        let mut back = Vec::new();
+        let mut cur = ll.tail;
+        while let Some(k) = cur {
+            let n = ll.nodes.get(&k).expect("node");
+            back.push(n.value.clone());
+            cur = n.prev;
+        }
+        back.reverse();
+        assert_eq!(back, model, "{ctx} (reverse)");
+    }
+
+    /// Index/range/insert/rem/trim ops, which walk lazily from the nearer
+    /// end, must agree with a plain `Vec` model and leave a consistent chain.
+    #[tokio::test]
+    async fn bounded_scan_ops_match_model() {
+        let s = test_session();
+        let mut model: Vec<Vec<u8>> = Vec::new();
+        let mut seed = 987654321u64;
+        let mut rnd = move |n: u64| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) % n
+        };
+        for i in 0..600u32 {
+            let v = format!("v{}", rnd(6)).into_bytes();
+            let len = model.len() as i64;
+            let ctx = format!("step {i}");
+            match rnd(9) {
+                0 | 1 => {
+                    exec(&s, rpush(&s, b"w", &[Bytes::from(v.clone())])).await;
+                    model.push(v);
+                }
+                2 => {
+                    exec(&s, lpush(&s, b"w", &[Bytes::from(v.clone())])).await;
+                    model.insert(0, v);
+                }
+                3 => {
+                    let idx = rnd(12) as i64 - 6;
+                    let r = exec(&s, lindex(&s, b"w", idx)).await;
+                    let j = if idx < 0 { idx + len } else { idx };
+                    let want = (0..len).contains(&j).then(|| model[j as usize].clone());
+                    assert_eq!(expect_bulk(&[r]).map(|b| b.to_vec()), want, "{ctx}");
+                }
+                4 => {
+                    let (a, b) = (rnd(14) as i64 - 7, rnd(14) as i64 - 7);
+                    let r = exec(&s, lrange(&s, b"w", a, b)).await;
+                    let norm = |x: i64| if x < 0 { x + len } else { x };
+                    let (a, b) = (norm(a).max(0), norm(b).min(len - 1));
+                    let want: Vec<Vec<u8>> = if a > b || a >= len {
+                        vec![]
+                    } else {
+                        model[a as usize..=b as usize].to_vec()
+                    };
+                    let got: Vec<Vec<u8>> =
+                        expect_bulk_array(&[r]).iter().map(|b| b.to_vec()).collect();
+                    assert_eq!(got, want, "{ctx}");
+                }
+                5 => {
+                    let idx = rnd(12) as i64 - 6;
+                    let r = exec(&s, lset(&s, b"w", idx, &v)).await;
+                    let j = if idx < 0 { idx + len } else { idx };
+                    if (0..len).contains(&j) {
+                        model[j as usize] = v;
+                        assert!(matches!(r, RespValue::SimpleString(_)), "{ctx}");
+                    } else {
+                        assert!(matches!(r, RespValue::Error(_)), "{ctx}");
+                    }
+                }
+                6 => {
+                    let count = rnd(7) as i64 - 3;
+                    let r = exec(&s, lrem(&s, b"w", count, &v)).await;
+                    let mut want = 0i64;
+                    let limit = if count == 0 {
+                        usize::MAX
+                    } else {
+                        count.unsigned_abs() as usize
+                    };
+                    let idxs: Vec<usize> = if count >= 0 {
+                        (0..model.len()).collect()
+                    } else {
+                        (0..model.len()).rev().collect()
+                    };
+                    let mut drop = Vec::new();
+                    for ix in idxs {
+                        if (want as usize) < limit && model[ix] == v {
+                            drop.push(ix);
+                            want += 1;
+                        }
+                    }
+                    drop.sort_unstable_by(|a, b| b.cmp(a));
+                    for ix in drop {
+                        model.remove(ix);
+                    }
+                    assert_eq!(expect_int(&[r]), want, "{ctx}");
+                }
+                7 => {
+                    let before = rnd(2) == 0;
+                    let pivot = format!("v{}", rnd(6)).into_bytes();
+                    let r = exec(&s, linsert(&s, b"w", before, &pivot, &v)).await;
+                    match model.iter().position(|x| *x == pivot) {
+                        Some(p) => {
+                            model.insert(if before { p } else { p + 1 }, v);
+                            assert_eq!(expect_int(&[r]), model.len() as i64, "{ctx}");
+                        }
+                        None => assert_eq!(expect_int(&[r]), -1, "{ctx}"),
+                    }
+                }
+                _ => {
+                    if rnd(3) == 0 {
+                        let (a, b) = (rnd(10) as i64 - 4, rnd(10) as i64 - 4);
+                        exec(&s, ltrim(&s, b"w", a, b)).await;
+                        let norm = |x: i64| if x < 0 { x + len } else { x };
+                        let (a, b) = (norm(a).max(0), norm(b).min(len - 1));
+                        model = if a > b || a >= len {
+                            vec![]
+                        } else {
+                            model[a as usize..=b as usize].to_vec()
+                        };
+                    } else {
+                        let r = exec(&s, lpos(&s, b"w", &v)).await;
+                        let want = model.iter().position(|x| *x == v).map(|p| p as i64);
+                        match (&r, want) {
+                            (RespValue::Integer(n), Some(p)) => assert_eq!(*n, p, "{ctx}"),
+                            (RespValue::BulkString(None), None) => {}
+                            other => panic!("{ctx}: lpos mismatch {other:?}"),
+                        }
+                    }
+                }
+            }
+            assert_chain(&s, &model, &ctx).await;
+        }
+    }
+
+    /// Ops that only need the ends or a prefix of the list must not read the
+    /// nodes in the middle: with a middle node's entry removed from the
+    /// store they still succeed, while one that has to cross it fails.
+    #[tokio::test]
+    async fn bounded_ops_do_not_read_untouched_nodes() {
+        let s = test_session();
+        let items: Vec<Bytes> = (0..10).map(|i| Bytes::from(format!("e{i}"))).collect();
+        exec(&s, rpush(&s, b"w", &items)).await;
+        let ll = load(&s, b"w").await;
+        let victim = ll.ordered_keys()[5]; // index 5 of 0..10: 5 steps from head, 4 from tail
+        {
+            let store = s.store();
+            let tx = store.begin(true, TxIsolation::Snapshot).await.expect("tx");
+            let public_key = s.public_key(b"w");
+            let prefix = resolve_prefix(&*tx, &public_key, &s.private_key(b"w"))
+                .await
+                .expect("prefix");
+            tx.delete(&node_key(&prefix, &victim)).expect("delete");
+            tx.commit().await.expect("commit");
+        }
+        let r = exec(&s, lindex(&s, b"w", 0)).await;
+        assert_eq!(expect_bulk(&[r]).as_deref(), Some(&b"e0"[..]));
+        let r = exec(&s, lindex(&s, b"w", -1)).await;
+        assert_eq!(expect_bulk(&[r]).as_deref(), Some(&b"e9"[..]));
+        let r = exec(&s, lrange(&s, b"w", 0, 3)).await;
+        assert_eq!(expect_bulk_array(&[r]).len(), 4);
+        let r = exec(&s, lrange(&s, b"w", -3, -1)).await;
+        assert_eq!(expect_bulk_array(&[r]).len(), 3);
+        let r = exec(&s, lpos(&s, b"w", b"e2")).await;
+        assert_eq!(r, RespValue::Integer(2));
+        let r = exec(&s, lrem(&s, b"w", 1, b"e1")).await;
+        assert_eq!(expect_int(&[r]), 1);
+        let r = exec(&s, lset(&s, b"w", -1, b"last")).await;
+        assert!(matches!(r, RespValue::SimpleString(_)));
+        let r = exec(&s, linsert(&s, b"w", false, b"e0", b"x")).await;
+        assert_eq!(expect_int(&[r]), 10);
+        // Trimming to the outer nodes only needs to read the removed ends.
+        exec(&s, ltrim(&s, b"w", 0, 3)).await;
+        // Crossing the missing node is an error, not a silent empty reply.
+        let s2 = test_session();
+        exec(&s2, rpush(&s2, b"w", &items)).await;
+        let ll2 = load(&s2, b"w").await;
+        let victim2 = ll2.ordered_keys()[4];
+        {
+            let store = s2.store();
+            let tx = store.begin(true, TxIsolation::Snapshot).await.expect("tx");
+            let public_key = s2.public_key(b"w");
+            let prefix = resolve_prefix(&*tx, &public_key, &s2.private_key(b"w"))
+                .await
+                .expect("prefix");
+            tx.delete(&node_key(&prefix, &victim2)).expect("delete");
+            tx.commit().await.expect("commit");
+        }
+        let r = exec(&s2, lindex(&s2, b"w", 4)).await;
+        assert!(matches!(r, RespValue::Error(_)), "got {r:?}");
     }
 
     // --- namespaced layout (RFC 0001) ---
