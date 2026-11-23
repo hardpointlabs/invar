@@ -37,6 +37,7 @@ use crate::kv::{
 };
 use crate::metrics::MetricsRsRecorder;
 use crate::time::now_millis;
+use crate::usage::UsageReporter;
 
 /// Maps a SlateDB error to the kv abstraction's error space, mirroring the
 /// Go backend: transaction conflicts surface as [`Error::Conflict`],
@@ -119,6 +120,8 @@ pub struct SlateDbOpts {
 pub struct SlateDb {
     db: Db,
     cache: Option<Arc<dyn DbCache>>,
+    /// Periodically samples the object store footprint; stopped on close/drop.
+    usage: Arc<UsageReporter>,
 }
 
 impl SlateDb {
@@ -163,7 +166,12 @@ impl SlateDb {
         };
 
         let db = builder.build().await.map_err(map_slate_error)?;
-        Ok(SlateDb { db, cache })
+        // Must match how SlateDB resolves its own `path`, so we count exactly its keys.
+        let usage = Arc::new(UsageReporter::spawn(
+            store,
+            object_store::path::Path::from(path),
+        ));
+        Ok(SlateDb { db, cache, usage })
     }
 
     async fn delete_scanned(&self, prefix: Option<&[u8]>) -> Result<(), Error> {
@@ -251,6 +259,7 @@ impl KeyValueStore for SlateDb {
     }
 
     async fn close(&self) -> Result<(), Error> {
+        self.usage.stop();
         self.db.close().await.map_err(map_slate_error)?;
         if let Some(cache) = &self.cache {
             cache.close().await.map_err(map_slate_error)?;
