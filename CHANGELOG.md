@@ -1,4 +1,17 @@
 
+# [1.1.5](https://github.com/hardpointlabs/invar/compare/v1.1.4...v1.1.5) (2026-11-23)
+
+### Bug Fixes
+
+* **deps:** Bump url to 2.5.9 for RUSTSEC-2026-0592 ([664cf6f](https://github.com/hardpointlabs/invar/commit/664cf6f15498c28270ae2d7d871f9d2df95aca1f))
+
+
+### Rfc
+
+* Upstash-compatible Redis-over-HTTP listener (draft) ([d08a4d0](https://github.com/hardpointlabs/invar/commit/d08a4d0b17fabff599f79f9d00a9d5deab88a8c0))
+* Renumber Upstash HTTP RFC to 0003; account for RESP3 (RFC 0002) ([25ea6e6](https://github.com/hardpointlabs/invar/commit/25ea6e66b9b650416fa6fa789903863a48143754))
+
+
 # [1.1.4](https://github.com/hardpointlabs/invar/compare/v1.1.3...v1.1.4) (2026-11-19)
 
 # [1.1.3](https://github.com/hardpointlabs/invar/compare/v1.1.2...v1.1.3) (2026-11-19)
