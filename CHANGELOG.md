@@ -1,4 +1,23 @@
 
+# [1.1.6](https://github.com/hardpointlabs/invar/compare/v1.1.5...v1.1.6) (2026-11-27)
+
+### Bug Fixes
+
+* Avoid large Err variant in http read_body ([94b683b](https://github.com/hardpointlabs/invar/commit/94b683ba09b18708d3d57b0a6499e94ebaeb7d1d))
+
+
+### Features
+
+* **kv:** Report object store footprint as an hourly gauge ([85cfb01](https://github.com/hardpointlabs/invar/commit/85cfb0116b8efcf35aba3c83923e19801891957e))
+* Add Redis-over-HTTP listener (RFC 0003, first pass) ([af3245d](https://github.com/hardpointlabs/invar/commit/af3245dd7b6c8970cc9f922ea7081be55c217de9))
+
+
+### Performance Improvements
+
+* **list:** Write only dirty nodes and load only list ends for push/pop ([84e42d5](https://github.com/hardpointlabs/invar/commit/84e42d5d5adb837145f95a74d70209bc0454e502))
+* **list:** Walk lazily from the nearer end for index, range and scan ops ([af44437](https://github.com/hardpointlabs/invar/commit/af444371dc2ef7da45fcb97439333507c7b121f3))
+
+
 # [1.1.5](https://github.com/hardpointlabs/invar/compare/v1.1.4...v1.1.5) (2026-11-23)
 
 ### Bug Fixes
