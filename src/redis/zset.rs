@@ -2667,7 +2667,21 @@ impl DbOp for BzpopOp {
                 let own_tx = self.store.begin(true, TxIsolation::Snapshot).await?;
                 match try_pop(&*own_tx, &self.nodes, self.want_min).await {
                     Ok(Some(result)) => {
-                        own_tx.commit().await.map_err(DbError::Kv)?;
+                        // This commit is outside the dispatcher's, so it
+                        // records its own write for `WATCH`.
+                        let popped = self
+                            .nodes
+                            .iter()
+                            .filter(|(_, raw_key)| *raw_key == result.key)
+                            .map(|(n, _)| String::from_utf8_lossy(&n.public_key).into_owned())
+                            .collect();
+                        let write = self
+                            .registry
+                            .begin_write([], popped)
+                            .expect("a write with no watched keys is never refused");
+                        let committed = own_tx.commit().await;
+                        write.finish(&committed);
+                        committed.map_err(DbError::Kv)?;
                         Ok(Box::new(Some(result)) as DbResult)
                     }
                     Ok(None) => {

@@ -288,6 +288,19 @@ async fn discard_clears_watches(store: Arc<dyn RedisStore>) {
     assert!(is_committed(&run(&mut a, &["exec"]).await));
 }
 
+/// A pop that leaves the sorted set in place still writes to it.
+async fn blocking_pop_without_waiting(store: Arc<dyn RedisStore>) {
+    let r = watch_then(
+        store,
+        &[&["zadd", "z", "1", "m", "2", "n"]],
+        "z",
+        &[&["bzpopmin", "z", "0"]],
+        &["zadd", "z", "3", "o"],
+    )
+    .await;
+    assert_eq!(r, nil());
+}
+
 /// An aborted EXEC must leave none of its queued writes behind.
 async fn aborted_exec_writes_nothing(store: Arc<dyn RedisStore>) {
     let (mut a, mut b) = sessions(store);
@@ -314,9 +327,20 @@ async fn aborted_exec_writes_nothing(store: Arc<dyn RedisStore>) {
 
 // ------------------------------------------------------- interleavings
 
-/// Parks the first SSI transaction just before commit until released.
+/// Where a gated transaction is parked.
+#[derive(Clone, Copy, PartialEq)]
+enum Park {
+    BeforeCommit,
+    /// The writes are visible to other sessions, but `commit` hasn't returned.
+    AfterCommit,
+}
+
+/// Parks one transaction at commit until released.
 struct Gate {
     armed: AtomicBool,
+    park: Park,
+    /// Gate the next transaction of this kind; `None` gates any writable one.
+    isolation: Option<TxIsolation>,
     reached: Notify,
     release: Notify,
 }
@@ -356,9 +380,18 @@ impl Tx for PauseTx {
         self.inner.new_prefix_iterator(prefix).await
     }
     async fn commit(self: Box<Self>) -> Result<Option<WriteHandle>, KvError> {
-        self.gate.reached.notify_one();
-        self.gate.release.notified().await;
-        self.inner.commit().await
+        let PauseTx { inner, gate } = *self;
+        match gate.park {
+            Park::BeforeCommit => {
+                gate.pause().await;
+                inner.commit().await
+            }
+            Park::AfterCommit => {
+                let result = inner.commit().await;
+                gate.pause().await;
+                result
+            }
+        }
     }
     fn discard(self: Box<Self>) {
         // An aborted attempt never reaches commit; don't leave the test hanging.
@@ -371,9 +404,8 @@ impl Tx for PauseTx {
 impl RedisStore for PauseStore {
     async fn begin(&self, mutating: bool, isolation: TxIsolation) -> Result<Box<dyn Tx>, KvError> {
         let tx = self.inner.begin(mutating, isolation).await?;
-        if isolation == TxIsolation::SerializableSnapshot
-            && self.gate.armed.swap(false, Ordering::SeqCst)
-        {
+        let wanted = self.gate.isolation.map_or(mutating, |i| i == isolation);
+        if wanted && self.gate.armed.swap(false, Ordering::SeqCst) {
             Ok(Box::new(PauseTx {
                 inner: tx,
                 gate: self.gate.clone(),
@@ -399,9 +431,35 @@ impl RedisStore for PauseStore {
     }
 }
 
-fn paused(inner: Arc<dyn RedisStore>) -> (Arc<dyn RedisStore>, Arc<Gate>) {
+impl Gate {
+    async fn pause(&self) {
+        self.reached.notify_one();
+        self.release.notified().await;
+    }
+
+    /// Resolves once a transaction is parked, failing rather than hanging if
+    /// none ever is.
+    async fn wait_reached(&self) {
+        tokio::time::timeout(Duration::from_secs(10), self.reached.notified())
+            .await
+            .expect("no transaction reached the gate");
+    }
+
+    fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+}
+
+fn gated(
+    inner: Arc<dyn RedisStore>,
+    park: Park,
+    isolation: Option<TxIsolation>,
+    armed: bool,
+) -> (Arc<dyn RedisStore>, Arc<Gate>) {
     let gate = Arc::new(Gate {
-        armed: AtomicBool::new(true),
+        armed: AtomicBool::new(armed),
+        park,
+        isolation,
         reached: Notify::new(),
         release: Notify::new(),
     });
@@ -411,6 +469,16 @@ fn paused(inner: Arc<dyn RedisStore>) -> (Arc<dyn RedisStore>, Arc<Gate>) {
             gate: gate.clone(),
         }),
         gate,
+    )
+}
+
+/// Parks the first SSI transaction just before commit.
+fn paused(inner: Arc<dyn RedisStore>) -> (Arc<dyn RedisStore>, Arc<Gate>) {
+    gated(
+        inner,
+        Park::BeforeCommit,
+        Some(TxIsolation::SerializableSnapshot),
+        true,
     )
 }
 
@@ -465,6 +533,136 @@ async fn write_skew_with_watch(store: Arc<dyn RedisStore>) {
     );
 }
 
+// ------------------------------------------ commits that are still in flight
+
+/// Queues `MULTI` / `cmd` and returns without running `EXEC`.
+async fn queue(s: &mut Session, cmd: &[&str]) {
+    run(s, &["multi"]).await;
+    run(s, cmd).await;
+}
+
+/// Two clients race to claim a job. A's claim is visible in the store but its
+/// commit hasn't returned when B runs EXEC. B must not also win.
+async fn exec_during_a_watched_commit(store: Arc<dyn RedisStore>) {
+    let (store, gate) = gated(store, Park::AfterCommit, None, false);
+    let (mut a, mut b) = sessions(store);
+    run(&mut a, &["set", "job", "pending"]).await;
+    run(&mut a, &["watch", "job"]).await;
+    run(&mut b, &["watch", "job"]).await;
+    queue(&mut a, &["set", "job", "a"]).await;
+    queue(&mut b, &["set", "job", "b"]).await;
+
+    gate.arm();
+    let exec_a = tokio::spawn(async move { run(&mut a, &["exec"]).await });
+    gate.wait_reached().await;
+    let rb = run(&mut b, &["exec"]).await;
+    gate.release.notify_one();
+
+    assert!(is_committed(&exec_a.await.unwrap()));
+    assert_eq!(rb, nil(), "both clients claimed the job");
+}
+
+/// The same window, opened by a plain write from a client that watches nothing.
+async fn exec_during_a_plain_commit(store: Arc<dyn RedisStore>) {
+    let (store, gate) = gated(store, Park::AfterCommit, None, false);
+    let (mut a, mut b) = sessions(store);
+    run(&mut a, &["set", "k", "1"]).await;
+    run(&mut a, &["watch", "k"]).await;
+    queue(&mut a, &["set", "k", "3"]).await;
+
+    gate.arm();
+    let write = tokio::spawn(async move { run(&mut b, &["set", "k", "2"]).await });
+    gate.wait_reached().await;
+    let ra = run(&mut a, &["exec"]).await;
+    gate.release.notify_one();
+    write.await.unwrap();
+
+    assert_eq!(ra, nil(), "EXEC overwrote a write made after WATCH");
+}
+
+/// `BZPOPMIN` commits its pop in a transaction of its own.
+async fn exec_during_a_blocking_pop_commit(store: Arc<dyn RedisStore>) {
+    let (store, gate) = gated(store, Park::AfterCommit, None, false);
+    let (mut a, mut b) = sessions(store);
+    run(&mut a, &["zadd", "z", "1", "m", "2", "n"]).await;
+    run(&mut a, &["watch", "z"]).await;
+    queue(&mut a, &["zadd", "z", "3", "o"]).await;
+
+    // BZPOPMIN's outer transaction is read-only, so this gates the pop's own.
+    gate.arm();
+    let pop = tokio::spawn(async move { run(&mut b, &["bzpopmin", "z", "0"]).await });
+    gate.wait_reached().await;
+    let ra = run(&mut a, &["exec"]).await;
+    gate.release.notify_one();
+    pop.await.unwrap();
+
+    assert_eq!(ra, nil(), "EXEC ran on a set popped after WATCH");
+}
+
+/// Each client watches the key the other one writes, so neither queue touches
+/// a watched key. Only one may commit.
+async fn disjoint_write_skew_with_watch(store: Arc<dyn RedisStore>) {
+    let (store, gate) = gated(store, Park::BeforeCommit, None, false);
+    let (mut a, mut b) = sessions(store);
+    run(&mut a, &["set", "x", "1"]).await;
+    run(&mut a, &["set", "y", "1"]).await;
+    run(&mut a, &["watch", "x"]).await;
+    run(&mut b, &["watch", "y"]).await;
+    queue(&mut a, &["set", "y", "0"]).await;
+    queue(&mut b, &["set", "x", "0"]).await;
+
+    gate.arm();
+    let exec_a = tokio::spawn(async move { run(&mut a, &["exec"]).await });
+    gate.wait_reached().await;
+    let rb = run(&mut b, &["exec"]).await;
+    gate.release.notify_one();
+    let ra = exec_a.await.unwrap();
+
+    assert!(
+        !(is_committed(&ra) && is_committed(&rb)),
+        "write skew: both committed (a={ra:?}, b={rb:?})"
+    );
+}
+
+/// WATCH taken while a write is in flight, before it is visible: the value the
+/// client goes on to read is already stale once the write lands.
+async fn watch_during_a_commit(store: Arc<dyn RedisStore>) {
+    let (store, gate) = gated(store, Park::BeforeCommit, None, false);
+    let (mut a, mut b) = sessions(store);
+    run(&mut a, &["set", "k", "1"]).await;
+
+    gate.arm();
+    let write = tokio::spawn(async move { run(&mut b, &["set", "k", "2"]).await });
+    gate.wait_reached().await;
+    run(&mut a, &["watch", "k"]).await;
+    gate.release.notify_one();
+    write.await.unwrap();
+    queue(&mut a, &["set", "k", "3"]).await;
+
+    assert_eq!(run(&mut a, &["exec"]).await, nil());
+}
+
+/// A connection dropped in the middle of a commit must not leave its keys
+/// unwatchable, and watchers must assume the write may have landed.
+async fn abandoned_commit(store: Arc<dyn RedisStore>) {
+    let (store, gate) = gated(store, Park::AfterCommit, None, false);
+    let (mut a, mut b) = sessions(store);
+    run(&mut a, &["set", "k", "1"]).await;
+    run(&mut a, &["watch", "k"]).await;
+
+    gate.arm();
+    let write = tokio::spawn(async move { run(&mut b, &["set", "k", "2"]).await });
+    gate.wait_reached().await;
+    write.abort();
+    assert!(write.await.unwrap_err().is_cancelled());
+    queue(&mut a, &["set", "k", "3"]).await;
+    assert_eq!(run(&mut a, &["exec"]).await, nil());
+
+    run(&mut a, &["watch", "k"]).await;
+    queue(&mut a, &["set", "k", "4"]).await;
+    assert!(is_committed(&run(&mut a, &["exec"]).await));
+}
+
 both_backends!(
     aba_string,
     same_value_write,
@@ -475,6 +673,7 @@ both_backends!(
     set_swap_member,
     expire_only,
     rename_onto_same_value,
+    blocking_pop_without_waiting,
     flushdb,
     expires_naturally,
     own_write_same_value,
@@ -484,4 +683,10 @@ both_backends!(
     aborted_exec_writes_nothing,
     commit_lands_mid_exec_on_read_only_watched_key,
     write_skew_with_watch,
+    exec_during_a_watched_commit,
+    exec_during_a_plain_commit,
+    exec_during_a_blocking_pop_commit,
+    disjoint_write_skew_with_watch,
+    watch_during_a_commit,
+    abandoned_commit,
 );
