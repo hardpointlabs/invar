@@ -562,7 +562,9 @@ impl Session {
 
             outcomes = Vec::with_capacity(self.queue.len());
 
-            // WATCH pre-check. Abort if any of:
+            // WATCH pre-check, to abort before running anything. The versions
+            // are checked again, authoritatively, just before commit. Abort if
+            // any of:
             // 1. The flush epoch advanced (FLUSHDB/FLUSHALL ran since WATCH).
             // 2. A watched key's write version increased — catches any committed
             //    write, including same-value and ABA (write then restore).
@@ -643,22 +645,34 @@ impl Session {
                 outcomes.push(outcome);
             }
 
+            // Re-check the watched keys and mark every key touched by a
+            // mutating op as being written, so that no EXEC can validate
+            // against a write that is visible but not yet versioned.
+            let watched = self
+                .watched_keys
+                .iter()
+                .filter(|_| batch)
+                .map(|(key, (version, _))| (key.as_str(), *version));
+            let changed_keys: Vec<String> = self
+                .queue
+                .iter()
+                .filter(|op| op.is_mutating)
+                .flat_map(|op| op.keys.iter().flatten().cloned())
+                .collect();
+            let Some(write) = self.registry.begin_write(watched, changed_keys) else {
+                release_claims(&self.queue, &outcomes);
+                self.queue.clear();
+                self.watched_keys.clear();
+                return vec![RespValue::Array(None)];
+            };
+
             // Commit the tx
-            match tx.commit().await {
+            let committed = tx.commit().await;
+            write.finish(&committed);
+            match committed {
                 Ok(handle) => {
                     tracing::debug!(ops = outcomes.len(), "tx committed");
                     self.latest_write = handle;
-                    // Bump write versions for every key touched by a mutating op
-                    // so that concurrent WATCH sessions detect the change at EXEC.
-                    let changed_keys: Vec<String> = self
-                        .queue
-                        .iter()
-                        .filter(|op| op.is_mutating)
-                        .flat_map(|op| op.keys.iter().flatten().cloned())
-                        .collect();
-                    if !changed_keys.is_empty() {
-                        self.registry.bump_versions(&changed_keys);
-                    }
                     break 'commit;
                 }
                 Err(KvError::Conflict) if isolation == TxIsolation::SerializableSnapshot => {

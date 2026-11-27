@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use kv::kv::Error as KvError;
 use tokio::sync::oneshot;
 
 /// Value delivered to a blocked waiter once a matching write lands.
@@ -125,9 +126,57 @@ impl Claim {
     }
 }
 
+/// Write bookkeeping for one public storage key.
+#[derive(Default)]
+struct KeyWrites {
+    /// Bumped each time a write to the key finishes. `WATCH` snapshots the
+    /// value; `EXEC` aborts if it has moved — even for ABA writes (write then
+    /// restore the original value).
+    version: u64,
+    /// Commits writing the key that have started but not yet returned. Their
+    /// writes may already be visible in the store while `version` is still the
+    /// old one, so `EXEC` must treat a watched key with any as changed.
+    in_flight: usize,
+}
+
+/// Marks keys as being written for as long as one commit is in progress. See
+/// [`WatchRegistry::begin_write`].
+///
+/// Dropping the guard records the write by bumping each key's version. That
+/// includes a commit that failed in an unknown state, or whose future was
+/// dropped part-way: watchers must assume it landed.
+#[must_use = "dropping the guard immediately would not cover the commit"]
+pub struct PendingWrite<'a> {
+    registry: &'a WatchRegistry,
+    keys: Vec<String>,
+    /// Cleared when the commit is known to have written nothing.
+    written: bool,
+}
+
+impl PendingWrite<'_> {
+    /// Ends the write with the outcome of its commit. A write conflict is the
+    /// one failure that guarantees nothing was written.
+    pub fn finish<T>(mut self, outcome: &Result<T, KvError>) {
+        self.written = !matches!(outcome, Err(KvError::Conflict));
+    }
+}
+
+impl Drop for PendingWrite<'_> {
+    fn drop(&mut self) {
+        let mut map = self.registry.writes.lock().unwrap();
+        for key in &self.keys {
+            let entry = map.entry(key.clone()).or_default();
+            entry.in_flight -= 1;
+            if self.written {
+                entry.version += 1;
+            }
+        }
+    }
+}
+
 /// Process-wide registry mapping a public Redis key to the FIFO queue of
-/// clients currently blocked waiting for a pop on that key, plus a monotonic
-/// per-key write counter used by `WATCH`/`EXEC` to detect ABA writes.
+/// clients currently blocked waiting for a pop on that key, plus per-key write
+/// bookkeeping used by `WATCH`/`EXEC` to detect concurrent and ABA writes.
 ///
 /// Invariants:
 /// - The longest-waiting client on any key is always the front of its queue.
@@ -136,11 +185,8 @@ impl Claim {
 ///   held across an await point.
 pub struct WatchRegistry {
     inner: Mutex<Inner>,
-    /// Monotonically increasing write version for each public storage key.
-    /// Bumped after every committed write. `WATCH` snapshots the current value;
-    /// `EXEC` aborts when the current value exceeds the snapshot — even for
-    /// ABA writes (write then restore original value).
-    write_versions: Mutex<HashMap<String, u64>>,
+    /// Write versions and in-flight commits for each public storage key.
+    writes: Mutex<HashMap<String, KeyWrites>>,
     /// Global epoch bumped on every `FLUSHDB`/`FLUSHALL`. Watching sessions
     /// record the epoch at `WATCH` time and abort if it changed by `EXEC`.
     flush_epoch: AtomicU64,
@@ -158,28 +204,50 @@ impl WatchRegistry {
                 waiters: HashMap::new(),
                 next_id: 1,
             }),
-            write_versions: Mutex::new(HashMap::new()),
+            writes: Mutex::new(HashMap::new()),
             flush_epoch: AtomicU64::new(0),
         }
     }
 
     /// Returns the current write version of `key` (0 if never written).
     pub fn get_version(&self, key: &str) -> u64 {
-        self.write_versions
+        self.writes
             .lock()
             .unwrap()
             .get(key)
-            .copied()
-            .unwrap_or(0)
+            .map_or(0, |w| w.version)
     }
 
-    /// Bumps the write version of each key in `keys` after a successful commit.
-    pub fn bump_versions(&self, keys: &[String]) {
-        let mut map = self.write_versions.lock().unwrap();
-        for key in keys {
-            let v = map.entry(key.clone()).or_insert(0);
-            *v += 1;
+    /// Must be called immediately before committing a transaction that writes
+    /// `keys`, and the returned guard held until the commit returns.
+    ///
+    /// `watched` pairs each key the transaction is conditional on with the
+    /// version seen at `WATCH` time. Returns `None`, marking nothing, if any of
+    /// them has since been written or is being written now. The check and the
+    /// marking are one atomic step, so of two transactions that each write a
+    /// key the other watches, at most one gets a guard.
+    pub fn begin_write<'k>(
+        &self,
+        watched: impl IntoIterator<Item = (&'k str, u64)>,
+        keys: Vec<String>,
+    ) -> Option<PendingWrite<'_>> {
+        let mut map = self.writes.lock().unwrap();
+        let stale = watched.into_iter().any(|(key, seen)| {
+            map.get(key)
+                .map_or(seen != 0, |w| w.version != seen || w.in_flight > 0)
+        });
+        if stale {
+            return None;
         }
+        for key in &keys {
+            map.entry(key.clone()).or_default().in_flight += 1;
+        }
+        drop(map);
+        Some(PendingWrite {
+            registry: self,
+            keys,
+            written: true,
+        })
     }
 
     /// Returns the current flush epoch.
