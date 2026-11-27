@@ -16,7 +16,7 @@
 //! `.await`.
 
 use std::cell::UnsafeCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -89,6 +89,8 @@ struct ScriptContext {
     /// mid-script (the reader would wake up before the write is committed).
     /// These are woken by the post-commit `EvalWire::reply` instead.
     deferred_claims: Mutex<Vec<Claim>>,
+    /// Public storage keys written by `redis.call()` so far.
+    written_keys: Mutex<HashSet<String>>,
 }
 
 // SAFETY: ScriptContext is used within a single-threaded Lua interpreter.
@@ -599,6 +601,15 @@ fn execute_redis_call<'gc>(
     if let Ok(result) = &mut outcome {
         cmd.db_op.defer_claims(result, &script_ctx.deferred_claims);
     }
+    // Note what the command writes, whatever its outcome, so that committing
+    // the script's transaction invalidates any `WATCH` on those keys. `KEYS`
+    // is no guide: a script can write keys it didn't declare.
+    if cmd.is_mutating {
+        let mut written = script_ctx.written_keys.lock().unwrap();
+        written.extend(cmd.keys.into_iter().flatten());
+        // A nested `EVAL` only knows its keys now that it has run.
+        written.extend(cmd.db_op.written_keys());
+    }
     let resp = cmd.wire_op.reply(outcome);
 
     // Check if the response is an error - if so, raise it as a Lua error
@@ -668,6 +679,7 @@ pub fn eval(
             store,
             registry,
             current_db,
+            written_keys: Mutex::default(),
         }),
         wire_op: Box::new(EvalWire),
         is_mutating: true,
@@ -698,6 +710,7 @@ pub fn evalsha(
                     store,
                     registry,
                     current_db,
+                    written_keys: Mutex::default(),
                 }),
                 wire_op: Box::new(EvalWire),
                 is_mutating: true,
@@ -759,16 +772,14 @@ struct EvalOp {
     store: Arc<dyn RedisStore>,
     registry: Arc<WatchRegistry>,
     current_db: i32,
+    /// Keys written by the last run of the script.
+    written_keys: Mutex<HashSet<String>>,
 }
 
 impl DbOp for EvalOp {
     fn run<'a>(&'a self, tx: &'a dyn Tx) -> BoxFuture<'a, Result<DbResult, DbError>> {
-        let script = self.script.clone();
         let keys = self.keys.clone();
         let argv = self.argv.clone();
-        let store = self.store.clone();
-        let registry = self.registry.clone();
-        let current_db = self.current_db;
         let sha1 = sha1_hex(&self.script);
         let hint = String::from_utf8_lossy(&self.script[..self.script.len().min(48)])
             .replace('\n', " ")
@@ -781,7 +792,7 @@ impl DbOp for EvalOp {
                 argv = argv.len(),
                 "eval script",
             );
-            let result = run_script(&script, &keys, &argv, &store, &registry, current_db, tx);
+            let result = run_script(self, tx);
             match &result {
                 Ok((r, _)) => tracing::debug!(%sha1, reply = %debug_fmt(r), "eval ok"),
                 Err(e) => tracing::warn!(%sha1, error = %e, "eval failed"),
@@ -790,6 +801,10 @@ impl DbOp for EvalOp {
             let result: DbResult = Box::new(EvalOutcome { result, claims });
             Ok(result)
         })
+    }
+
+    fn written_keys(&self) -> Vec<String> {
+        self.written_keys.lock().unwrap().iter().cloned().collect()
     }
 
     /// The script's transaction failed to commit: return each deferred claim
@@ -832,17 +847,20 @@ impl WireOp for EvalWire {
 /// the caller (`[`EvalOp`]`/`[`EvalWire`]`) accepts the claims and wakes them
 /// from its post-commit reply.
 ///
-/// The `store`, `registry`, `current_db`, and `tx` parameters are used to create
-/// the `redis.call()` / `redis.pcall()` functions available to the script.
-fn run_script(
-    script: &[u8],
-    keys: &[Bytes],
-    argv: &[Bytes],
-    store: &Arc<dyn RedisStore>,
-    registry: &Arc<WatchRegistry>,
-    current_db: i32,
-    tx: &dyn Tx,
-) -> Result<(EvalResult, Vec<Claim>), DbError> {
+/// The `op`'s store, registry and DB, along with `tx`, are used to create the
+/// `redis.call()` / `redis.pcall()` functions available to the script. The keys
+/// those calls write are left in `op.written_keys`.
+fn run_script(op: &EvalOp, tx: &dyn Tx) -> Result<(EvalResult, Vec<Claim>), DbError> {
+    let EvalOp {
+        script,
+        keys,
+        argv,
+        store,
+        registry,
+        current_db,
+        written_keys,
+    } = op;
+    let script: &[u8] = script;
     let mut lua = Lua::core();
 
     // Compile the script, stashing the closure so it survives the arena exit.
@@ -862,11 +880,12 @@ fn run_script(
         tx: UnsafeCell::new(Some(tx as *const dyn Tx)),
         store: store.clone(),
         registry: registry.clone(),
-        current_db,
+        current_db: *current_db,
         deferred_claims: Mutex::new(Vec::new()),
+        written_keys: Mutex::default(),
     });
 
-    match lua.try_enter(|ctx| {
+    let outcome = lua.try_enter(|ctx| {
         let closure = ctx.fetch(&closure);
         let keys_table = table_from_slice(ctx, keys)?;
         let argv_table = table_from_slice(ctx, argv)?;
@@ -1345,7 +1364,13 @@ fn run_script(
         ctx.set_global("cjson", cjson_table)?;
 
         run_executor(ctx, closure)
-    }) {
+    });
+
+    // Replaces whatever an earlier attempt at this transaction recorded. A
+    // failed script's writes count too: inside `EXEC` they still commit.
+    *written_keys.lock().unwrap() = std::mem::take(&mut *script_ctx.written_keys.lock().unwrap());
+
+    match outcome {
         Ok(result) => {
             // The script succeeded; hand its deferred claims to the caller so
             // they can be woken once the containing transaction commits.
