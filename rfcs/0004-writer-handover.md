@@ -33,7 +33,7 @@ depends on a particular one.
   process start and opening SlateDB. A handover is unavailable for a flush, a WAL catch-up and opening the writer in a
   process that is already running.
 * **Works with rollout tools that already exist.** Rolling update mechanisms generally start the new version, wait
-  for it to report ready, then stop the old one. Invar's readiness probe reports ready only in the writer role, so
+  for it to report ready, then stop the old one. A writer-eligible node reports ready only while it is the writer, so
   such a mechanism can follow a handover instead of racing it.
 
 ## What this RFC does not change
@@ -46,7 +46,9 @@ depends on a particular one.
 * **Unplanned failover.** If the writer's host fails, recovery is whatever it is today: restart the process. This
   RFC only covers a planned switch between two healthy processes. The boot rule it introduces does make restarts
   safer (see *Boot rule*).
-* **Read replicas.** The follower serves no client traffic.
+* **Read replicas.** The follower serves no client traffic. Read replicas (nodes that stay read-only and serve
+  reads indefinitely) are expected to follow in a separate RFC. This RFC does not add them, but it defines readiness,
+  the boot rule and write rejection so that they can be added without changing any of those (see *Read replicas*).
 * **Moving client traffic.** Invar does not route clients. It reports its role through `/readyz` and closes
   connections at the right moment; the deployment's load balancer, service discovery or proxy does the rest.
 
@@ -75,7 +77,7 @@ prefix. Any future command that enumerates keys must also stay within a database
 
 ## Roles
 
-Each node is in exactly one role. `/livez` is 200 in every role; `/readyz` is 200 only in **Writer**.
+Each node is in exactly one role.
 
 | Role | Store opened as | Clients | Moves to |
 |---|---|---|---|
@@ -84,6 +86,12 @@ Each node is in exactly one role. `/livez` is 200 in every role; `/readyz` is 20
 | **HandedOff** | `Db` (fenced, or about to be) | all connections closed, listeners stopped | Writer on abort |
 | **Follower** | `DbReader` | none (listeners stopped) | Writer, by promotion |
 | **Standby** | `DbReader` | none (listeners stopped) | none: waits to be stopped |
+| **Replica** *(future RFC)* | `DbReader` | reads served; writes rejected | none: never promoted |
+
+`/livez` is 200 in every role. `/readyz` is 200 when the node is serving clients **in the role it was started
+for**. A writer-eligible node (every node in this RFC) is ready only as Writer; a replica will be ready while it is
+serving reads. Readiness therefore stays a single yes or no per process, which is what load balancers and probes
+consume, and deployments that run both kinds of node route them as separate groups.
 
 ## A handover, end to end
 
@@ -91,7 +99,7 @@ Node A is the writer. The orchestrator wants node B, running the new release, to
 
 1. **Start B as a follower**, with its own node ID and `--handover-id H`. B opens a `DbReader`, reads the writer
    record (which names A) and becomes a Follower. If the new release cannot open or read the store, it fails here,
-   and A has not been touched. The orchestrator waits for `GET /handover` on B to report `follower`.
+   and A has not been touched. The orchestrator waits for `GET /node` on B to report `follower`.
 2. **Drain A**: `POST /handover/drain?id=H` on A. A rejects new write transactions with `-READONLY` and lets in-flight
    ones finish. It then writes the handover marker, flushes, and moves to HandedOff, closing every client connection
    and refusing new ones. Clients reconnect and retry.
@@ -103,8 +111,10 @@ Node A is the writer. The orchestrator wants node B, running the new release, to
 
 The orchestrator may call promote before drain; promote simply waits for the marker.
 
-Clients see a short period of errors and reconnects between steps 2 and 4, while nothing serves them. They never see a
-stale read: A stops serving reads before B can accept a write.
+Clients of the writer see a short period of errors and reconnects between steps 2 and 4, while nothing serves them.
+They never see a stale read: A stops serving reads before B can accept a write. Readers that are not taking part
+in the handover, such as future replicas, are unaffected: they follow the store, not a particular writer, and keep
+serving reads through the write outage.
 
 ## When things go wrong
 
@@ -119,8 +129,11 @@ stale read: A stops serving reads before B can accept a write.
 
 ## Boot rule
 
-A node decides its role at startup from the writer record, never by default:
+A node decides its role at startup from the writer record, never by default. The first clause takes precedence over
+the rest:
 
+* the node was started as a replica → **Replica**, whatever the record says, including when there is none. A replica
+  never opens the store as writer and never writes the writer record.
 * the record names this node → **Writer**
 * the record names another node, and `--handover-id` is set → **Follower**
 * the record names another node, and `--handover-id` is not set → **Standby**
@@ -169,14 +182,15 @@ files the reader is still using.
 ## Admin endpoints
 
 These are served on `--admin-addr`. Every mutating endpoint is idempotent for a given handover ID: repeating a request
-returns the result of the first.
+returns the result of the first. The handover endpoints are refused with 409 on a replica.
 
-* `GET /handover` → `{role, node_id, handover_id, writer}`
+* `GET /node` → `{role, node_id, handover_id, writer}`. The name is deliberately not handover-specific, so that it
+  can report any role, including a replica's.
 * `POST /handover/drain?id=H` (Writer → Draining → HandedOff). Rejects new write transactions, waits for in-flight
   ones, writes `!invar:handover = H`, calls `Db::flush`, waits until `durable_seq` covers the marker, closes all client
   connections and stops the client listeners. Responds once HandedOff. A drain with a different ID while one is in
   progress or completed is refused with 409.
-* `POST /handover/promote?id=H` (Follower → Writer). Responds 202 at once; progress is read from `GET /handover`.
+* `POST /handover/promote?id=H` (Follower → Writer). Responds 202 at once; progress is read from `GET /node`.
   Waits until the reader reads `!invar:handover = H`, closes the reader, opens `Db`, writes
   `!invar:writer = <node id>`, waits for it to be durable, then starts the client listeners. Refused with 409 if this
   node was started with a different handover ID.
@@ -196,7 +210,8 @@ The drain gate lives in the SlateDB store, in two places:
   `destroy` and `drop_prefix` (`FLUSHALL`, `FLUSHDB`), which open their own transactions, are gated the same way.
 
 The RESP layer maps `Error::ReadOnly` to `-READONLY You can't write against a read only replica.`, the error Redis
-replicas return. Clients can be configured to reconnect on it (ioredis documents exactly this case for
+replicas return. The same error will be what a replica returns for every write, so clients see one behaviour for
+"this node does not accept writes", whatever the reason. Clients can be configured to reconnect on it (ioredis documents exactly this case for
 `reconnectOnError`). The HTTP listener (RFC 0003), when enabled, returns the same error in its JSON error body and
 closes keep-alive connections when HandedOff.
 
@@ -228,6 +243,34 @@ abort reaches a store owned by the aborting node.
 
 Even so, the orchestrator must only abort once the target is stopped and cannot restart. Otherwise the target could
 come back, and the two nodes would take turns fencing each other until one of them was stopped.
+
+## Readers across a change of writer
+
+A `DbReader` must keep reading correctly when the process writing the store changes: the new writer opens with a
+higher writer epoch and continues the WAL and the manifest from where the old one left off. This RFC relies on it
+only briefly (the follower reads until it promotes), but future replicas will depend on it for their whole life. The
+implementation includes a test in which a reader keeps reading while one writer hands over to another, and checks that
+it sees every write made before and after the switch.
+
+## Read replicas
+
+Replicas are left to their own RFC. This one fixes the rules they must fit into, so that adding them changes none of
+the behaviour defined here:
+
+* **Startup:** a replica takes the first clause of the boot rule. It never opens the store as writer and never writes
+  the writer record, even for a store that has none. Otherwise a replica started against a new store would become
+  its writer.
+* **Readiness:** ready while serving reads, under the per-role definition in *Roles*.
+* **Writes:** rejected with `Error::ReadOnly`, as on a draining writer.
+* **Handover:** `drain`, `promote` and `abort` are refused. A replica is never a handover target, and a handover does
+  not interrupt it.
+
+The replica RFC also has to settle a question this one does not need to: consistent multi-key reads. Every Invar read
+runs in a snapshot transaction today, so a command that reads several keys (a hash sentinel and its fields, a list's
+nodes, `MULTI`, Lua) sees one point in time. In SlateDB 0.18.1 only `Db` offers snapshots: `DbReader` has `get` and
+`scan`, and `ReadOptions` cannot pin a read to a sequence number, so a multi-key command on a replica could straddle a
+refresh and see a partly applied write. The follower in this RFC reads only the two reserved keys, so it is not
+affected.
 
 ## Security
 
@@ -280,3 +323,10 @@ The metrics and probe listener stays `GET`/`HEAD` only; handover is never contro
 
 > **Open Question:** Should `promote` time out on its own if the marker never appears, or wait until it is told to
 > stop? Waiting is simpler, but leaves a follower that looks healthy while nothing is happening.
+
+> **Open Question (for the replica RFC):** How should replicas get consistent multi-key reads? Candidates are a
+> snapshot API on `DbReader` contributed to SlateDB, rotating readers pinned to checkpoints
+> (`DbReaderMode::Checkpoint`, consistent per reader but staler), or limiting replicas to single-key reads. The same
+> RFC should also cover staleness guarantees (replicas see only durable writes, so there is no read-your-writes) and
+> the cost of each long-lived reader keeping its own managed checkpoint, which delays garbage collection if a replica
+> dies without releasing it.
