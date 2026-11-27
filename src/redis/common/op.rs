@@ -75,6 +75,14 @@ pub trait DbOp: Send + 'static {
         })
     }
 
+    /// Public storage keys the last `run` wrote that couldn't be listed in
+    /// [`QueuedOp::keys`] up front, because they are only known once the op has
+    /// run (scripts). The dispatcher records them for `WATCH` along with
+    /// `keys`, whether or not `run` succeeded.
+    fn written_keys(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Called by the dispatcher when a transaction that ran this op failed to
     /// commit, so any waiter claims embedded in `result` can be returned to
     /// the watch registry. A no-op for commands that carry no claims.

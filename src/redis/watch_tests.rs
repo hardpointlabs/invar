@@ -325,6 +325,97 @@ async fn aborted_exec_writes_nothing(store: Arc<dyn RedisStore>) {
     );
 }
 
+// ------------------------------------------------------------- scripts
+
+const SET_K: &str = "return redis.call('set', 'k', '2')";
+const SET_K_SHA: &str = "55487e49100c30560cfd7bb6a8f649472cbef086";
+
+/// `watch_then` on an existing string `k`, with `SET k 3` queued.
+async fn meddle_with_k(store: Arc<dyn RedisStore>, meddle: &[&[&str]]) -> Vec<RespValue> {
+    watch_then(
+        store,
+        &[&["set", "k", "1"]],
+        "k",
+        meddle,
+        &["set", "k", "3"],
+    )
+    .await
+}
+
+async fn script_write(store: Arc<dyn RedisStore>) {
+    let script = "return redis.call('set', KEYS[1], '2')";
+    let r = meddle_with_k(store, &[&["eval", script, "1", "k"]]).await;
+    assert_eq!(r, nil());
+}
+
+/// The written key doesn't have to appear in `KEYS`.
+async fn script_write_undeclared_key(store: Arc<dyn RedisStore>) {
+    let r = meddle_with_k(store, &[&["eval", SET_K, "0"]]).await;
+    assert_eq!(r, nil());
+}
+
+async fn evalsha_write(store: Arc<dyn RedisStore>) {
+    let (mut a, mut b) = sessions(store);
+    // Cache the script before the watch, so only EVALSHA runs after it.
+    run(&mut b, &["eval", SET_K, "0"]).await;
+    run(&mut a, &["watch", "k"]).await;
+    run(&mut b, &["evalsha", SET_K_SHA, "0"]).await;
+    queue(&mut a, &["set", "k", "3"]).await;
+    assert_eq!(run(&mut a, &["exec"]).await, nil());
+}
+
+/// The watcher's own script invalidates its watch too.
+async fn own_script_write(store: Arc<dyn RedisStore>) {
+    let (mut a, _b) = sessions(store);
+    run(&mut a, &["set", "k", "1"]).await;
+    run(&mut a, &["watch", "k"]).await;
+    run(&mut a, &["eval", SET_K, "0"]).await;
+    queue(&mut a, &["set", "k", "3"]).await;
+    assert_eq!(run(&mut a, &["exec"]).await, nil());
+}
+
+/// A script that fails inside `EXEC` keeps the writes it had already made, as
+/// the rest of the batch still commits.
+async fn failed_script_inside_exec(store: Arc<dyn RedisStore>) {
+    let script = "redis.call('set', 'k', '2') return redis.call('nosuchcommand')";
+    let r = meddle_with_k(store, &[&["multi"], &["eval", script, "0"], &["exec"]]).await;
+    assert_eq!(r, nil());
+}
+
+async fn nested_script_write(store: Arc<dyn RedisStore>) {
+    let script = "return redis.call('eval', ARGV[1], '0')";
+    let r = meddle_with_k(store, &[&["eval", script, "0", SET_K]]).await;
+    assert_eq!(r, nil());
+}
+
+async fn script_flushdb_then_recreate(store: Arc<dyn RedisStore>) {
+    let script = "redis.call('flushdb') return redis.call('set', 'k', '1')";
+    let r = meddle_with_k(store, &[&["eval", script, "0"]]).await;
+    assert_eq!(r, nil());
+}
+
+/// Declaring a key in `KEYS` is not a write, whether the script only reads it
+/// or writes something else.
+async fn script_without_a_write_to_the_key_does_not_abort(store: Arc<dyn RedisStore>) {
+    let r = meddle_with_k(
+        store,
+        &[
+            &["eval", "return redis.call('get', KEYS[1])", "1", "k"],
+            &["eval", "return redis.call('set', 'other', '2')", "1", "k"],
+        ],
+    )
+    .await;
+    assert!(is_committed(&r), "got {r:?}");
+}
+
+/// Outside `MULTI` a failed script's transaction is discarded, so nothing was
+/// written.
+async fn discarded_script_does_not_abort(store: Arc<dyn RedisStore>) {
+    let script = "redis.call('set', 'k', '2') return redis.call('nosuchcommand')";
+    let r = meddle_with_k(store, &[&["eval", script, "0"]]).await;
+    assert!(is_committed(&r), "got {r:?}");
+}
+
 // ------------------------------------------------------- interleavings
 
 /// Where a gated transaction is parked.
@@ -663,7 +754,35 @@ async fn abandoned_commit(store: Arc<dyn RedisStore>) {
     assert!(is_committed(&run(&mut a, &["exec"]).await));
 }
 
+/// A script's write is visible in the store but its commit hasn't returned.
+async fn exec_during_a_script_commit(store: Arc<dyn RedisStore>) {
+    let (store, gate) = gated(store, Park::AfterCommit, None, false);
+    let (mut a, mut b) = sessions(store);
+    run(&mut a, &["set", "k", "1"]).await;
+    run(&mut a, &["watch", "k"]).await;
+    queue(&mut a, &["set", "k", "3"]).await;
+
+    gate.arm();
+    let write = tokio::spawn(async move { run(&mut b, &["eval", SET_K, "0"]).await });
+    gate.wait_reached().await;
+    let ra = run(&mut a, &["exec"]).await;
+    gate.release.notify_one();
+    write.await.unwrap();
+
+    assert_eq!(ra, nil(), "EXEC overwrote a script write made after WATCH");
+}
+
 both_backends!(
+    script_write,
+    script_write_undeclared_key,
+    evalsha_write,
+    own_script_write,
+    failed_script_inside_exec,
+    nested_script_write,
+    script_flushdb_then_recreate,
+    script_without_a_write_to_the_key_does_not_abort,
+    discarded_script_does_not_abort,
+    exec_during_a_script_commit,
     aba_string,
     same_value_write,
     existence_aba,

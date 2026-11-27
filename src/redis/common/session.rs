@@ -657,7 +657,10 @@ impl Session {
                 .queue
                 .iter()
                 .filter(|op| op.is_mutating)
-                .flat_map(|op| op.keys.iter().flatten().cloned())
+                .flat_map(|op| {
+                    let declared = op.keys.iter().flatten().cloned();
+                    declared.chain(op.db_op.written_keys())
+                })
                 .collect();
             let Some(write) = self.registry.begin_write(watched, changed_keys) else {
                 release_claims(&self.queue, &outcomes);
