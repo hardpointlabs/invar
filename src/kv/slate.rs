@@ -23,28 +23,40 @@ use slatedb::object_store::aws;
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 use slatedb::{
-    Db, DbIterator, DbStatus, DbTransaction, Error as SlateError, ErrorKind, IsolationLevel,
+    CloseReason, Db, DbIterator, DbReader, DbStatus, DbTransaction, Error as SlateError, ErrorKind,
+    IsolationLevel,
 };
 use slatedb_common::metrics::MetricsRecorder;
 use std::collections::{Bound, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::kv::{
-    write_handle, BoxFuture, Entry, Error, Item, KeyValueIterator, KeyValueStore, Tx, TxIsolation,
-    WriteHandle,
+    write_handle, AckLevel, AckState, BoxFuture, Entry, Error, Item, KeyValueIterator,
+    KeyValueStore, Tx, TxIsolation, WriteHandle,
 };
 use crate::metrics::MetricsRsRecorder;
 use crate::time::now_millis;
 use crate::usage::UsageReporter;
 
+/// How long a commit at [`AckLevel::Durable`] waits to be confirmed durable
+/// before it fails with [`Error::Timeout`] (RFC 0004).
+const DURABLE_COMMIT_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// How often the store flushes its WAL while the acknowledgement level is
+/// [`AckLevel::Durable`] and commits are waiting, so a durable commit waits
+/// tens of milliseconds rather than a whole `SLATEDB_FLUSH_INTERVAL`.
+const DURABLE_FLUSH_INTERVAL: Duration = Duration::from_millis(50);
+
 /// Maps a SlateDB error to the kv abstraction's error space, mirroring the
-/// Go backend: transaction conflicts surface as [`Error::Conflict`],
-/// everything else as [`Error::Undefined`].
+/// Go backend: transaction conflicts surface as [`Error::Conflict`], fencing
+/// as [`Error::Fenced`], everything else as [`Error::Undefined`].
 fn map_slate_error(err: SlateError) -> Error {
     match err.kind() {
         ErrorKind::Transaction => Error::Conflict,
+        ErrorKind::Closed(CloseReason::Fenced) => Error::Fenced,
         _ => Error::Undefined,
     }
 }
@@ -115,6 +127,81 @@ pub struct SlateDbOpts {
     pub cache_mem_limit: usize,
 }
 
+fn s3_store(bucket_name: String) -> Arc<dyn ObjectStore> {
+    Arc::new(
+        aws::AmazonS3Builder::from_env()
+            .with_bucket_name(bucket_name)
+            .build()
+            .expect("couldn't create s3 client"),
+    )
+}
+
+async fn optional_cache(
+    cache_path: Option<&Path>,
+    cache_mem_limit: usize,
+) -> Option<Arc<dyn DbCache>> {
+    match cache_path {
+        Some(cp) => Some(
+            build_foyer_cache(cp, cache_mem_limit)
+                .await
+                .expect("couldn't build foyer cache"),
+        ),
+        None => None,
+    }
+}
+
+/// Acknowledgement state shared between a store and its transactions.
+#[derive(Default)]
+struct Acks {
+    level: AckState,
+    /// Highest sequence number committed through this handle, so the durable
+    /// flusher can tell whether any commit is still waiting to be durable.
+    last_seq: AtomicU64,
+}
+
+/// Flushes the WAL every [`DURABLE_FLUSH_INTERVAL`] while the level is
+/// [`AckLevel::Durable`] and a committed write is not yet durable. Stopped on
+/// close/drop.
+struct DurableFlusher(tokio::task::JoinHandle<()>);
+
+impl DurableFlusher {
+    fn spawn(db: Db, acks: Arc<Acks>) -> Self {
+        let rx = db.subscribe();
+        Self(tokio::spawn(async move {
+            let mut tick = tokio::time::interval(DURABLE_FLUSH_INTERVAL);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                if acks.level.get() != AckLevel::Durable {
+                    continue;
+                }
+                let (durable, closed) = {
+                    let s = rx.borrow();
+                    (s.durable_seq, s.close_reason.is_some())
+                };
+                if closed {
+                    return;
+                }
+                if acks.last_seq.load(Ordering::Acquire) > durable {
+                    if let Err(e) = db.flush().await {
+                        tracing::warn!(error = %e, "durable acknowledgement flush failed");
+                    }
+                }
+            }
+        }))
+    }
+
+    fn stop(&self) {
+        self.0.abort();
+    }
+}
+
+impl Drop for DurableFlusher {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// SlateDB-backed [`KeyValueStore`].
 #[derive(Clone)]
 pub struct SlateDb {
@@ -122,30 +209,27 @@ pub struct SlateDb {
     cache: Option<Arc<dyn DbCache>>,
     /// Periodically samples the object store footprint; stopped on close/drop.
     usage: Arc<UsageReporter>,
+    acks: Arc<Acks>,
+    flusher: Arc<DurableFlusher>,
 }
 
 impl SlateDb {
     pub async fn open(opts: SlateDbOpts) -> Result<SlateDb, Error> {
-        let store = Arc::new(
-            aws::AmazonS3Builder::from_env()
-                .with_bucket_name(opts.bucket_name)
-                .build()
-                .expect("couldn't create s3 client"),
-        );
-        Self::build(opts.path, store, opts.cache_path, opts.cache_mem_limit).await
+        let store = s3_store(opts.bucket_name);
+        let cache = optional_cache(opts.cache_path.as_deref(), opts.cache_mem_limit).await;
+        Self::build(opts.path, store, cache).await
     }
 
     /// Open a store backed by an in-memory object store (for tests).
     pub async fn in_memory() -> Result<SlateDb, Error> {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        Self::build("test-db".to_string(), store, None, 0).await
+        Self::build("test-db".to_string(), store, None).await
     }
 
     async fn build(
         path: String,
         store: Arc<dyn ObjectStore>,
-        cache_path: Option<PathBuf>,
-        cache_mem_limit: usize,
+        cache: Option<Arc<dyn DbCache>>,
     ) -> Result<SlateDb, Error> {
         let settings = Settings::from_env_with_default("SLATEDB_", Settings::default())
             .expect("couldn't read settings");
@@ -153,17 +237,9 @@ impl SlateDb {
         builder = builder.with_settings(settings);
         builder =
             builder.with_metrics_recorder(Arc::new(MetricsRsRecorder) as Arc<dyn MetricsRecorder>);
-
-        let cache_id = db_cache_id(&path);
-        let cache: Option<Arc<dyn DbCache>> = if let Some(ref cp) = cache_path {
-            let c = build_foyer_cache(cp, cache_mem_limit)
-                .await
-                .expect("couldn't build foyer cache");
-            builder = builder.with_db_cache(c.clone(), cache_id);
-            Some(c)
-        } else {
-            None
-        };
+        if let Some(c) = &cache {
+            builder = builder.with_db_cache(c.clone(), db_cache_id(&path));
+        }
 
         let db = builder.build().await.map_err(map_slate_error)?;
         // Must match how SlateDB resolves its own `path`, so we count exactly its keys.
@@ -171,7 +247,29 @@ impl SlateDb {
             store,
             object_store::path::Path::from(path),
         ));
-        Ok(SlateDb { db, cache, usage })
+        let acks = Arc::new(Acks::default());
+        let flusher = Arc::new(DurableFlusher::spawn(db.clone(), acks.clone()));
+        Ok(SlateDb {
+            db,
+            cache,
+            usage,
+            acks,
+            flusher,
+        })
+    }
+
+    /// Resolves once another process has opened the store as writer and
+    /// fenced this one (RFC 0004). Never resolves for a store closed any
+    /// other way.
+    pub async fn fenced(&self) {
+        let mut rx = self.db.subscribe();
+        let fenced = rx
+            .wait_for(|s| matches!(s.close_reason, Some(CloseReason::Fenced)))
+            .await
+            .is_ok();
+        if !fenced {
+            std::future::pending::<()>().await;
+        }
     }
 
     async fn delete_scanned(&self, prefix: Option<&[u8]>) -> Result<(), Error> {
@@ -196,16 +294,140 @@ impl SlateDb {
         for key in &keys {
             tx.delete(key).map_err(map_slate_error)?;
         }
-        let _ = tx.commit().await.map_err(map_slate_error)?;
+        let handle = tx.commit().await.map_err(map_slate_error)?;
+        acknowledge(&self.db, &self.acks, handle.map(|h| h.seqnum())).await?;
         Ok(())
     }
 }
 
-async fn wait_for_seq(
-    rx: &mut tokio::sync::watch::Receiver<DbStatus>,
-    sn: u64,
-) -> Result<(), tokio::sync::watch::error::RecvError> {
-    rx.wait_for(|s| s.durable_seq >= sn).await.map(|_| ())
+/// A read-only handle on a SlateDB store that can later become its writer
+/// (RFC 0004). Opening it proves the store can be opened and read; it serves
+/// no clients. [`SlateFollower::promote`] opens the store as writer in the
+/// same process, reusing the same block cache.
+pub struct SlateFollower {
+    path: String,
+    store: Arc<dyn ObjectStore>,
+    cache: Option<Arc<dyn DbCache>>,
+    /// `None` only while a promotion is in progress, or after a failed
+    /// promotion could not reopen the reader.
+    reader: Option<DbReader>,
+}
+
+impl SlateFollower {
+    pub async fn open(opts: SlateDbOpts) -> Result<SlateFollower, Error> {
+        let store = s3_store(opts.bucket_name);
+        let cache = optional_cache(opts.cache_path.as_deref(), opts.cache_mem_limit).await;
+        Self::build(opts.path, store, cache).await
+    }
+
+    async fn build(
+        path: String,
+        store: Arc<dyn ObjectStore>,
+        cache: Option<Arc<dyn DbCache>>,
+    ) -> Result<SlateFollower, Error> {
+        let reader = Self::open_reader(&path, &store, &cache).await?;
+        Ok(SlateFollower {
+            path,
+            store,
+            cache,
+            reader: Some(reader),
+        })
+    }
+
+    async fn open_reader(
+        path: &str,
+        store: &Arc<dyn ObjectStore>,
+        cache: &Option<Arc<dyn DbCache>>,
+    ) -> Result<DbReader, Error> {
+        let mut builder = DbReader::builder(path.to_string(), store.clone());
+        if let Some(c) = cache {
+            builder = builder.with_db_cache(c.clone(), db_cache_id(path));
+        }
+        builder.build().await.map_err(map_slate_error)
+    }
+
+    /// Closes the reader and opens the store as writer, which fences any
+    /// process still writing it. On failure the reader is reopened, so the
+    /// follower can be promoted again.
+    pub async fn promote(&mut self) -> Result<SlateDb, Error> {
+        if let Some(reader) = self.reader.take() {
+            if let Err(e) = reader.close().await {
+                tracing::warn!(error = %e, "error closing follower reader");
+            }
+        }
+        match SlateDb::build(self.path.clone(), self.store.clone(), self.cache.clone()).await {
+            Ok(db) => Ok(db),
+            Err(e) => {
+                match Self::open_reader(&self.path, &self.store, &self.cache).await {
+                    Ok(reader) => self.reader = Some(reader),
+                    Err(e) => tracing::error!(error = %e, "couldn't reopen follower reader"),
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Closes the reader and the block cache, for a follower that is shutting
+    /// down without being promoted.
+    pub async fn close(&mut self) -> Result<(), Error> {
+        if let Some(reader) = self.reader.take() {
+            reader.close().await.map_err(map_slate_error)?;
+        }
+        if let Some(cache) = &self.cache {
+            cache.close().await.map_err(map_slate_error)?;
+        }
+        Ok(())
+    }
+}
+
+/// Waits until `sn` is durable. Returns `Ok(true)` once it is, `Ok(false)` if
+/// `limit` elapses first (`None` waits indefinitely), and an error if the
+/// store closes before then: [`Error::Fenced`] if another writer fenced it,
+/// [`Error::DbClosed`] otherwise. Shared by `WAIT` and durable commits.
+async fn wait_durable(db: &Db, sn: u64, limit: Option<Duration>) -> Result<bool, Error> {
+    let mut rx = db.subscribe();
+    let wait = async {
+        let status = rx
+            .wait_for(|s| s.durable_seq >= sn || s.close_reason.is_some())
+            .await
+            .map_err(|_| Error::DbClosed)?;
+        settled(&status, sn)
+    };
+    match limit {
+        None => wait.await,
+        Some(limit) => tokio::time::timeout(limit, wait).await.unwrap_or(Ok(false)),
+    }
+}
+
+/// Classifies a status in which `sn` is durable or the store has closed.
+fn settled(status: &DbStatus, sn: u64) -> Result<bool, Error> {
+    if status.durable_seq >= sn {
+        return Ok(true);
+    }
+    match status.close_reason {
+        Some(CloseReason::Fenced) => Err(Error::Fenced),
+        _ => Err(Error::DbClosed),
+    }
+}
+
+/// Completes a successful commit according to the acknowledgement level: at
+/// [`AckLevel::Durable`], waits for the write to be durable, failing with
+/// [`Error::Timeout`] after [`DURABLE_COMMIT_TIMEOUT`]. `seq` is `None` when
+/// the transaction wrote nothing.
+async fn acknowledge(db: &Db, acks: &Acks, seq: Option<u64>) -> Result<(), Error> {
+    let Some(sn) = seq else {
+        return Ok(());
+    };
+    acks.last_seq.fetch_max(sn, Ordering::AcqRel);
+    // Read after the commit has been applied, so a switch to Durable covers
+    // every commit that returns after it.
+    if acks.level.get() != AckLevel::Durable {
+        return Ok(());
+    }
+    match wait_durable(db, sn, Some(DURABLE_COMMIT_TIMEOUT)).await? {
+        true => Ok(()),
+        false => Err(Error::Timeout),
+    }
 }
 
 #[async_trait]
@@ -223,6 +445,8 @@ impl KeyValueStore for SlateDb {
         Ok(Box::new(SlateTx {
             tx,
             pending_expiry: Mutex::new(HashMap::new()),
+            db: self.db.clone(),
+            acks: self.acks.clone(),
         }))
     }
 
@@ -260,6 +484,7 @@ impl KeyValueStore for SlateDb {
 
     async fn close(&self) -> Result<(), Error> {
         self.usage.stop();
+        self.flusher.stop();
         self.db.close().await.map_err(map_slate_error)?;
         if let Some(cache) = &self.cache {
             cache.close().await.map_err(map_slate_error)?;
@@ -284,29 +509,19 @@ impl KeyValueStore for SlateDb {
     }
 
     async fn await_until(&self, handle: WriteHandle, duration: Duration) -> Result<bool, Error> {
-        let sn = handle.sequence_number();
-        let mut rx = self.db.subscribe();
+        // Real WAIT/WAITAOF semantics: timeout == 0 means block forever, not
+        // "return immediately". Either way, a store that closes or is fenced
+        // first returns an error instead of waiting forever.
+        let limit = (!duration.is_zero()).then_some(duration);
+        wait_durable(&self.db, handle.sequence_number(), limit).await
+    }
 
-        // Fast path: have we already caught up to the WriteHandle in question?
-        if rx.borrow().durable_seq >= sn {
-            return Ok(true);
-        }
+    fn set_ack_level(&self, level: AckLevel) {
+        self.acks.level.set(level);
+    }
 
-        // Real WAIT/WAITAOF semantics: timeout == 0 means block forever,
-        // not "return immediately" -- skip the timeout wrapper entirely.
-        if duration.is_zero() {
-            return rx
-                .wait_for(|s| s.durable_seq >= sn)
-                .await
-                .map(|_| true)
-                .map_err(|_| Error::DbClosed);
-        }
-
-        match tokio::time::timeout(duration, wait_for_seq(&mut rx, sn)).await {
-            Ok(Ok(())) => Ok(true),
-            Ok(Err(_)) => Err(Error::DbClosed),
-            Err(_elapsed) => Ok(false),
-        }
+    fn ack_level(&self) -> AckLevel {
+        self.acks.level.get()
     }
 }
 
@@ -317,6 +532,9 @@ struct SlateTx {
     /// uncommitted write reads back without one; without this, updating a key
     /// twice in one transaction (MULTI, Lua scripts) would drop its TTL.
     pending_expiry: Mutex<HashMap<Vec<u8>, Option<i64>>>,
+    /// The store's handle, for waiting on durability at commit.
+    db: Db,
+    acks: Arc<Acks>,
 }
 
 impl SlateTx {
@@ -408,10 +626,14 @@ impl Tx for SlateTx {
     }
 
     async fn commit(self: Box<Self>) -> Result<Option<WriteHandle>, Error> {
-        match self.tx.commit().await {
-            Ok(handle) => Ok(handle.map(|h| write_handle(h.seqnum()))),
-            Err(e) => Err(map_slate_error(e)),
-        }
+        let seq = self
+            .tx
+            .commit()
+            .await
+            .map_err(map_slate_error)?
+            .map(|h| h.seqnum());
+        acknowledge(&self.db, &self.acks, seq).await?;
+        Ok(seq.map(write_handle))
     }
 
     fn discard(self: Box<Self>) {
@@ -1200,5 +1422,146 @@ mod tests {
             .await
             .expect("store corrupted after concurrent updates");
         store.close().await.expect("close");
+    }
+
+    // --- Durable acknowledgements and followers (RFC 0004) ---
+
+    /// Opens a writer on `store`, sharing it with other handles in the test.
+    async fn writer_on(store: &Arc<dyn ObjectStore>) -> SlateDb {
+        SlateDb::build("shared-db".to_string(), store.clone(), None)
+            .await
+            .expect("open writer")
+    }
+
+    async fn commit_one(store: &SlateDb, key: &[u8], value: &[u8]) -> Result<Option<u64>, Error> {
+        let tx = store.begin(true, TxIsolation::Snapshot).await?;
+        tx.set(Entry::new(key.to_vec(), value.to_vec()))?;
+        Ok(tx.commit().await?.map(|h| h.sequence_number()))
+    }
+
+    #[tokio::test]
+    async fn ack_level_defaults_to_buffered() {
+        let store = in_memory().await;
+        assert_eq!(store.ack_level(), AckLevel::Buffered);
+        store.set_ack_level(AckLevel::Durable);
+        assert_eq!(store.ack_level(), AckLevel::Durable);
+        store.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn durable_commit_is_durable_when_it_returns() {
+        let store = in_memory().await;
+        store.set_ack_level(AckLevel::Durable);
+        for i in 0..5u8 {
+            let seq = commit_one(&store, &[b'k', i], b"v")
+                .await
+                .expect("durable commit")
+                .expect("a write returns a handle");
+            assert!(
+                store.db.subscribe().borrow().durable_seq >= seq,
+                "commit returned before its write was durable"
+            );
+        }
+        store.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn durable_level_applies_to_transactions_already_open() {
+        let store = in_memory().await;
+        let tx = store
+            .begin(true, TxIsolation::Snapshot)
+            .await
+            .expect("begin");
+        tx.set(Entry::new(b"k".to_vec(), b"v".to_vec()))
+            .expect("set");
+        store.set_ack_level(AckLevel::Durable);
+        let seq = tx
+            .commit()
+            .await
+            .expect("commit")
+            .expect("handle")
+            .sequence_number();
+        assert!(store.db.subscribe().borrow().durable_seq >= seq);
+        store.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn durable_drop_prefix_is_durable_when_it_returns() {
+        let store = in_memory().await;
+        write(&store, b"p:1", b"v").await;
+        store.set_ack_level(AckLevel::Durable);
+        store.drop_prefix(b"p:").await.expect("drop_prefix");
+        let status = store.db.subscribe().borrow().clone();
+        assert!(status.durable_seq >= store.acks.last_seq.load(Ordering::Acquire));
+        store.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn durable_commit_on_a_fenced_writer_is_never_acknowledged() {
+        let objects: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let old = writer_on(&objects).await;
+        old.set_ack_level(AckLevel::Durable);
+        commit_one(&old, b"before", b"v")
+            .await
+            .expect("commit before fencing");
+
+        let new = writer_on(&objects).await; // fences `old`
+        let result = commit_one(&old, b"after", b"v").await;
+        assert!(
+            result.is_err(),
+            "a fenced writer acknowledged a durable commit: {result:?}"
+        );
+        new.close().await.expect("close new writer");
+    }
+
+    #[tokio::test]
+    async fn fenced_resolves_and_wait_stops_waiting_once_fenced() {
+        let objects: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let old = writer_on(&objects).await;
+        let new = writer_on(&objects).await; // fences `old`
+                                             // A write makes the old writer try its WAL, which is where it notices.
+        let _ = commit_one(&old, b"after", b"v").await;
+        tokio::time::timeout(Duration::from_secs(10), old.fenced())
+            .await
+            .expect("fencing was never reported");
+
+        // `WAIT 0` used to wait forever on a fenced writer.
+        let waited = tokio::time::timeout(
+            Duration::from_secs(5),
+            old.await_until(write_handle(u64::MAX), Duration::ZERO),
+        )
+        .await
+        .expect("WAIT 0 on a fenced writer should not block");
+        assert_eq!(waited, Err(Error::Fenced));
+        new.close().await.expect("close new writer");
+    }
+
+    #[tokio::test]
+    async fn follower_promotes_and_sees_the_previous_writers_data() {
+        let objects: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let old = writer_on(&objects).await;
+        write(&old, b"k", b"v").await;
+
+        let mut follower = SlateFollower::build("shared-db".to_string(), objects.clone(), None)
+            .await
+            .expect("open follower");
+        old.close().await.expect("old writer shuts down");
+
+        let new = follower.promote().await.expect("promote");
+        assert_eq!(read_value(&new, b"k").await.expect("read"), b"v");
+        write(&new, b"k2", b"v2").await;
+        new.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn follower_close_releases_the_reader() {
+        let objects: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let writer = writer_on(&objects).await;
+        let mut follower = SlateFollower::build("shared-db".to_string(), objects.clone(), None)
+            .await
+            .expect("open follower");
+        follower.close().await.expect("close follower");
+        follower.close().await.expect("closing twice is harmless");
+        writer.close().await.expect("close writer");
     }
 }
