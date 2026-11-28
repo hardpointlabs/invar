@@ -43,6 +43,9 @@ is safer rollouts with very little new machinery. A shorter gap than an in-place
 * **Durability in normal operation.** Outside a shutdown, commits are acknowledged as they are today. A crash or
   hardware failure can still lose writes acknowledged within the last flush interval.
 * **Automatic failover.** Nothing here detects a failed writer or promotes a follower on its own.
+* **Deeper release validation and cache warming.** A follower proves only that the new release can open and read the
+  store. Checking that it can actually serve traffic, and warming its cache before promotion, are left to the
+  orchestrator.
 * **Moving client traffic.** Invar reports its state through `/readyz`; the deployment's load balancer, service
   discovery or proxy routes clients.
 * **Read replicas.** Expected in a separate RFC. This one defines readiness and startup roles so that replicas can be
@@ -154,8 +157,12 @@ own `--cache-path`, distinct from the writer it is replacing: two processes must
   is set and returns an error rather than waiting on. This fixes an existing problem: when a `Db` is fenced, SlateDB
   keeps the status channel open and only sets `close_reason`, so today `WAIT 0` on a fenced writer waits forever.
 * **Latency.** A Durable commit waits for the next WAL flush, up to `SLATEDB_FLUSH_INTERVAL`. To bound that without
-  changing SlateDB's settings at runtime, Invar calls `Db::flush` on a short timer (for example every 50ms) while the
-  level is Durable and writes are pending.
+  changing SlateDB's settings at runtime, Invar calls `Db::flush` every 50ms while the level is Durable and writes
+  are pending. The interval is hard-coded to begin with.
+* **Timeout.** A Durable commit that is not durable within 1 second fails with `Error::Timeout`, and the client gets
+  an error. The outcome is then unknown, as for any failed commit: the write may still become durable. The client is
+  never told it succeeded unless it is durable. The 1 second limit is hard-coded to begin with, and sits well inside
+  the default `--shutdown-timeout` of 10 seconds.
 * **Fjall.** Durable means the commit's journal entry has been synced to disk before `commit` returns, so graceful
   shutdown gives the same guarantee with every backend.
 
@@ -233,9 +240,7 @@ a non-loopback address. The probe listener stays `GET`/`HEAD` only; `GET /role` 
 
 # Unresolved Questions
 
-> **Open Question:** Should a Durable commit have a timeout? Without one, a write waits as long as SlateDB keeps
-> retrying object storage; with one, the client gets an error whose outcome is unknown. And what flush interval should
-> the Durable timer use by default?
+None at present. Earlier questions were resolved as follows:
 
-> **Open Question:** Should a follower do more than open a reader to prove the release works, for example read a
-> sample of keys, or warm the cache before promotion?
+* **Durable commit timeout:** 1 second, hard-coded (see *Durable acknowledgements*), with the flush timer at 50ms.
+* **Validating the new release beyond opening the store, and cache warming:** out of scope, left to the orchestrator.
