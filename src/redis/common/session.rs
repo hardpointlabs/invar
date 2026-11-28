@@ -384,6 +384,10 @@ impl Session {
     /// Reports whether any of the queued ops' keys intersect with the current
     /// WATCH set. When true, the enclosing transaction must use
     /// `SerializableSnapshot` isolation.
+    ///
+    /// This covers plain commands as well as `EXEC`, a deliberate departure
+    /// from Redis: a plain command that loses a conflict replies nil at once
+    /// instead of being retried.
     fn needs_ssi(&self) -> bool {
         if self.watched_keys.is_empty() {
             return false;
@@ -607,11 +611,16 @@ impl Session {
 
                 if is_retryable_conflict(&outcome) {
                     release_claims(&self.queue, &outcomes);
-                    // Under SSI (WATCH-guarded transaction): a conflict means a
-                    // watched key changed — return nil to the client, never retry.
+                    // Under SSI (the batch or command touches a watched key): a
+                    // conflict returns nil to the client, never retry.
                     if isolation == TxIsolation::SerializableSnapshot {
                         self.queue.clear();
-                        self.watched_keys.clear();
+                        // Only EXEC consumes the WATCH set. After a plain
+                        // command it stays, so the next EXEC still sees the
+                        // change.
+                        if batch {
+                            self.watched_keys.clear();
+                        }
                         return vec![RespValue::Array(None)];
                     }
                     // Not a command-level error -- the whole snapshot this attempt was
@@ -679,11 +688,13 @@ impl Session {
                     break 'commit;
                 }
                 Err(KvError::Conflict) if isolation == TxIsolation::SerializableSnapshot => {
-                    // Under SSI (WATCH-guarded transaction): a commit conflict means
-                    // a watched key was concurrently modified — EXEC returns nil.
+                    // Under SSI a commit conflict returns nil, as above, and
+                    // likewise only EXEC consumes the WATCH set.
                     release_claims(&self.queue, &outcomes);
                     self.queue.clear();
-                    self.watched_keys.clear();
+                    if batch {
+                        self.watched_keys.clear();
+                    }
                     return vec![RespValue::Array(None)];
                 }
                 Err(e) => match e {

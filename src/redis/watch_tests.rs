@@ -7,6 +7,9 @@
 //! watched key (even one that leaves its bytes unchanged) aborts the
 //! watcher's next EXEC with a nil reply.
 //!
+//! The deliberate exception is a plain command on a watched key: if it loses a
+//! conflict, Invar replies nil instead of running it as Redis would.
+//!
 //! Sequential tests use two `Session`s over one store to stand in for two
 //! connections. Interleaving tests use `PauseStore`, which parks the first
 //! SSI transaction just before commit so another session can sneak a commit
@@ -39,6 +42,12 @@ async fn run(s: &mut Session, args: &[&str]) -> Vec<RespValue> {
 
 fn nil() -> Vec<RespValue> {
     vec![RespValue::Array(None)]
+}
+
+fn bulk(value: &'static str) -> Vec<RespValue> {
+    vec![RespValue::BulkString(Some(Bytes::from_static(
+        value.as_bytes(),
+    )))]
 }
 
 fn is_committed(reply: &[RespValue]) -> bool {
@@ -772,7 +781,103 @@ async fn exec_during_a_script_commit(store: Arc<dyn RedisStore>) {
     assert_eq!(ra, nil(), "EXEC overwrote a script write made after WATCH");
 }
 
+// ------------------------- plain commands on watched keys (unlike Redis)
+
+/// A watches `k`, then runs `cmd` outside `MULTI`. B overwrites `written`
+/// before `cmd` can commit. Returns `cmd`'s reply and both sessions.
+async fn conflicting_plain_command(
+    store: Arc<dyn RedisStore>,
+    cmd: &'static [&'static str],
+    written: &str,
+) -> (Vec<RespValue>, Session, Session) {
+    let (store, gate) = gated(
+        store,
+        Park::BeforeCommit,
+        Some(TxIsolation::SerializableSnapshot),
+        false,
+    );
+    let (mut a, mut b) = sessions(store);
+    run(&mut b, &["set", "k", "1"]).await;
+    run(&mut b, &["set", "other", "1"]).await;
+    run(&mut a, &["watch", "k"]).await;
+
+    gate.arm();
+    let plain = tokio::spawn(async move { (run(&mut a, cmd).await, a) });
+    gate.wait_reached().await;
+    run(&mut b, &["set", written, "2"]).await;
+    gate.release.notify_one();
+    let (reply, a) = plain.await.unwrap();
+    (reply, a, b)
+}
+
+async fn conflicting_plain_read_keeps_watch(store: Arc<dyn RedisStore>) {
+    let (reply, mut a, mut b) = conflicting_plain_command(store, &["get", "k"], "k").await;
+    assert_eq!(reply, nil());
+
+    queue(&mut a, &["set", "k", "3"]).await;
+    assert_eq!(
+        run(&mut a, &["exec"]).await,
+        nil(),
+        "EXEC overwrote a write made after WATCH"
+    );
+    assert_eq!(run(&mut b, &["get", "k"]).await, bulk("2"));
+}
+
+/// The conflicting write is not applied either.
+async fn conflicting_plain_write_keeps_watch(store: Arc<dyn RedisStore>) {
+    let (reply, mut a, mut b) = conflicting_plain_command(store, &["incr", "k"], "k").await;
+    assert_eq!(reply, nil());
+    assert_eq!(run(&mut b, &["get", "k"]).await, bulk("2"));
+
+    queue(&mut a, &["set", "k", "3"]).await;
+    assert_eq!(run(&mut a, &["exec"]).await, nil());
+}
+
+/// The conflict may be on a key nobody watches. The command still replies nil,
+/// but the next EXEC has no reason to abort.
+async fn conflict_on_unwatched_key_does_not_abort_exec(store: Arc<dyn RedisStore>) {
+    let (reply, mut a, _b) =
+        conflicting_plain_command(store, &["mget", "k", "other"], "other").await;
+    assert_eq!(reply, nil());
+
+    queue(&mut a, &["set", "k", "3"]).await;
+    assert!(is_committed(&run(&mut a, &["exec"]).await));
+}
+
+/// `BZPOPMIN` commits its pop in a transaction of its own, so its conflict
+/// surfaces while the command runs rather than at the dispatcher's commit.
+async fn conflicting_blocking_pop_keeps_watch(store: Arc<dyn RedisStore>) {
+    let (store, gate) = gated(
+        store,
+        Park::BeforeCommit,
+        Some(TxIsolation::Snapshot),
+        false,
+    );
+    let (mut a, mut b) = sessions(store);
+    run(&mut b, &["zadd", "z", "1", "m", "2", "n"]).await;
+    run(&mut a, &["watch", "z"]).await;
+
+    gate.arm();
+    let pop = tokio::spawn(async move { (run(&mut a, &["bzpopmin", "z", "0"]).await, a) });
+    gate.wait_reached().await;
+    run(&mut b, &["zadd", "z", "3", "m"]).await;
+    gate.release.notify_one();
+    let (reply, mut a) = pop.await.unwrap();
+    assert_eq!(reply, nil());
+    assert_eq!(
+        run(&mut b, &["zcard", "z"]).await,
+        vec![RespValue::Integer(2)]
+    );
+
+    queue(&mut a, &["zadd", "z", "4", "o"]).await;
+    assert_eq!(run(&mut a, &["exec"]).await, nil());
+}
+
 both_backends!(
+    conflicting_plain_read_keeps_watch,
+    conflicting_plain_write_keeps_watch,
+    conflict_on_unwatched_key_does_not_abort_exec,
+    conflicting_blocking_pop_keeps_watch,
     script_write,
     script_write_undeclared_key,
     evalsha_write,
