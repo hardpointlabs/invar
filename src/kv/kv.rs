@@ -22,11 +22,12 @@
 //! Two concurrent mutating transactions whose write sets intersect cannot
 //! both commit, the loser's commit returns `Error::Conflict`.
 //!
-//! Commit returning `Ok(())` means the write is applied and visible; it does
-//! NOT yet mean the write is guaranteed durable against an unclean process
-//! restart — that depends on backend-level configuration (e.g. SlateDB's
-//! `AwaitDurable`) which is not currently exposed as a per-call choice on
-//! this interface.
+//! What a successful commit promises depends on the store's [`AckLevel`]
+//! (RFC 0004). At [`AckLevel::Buffered`], the default, commit returning `Ok`
+//! means the write is applied and visible, but NOT yet that it would survive
+//! an unclean process restart. At [`AckLevel::Durable`], commit returns `Ok`
+//! only once the write is durable; if durability cannot be confirmed, commit
+//! returns an error and the write's outcome is unknown.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -50,8 +51,60 @@ pub enum Error {
     Conflict,
     #[error("Closed")]
     DbClosed,
+    /// Another process has opened the store as writer, so this one can no
+    /// longer commit.
+    #[error("Fenced: another process is now the writer")]
+    Fenced,
+    /// A commit at [`AckLevel::Durable`] could not be confirmed durable in
+    /// time. The write may or may not have been applied.
+    #[error("Timeout: write not confirmed durable in time, outcome unknown")]
+    Timeout,
     #[error("Undefined")]
     Undefined,
+}
+
+/// When a commit is acknowledged (RFC 0004). Set store-wide with
+/// [`KeyValueStore::set_ack_level`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AckLevel {
+    /// Commit returns once the write is applied in memory. Durability follows
+    /// on the backend's next flush.
+    #[default]
+    Buffered,
+    /// Commit returns only once the write would survive the process dying.
+    Durable,
+}
+
+impl AckLevel {
+    pub(crate) fn to_u8(self) -> u8 {
+        match self {
+            AckLevel::Buffered => 0,
+            AckLevel::Durable => 1,
+        }
+    }
+
+    pub(crate) fn from_u8(v: u8) -> Self {
+        match v {
+            1 => AckLevel::Durable,
+            _ => AckLevel::Buffered,
+        }
+    }
+}
+
+/// Store-wide acknowledgement level, shared between a store and its open
+/// transactions so that a change applies to commits already in progress.
+#[derive(Debug, Default)]
+pub(crate) struct AckState(std::sync::atomic::AtomicU8);
+
+impl AckState {
+    pub(crate) fn get(&self) -> AckLevel {
+        AckLevel::from_u8(self.0.load(std::sync::atomic::Ordering::Acquire))
+    }
+
+    pub(crate) fn set(&self, level: AckLevel) {
+        self.0
+            .store(level.to_u8(), std::sync::atomic::Ordering::Release);
+    }
 }
 
 /// Key-value pair, with optional TTL and metadata, to write to the store.
@@ -279,4 +332,12 @@ pub trait KeyValueStore: Send + Sync + 'static {
     async fn drop_prefix(&self, prefix: &[u8]) -> Result<(), Error>;
 
     async fn await_until(&self, handle: WriteHandle, duration: Duration) -> Result<bool, Error>;
+
+    /// Sets when commits are acknowledged, for every transaction from now
+    /// on, including transactions already open: the level is read after a
+    /// commit has been applied, just before it returns.
+    fn set_ack_level(&self, level: AckLevel);
+
+    /// The current acknowledgement level.
+    fn ack_level(&self) -> AckLevel;
 }

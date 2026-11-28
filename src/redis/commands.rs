@@ -3437,6 +3437,12 @@ mod tests {
         ) -> Result<bool, kv::kv::Error> {
             self.inner.await_until(h, d).await
         }
+        fn set_ack_level(&self, level: kv::kv::AckLevel) {
+            self.inner.set_ack_level(level)
+        }
+        fn ack_level(&self) -> kv::kv::AckLevel {
+            self.inner.ack_level()
+        }
     }
 
     /// Runs `SET k v` on a session allowed `retry_count` retries over a store

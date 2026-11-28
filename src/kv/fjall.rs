@@ -17,7 +17,8 @@
 use crate::time::now_millis;
 use std::collections::Bound;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -27,7 +28,8 @@ use fjall::{
 };
 
 use crate::kv::{
-    BoxFuture, Entry, Error, Item, KeyValueIterator, KeyValueStore, Tx, TxIsolation, WriteHandle,
+    AckLevel, AckState, BoxFuture, Entry, Error, Item, KeyValueIterator, KeyValueStore, Tx,
+    TxIsolation, WriteHandle,
 };
 
 /// Length of the metadata byte prefix on each stored value.
@@ -99,6 +101,7 @@ fn decode_item(key: Vec<u8>, stored: &[u8]) -> Result<Item, Error> {
 pub struct FjallDb {
     db: OptimisticTxDatabase,
     keyspace: OptimisticTxKeyspace,
+    acks: Arc<AckState>,
 }
 
 impl FjallDb {
@@ -126,7 +129,20 @@ impl FjallDb {
         let keyspace = db
             .keyspace("default", KeyspaceCreateOptions::default)
             .map_err(map_fjall_error)?;
-        Ok(FjallDb { db, keyspace })
+        Ok(FjallDb {
+            db,
+            keyspace,
+            acks: Arc::new(AckState::default()),
+        })
+    }
+
+    /// At [`AckLevel::Durable`], syncs the journal to disk so the write just
+    /// committed survives the process dying.
+    fn acknowledge(db: &OptimisticTxDatabase, acks: &AckState) -> Result<(), Error> {
+        if acks.get() == AckLevel::Durable {
+            db.persist(PersistMode::SyncAll).map_err(map_fjall_error)?;
+        }
+        Ok(())
     }
 
     /// Returns the number of items currently stored in the default keyspace.
@@ -146,6 +162,9 @@ impl KeyValueStore for FjallDb {
         Ok(Box::new(FjallTx {
             keyspace: self.keyspace.clone(),
             tx: Mutex::new(tx),
+            db: self.db.clone(),
+            acks: self.acks.clone(),
+            wrote: AtomicBool::new(false),
         }))
     }
 
@@ -203,8 +222,17 @@ impl KeyValueStore for FjallDb {
         Ok(false)
     }
 
+    fn set_ack_level(&self, level: AckLevel) {
+        self.acks.set(level);
+    }
+
+    fn ack_level(&self) -> AckLevel {
+        self.acks.get()
+    }
+
     async fn destroy(&self) -> Result<(), Error> {
-        self.keyspace.inner().clear().map_err(map_fjall_error)
+        self.keyspace.inner().clear().map_err(map_fjall_error)?;
+        Self::acknowledge(&self.db, &self.acks)
     }
 
     async fn drop_prefix(&self, prefix: &[u8]) -> Result<(), Error> {
@@ -221,7 +249,7 @@ impl KeyValueStore for FjallDb {
             tx.remove(&self.keyspace, key);
         }
         match tx.commit().map_err(map_fjall_error)? {
-            Ok(()) => Ok(()),
+            Ok(()) => Self::acknowledge(&self.db, &self.acks),
             Err(_) => Err(Error::Conflict),
         }
     }
@@ -230,6 +258,11 @@ impl KeyValueStore for FjallDb {
 struct FjallTx {
     keyspace: OptimisticTxKeyspace,
     tx: Mutex<OptimisticWriteTx>,
+    db: OptimisticTxDatabase,
+    acks: Arc<AckState>,
+    /// Whether this transaction wrote anything, so a read-only commit at
+    /// [`AckLevel::Durable`] doesn't sync to disk.
+    wrote: AtomicBool,
 }
 
 #[async_trait]
@@ -248,12 +281,14 @@ impl Tx for FjallTx {
         let stored = encode(entry.metadata_byte(), entry.ttl_value(), entry.value());
         let mut tx = self.tx.lock().expect("fjall tx mutex poisoned");
         tx.insert(&self.keyspace, entry.key(), stored);
+        self.wrote.store(true, Ordering::Release);
         Ok(())
     }
 
     fn delete(&self, key: &[u8]) -> Result<(), Error> {
         let mut tx = self.tx.lock().expect("fjall tx mutex poisoned");
         tx.remove(&self.keyspace, key);
+        self.wrote.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -287,6 +322,10 @@ impl Tx for FjallTx {
     async fn commit(self: Box<Self>) -> Result<Option<WriteHandle>, Error> {
         let tx = self.tx.into_inner().expect("fjall tx mutex poisoned");
         match tx.commit().map_err(map_fjall_error)? {
+            Ok(()) if self.wrote.load(Ordering::Acquire) => {
+                FjallDb::acknowledge(&self.db, &self.acks)?;
+                Ok(None)
+            }
             Ok(()) => Ok(None),
             Err(Conflict) => Err(Error::Conflict),
         }
@@ -1069,6 +1108,21 @@ mod tests {
             })
             .await
             .expect("store corrupted after concurrent updates");
+        store.close().await.expect("close");
+    }
+
+    // --- Durable acknowledgements (RFC 0004) ---
+
+    #[tokio::test]
+    async fn durable_level_commits_and_reads_back() {
+        let store = temp_store();
+        assert_eq!(store.ack_level(), AckLevel::Buffered);
+        store.set_ack_level(AckLevel::Durable);
+        assert_eq!(store.ack_level(), AckLevel::Durable);
+        write(&store, b"k", b"v").await;
+        store.drop_prefix(b"none:").await.expect("drop_prefix");
+        assert_eq!(read_value(&store, b"k").await.expect("read"), b"v");
+        store.destroy().await.expect("destroy");
         store.close().await.expect("close");
     }
 }

@@ -520,6 +520,12 @@ impl RedisStore for PauseStore {
     async fn await_until(&self, h: WriteHandle, d: Duration) -> Result<bool, KvError> {
         self.inner.await_until(h, d).await
     }
+    fn set_ack_level(&self, level: kv::kv::AckLevel) {
+        self.inner.set_ack_level(level)
+    }
+    fn ack_level(&self) -> kv::kv::AckLevel {
+        self.inner.ack_level()
+    }
 }
 
 impl Gate {

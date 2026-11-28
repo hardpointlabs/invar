@@ -7,7 +7,7 @@
 //! [`RedisStore`] and blanket-implemented for every concrete backend.
 
 use async_trait::async_trait;
-use kv::kv::{Error as KvError, Error, KeyValueStore, Tx, TxIsolation, WriteHandle};
+use kv::kv::{AckLevel, Error as KvError, Error, KeyValueStore, Tx, TxIsolation, WriteHandle};
 use std::time::Duration;
 
 /// The subset of [`KeyValueStore`] the Redis server needs, usable through a
@@ -31,6 +31,12 @@ pub trait RedisStore: Send + Sync + 'static {
     async fn drop_prefix(&self, prefix: &[u8]) -> Result<(), KvError>;
 
     async fn await_until(&self, handle: WriteHandle, duration: Duration) -> Result<bool, Error>;
+
+    /// Sets when commits are acknowledged (RFC 0004).
+    fn set_ack_level(&self, level: AckLevel);
+
+    /// The current acknowledgement level.
+    fn ack_level(&self) -> AckLevel;
 }
 
 #[async_trait]
@@ -57,5 +63,13 @@ impl<S: KeyValueStore> RedisStore for S {
 
     async fn await_until(&self, handle: WriteHandle, duration: Duration) -> Result<bool, Error> {
         KeyValueStore::await_until(self, handle, duration).await
+    }
+
+    fn set_ack_level(&self, level: AckLevel) {
+        KeyValueStore::set_ack_level(self, level)
+    }
+
+    fn ack_level(&self) -> AckLevel {
+        KeyValueStore::ack_level(self)
     }
 }
